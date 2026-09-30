@@ -19,7 +19,7 @@ description: Find and plan documentation updates for zxfer behavior changes, pub
    - `packaging/README.txt`
    - `man/`
    - `.github/`
-3. If replication logic, state initialization, or feature flow changes, check Mermaid diagrams in `docs/architecture.md` and `README.md`.
+3. If replication logic, state initialization, or feature flow changes, check the Mermaid diagrams in `docs/architecture.md`; if the validation flow or VM matrix changes, check the two in `docs/testing.md`.
 4. If commands, dependencies, installed paths, test entry points, packaging, or release expectations change, check related packaging and workflow files.
 5. If no docs update is needed, state why in the final summary.
 

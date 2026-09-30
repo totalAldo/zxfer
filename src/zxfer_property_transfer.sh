@@ -1176,7 +1176,8 @@ zxfer_transfer_properties() {
 	l_transfer_source_pvs=$g_zxfer_required_properties_result
 
 	# The -o list, already validated at startup; the initial source must hold
-	# every -o property before the destination is touched.
+	# every -o property before any destination property changes (-d may already
+	# have destroyed destination-only snapshots).
 	zxfer_read_override_properties "$g_option_o_override_property"
 	l_transfer_override_properties=$g_zxfer_override_properties_result
 	if [ "$l_transfer_is_initial_source" -eq 1 ]; then

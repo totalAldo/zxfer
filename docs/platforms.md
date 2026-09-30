@@ -81,15 +81,15 @@ blindly inheriting the caller's `PATH`.
 
 ```mermaid
 flowchart LR
-    A["Local invocation"] --> B["Build trusted secure PATH from defaults plus ZXFER_SECURE_PATH or ZXFER_SECURE_PATH_APPEND"]
+    A["Local invocation"] --> B["Build the trusted secure PATH: ZXFER_SECURE_PATH (else the default allowlist) plus ZXFER_SECURE_PATH_APPEND"]
     B --> C{"-O origin host set?"}
     B --> D{"-T target host set?"}
     B --> E["Resolve local helpers from the trusted PATH"]
-    C -->|yes| F["Resolve origin helpers when remote origin commands need them"]
-    D -->|yes| G["Resolve target helpers when remote target commands need them"]
-    F --> H["Resolve origin-side zfs and optional helper commands from the origin secure PATH"]
-    G --> I["Resolve target-side zfs and optional helper commands from the target secure PATH"]
-    E --> J["zxfer_send_receive() and other helpers use the resolved command set"]
+    C -->|yes| F["Probe the origin host once at startup"]
+    D -->|yes| G["Probe the target host once at startup (a spec equal to -O shares the origin's probe)"]
+    F --> H["Resolve origin-side zfs, the -z compressor and the -e cat at startup, and parallel only when -j full discovery needs it, from the secure PATH on the origin"]
+    G --> I["Resolve target-side zfs and the -z decompressor at startup, and cat when -k writes metadata, from the secure PATH on the target"]
+    E --> J["zxfer_zfs_send_receive() and other helpers use the resolved command set"]
     H --> J
     I --> J
 ```
@@ -101,6 +101,7 @@ Important environment variables:
 - `ZXFER_BACKUP_DIR`: select the absolute property-backup metadata root
 - `ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1`: emit verbatim `invocation` and `last_command` in structured failure reports and any `ZXFER_ERROR_LOG` mirror; unsafe for shared logs
 - `ZXFER_SSH_USER_KNOWN_HOSTS_FILE`: pin zxfer-managed ssh host-key checks to a specific absolute known-hosts file
+- `ZXFER_SSH_BATCH_MODE`, `ZXFER_SSH_STRICT_HOST_KEY_CHECKING`: replace the `yes` value zxfer passes as `BatchMode` / `StrictHostKeyChecking`; any other value weakens that check
 - `ZXFER_SSH_USE_AMBIENT_CONFIG=1`: opt out of zxfer's default `BatchMode=yes` / `StrictHostKeyChecking=yes` transport policy
 
 Default allowlist:
@@ -109,8 +110,9 @@ Default allowlist:
 /sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
 ```
 
-On macOS, the integration harness also prepends `/usr/local/zfs/bin` when that
-OpenZFS-on-macOS path exists.
+On macOS, the integration and performance harnesses add `/usr/local/zfs/bin`
+to `ZXFER_SECURE_PATH_APPEND` (after the default allowlist) when that
+OpenZFS-on-macOS `zfs` exists.
 
 The computed allowlist also becomes the live runtime `PATH`, so an explicit
 `ZXFER_SECURE_PATH` override must include every trusted helper directory that
@@ -155,12 +157,15 @@ matters especially when:
 - restore mode (`-e`) needs a remote `cat` on the origin, remote backup
   writes for `-k` use `cat` on the target, and `-k` over `-O` lists the
   origin's backup storage directories once per run, with `find` when the
-  source dataset already has a storage directory there
+  source dataset already has a storage directory there, and reads each
+  forwarded alias found there with the origin's `cat`
 - `-j` uses explicit per-dataset source discovery on the executing origin host
   in the changed-source/full discovery path whenever `jobs > 1`. The clean
-  recursive no-op proof uses one recursive `name,guid` source stream and defers
-  `parallel` until that heavier path is needed. Local-origin and remote-origin
-  full discovery runs require a resolved `parallel` helper on that host. zxfer
+  recursive no-op proof uses one recursive `name,guid` source stream and never
+  runs `parallel`. Without `-O`, `-j` still requires a resolved local
+  `parallel` at startup, before any ssh master or discovery starts, even when
+  the proof would find nothing to send; with `-O`, the origin's `parallel` is
+  looked up only when full discovery needs it. zxfer
   intentionally validates only helper existence through the secure-PATH model
   and assumes the operator or package supplied an implementation compatible
   with the GNU Parallel-style options used by the rendered pipeline. zxfer fails
@@ -234,11 +239,12 @@ prints `PROP<TAB>-<TAB>-` and exits 0 on OpenZFS 2.4.1 (Ubuntu) and FreeBSD,
 and zxfer leaves such a property out; `hostile_property_record_shaped_value_test`
 checks that answer, which the OmniOS lane has yet to confirm.
 
-zxfer-managed ssh transports also now force `BatchMode=yes` and
-`StrictHostKeyChecking=yes` by default. They still rely on the local ssh
-configuration's known-hosts sources unless `ZXFER_SSH_USER_KNOWN_HOSTS_FILE`
-is set, and only `ZXFER_SSH_USE_AMBIENT_CONFIG=1` disables the zxfer-managed
-ssh safety policy entirely.
+zxfer-managed ssh transports pass `BatchMode=yes` and
+`StrictHostKeyChecking=yes` by default. `ZXFER_SSH_BATCH_MODE` and
+`ZXFER_SSH_STRICT_HOST_KEY_CHECKING` replace either value, the local ssh
+configuration's known-hosts sources apply unless
+`ZXFER_SSH_USER_KNOWN_HOSTS_FILE` is set, and `ZXFER_SSH_USE_AMBIENT_CONFIG=1`
+drops all three zxfer-managed options.
 
 In practice, the origin and target roles stay separate:
 
@@ -248,7 +254,7 @@ flowchart TD
     B --> C["zfs send and source snapshot discovery"]
     B --> D["parallel helper when -j > 1"]
     B --> E["Optional source-side compression helper"]
-    B --> F["Remote cat when -e reads backup metadata, and find when -k lists an existing storage directory on the origin"]
+    B --> F["Remote cat when -e reads backup metadata or -k reads an earlier hop's forwarded alias, and find when -k lists an existing storage directory on the origin"]
 
     G["Target role via -T"] --> H["Remote destination-side helpers"]
     H --> I["Destination discovery: name,guid snapshot listing, then the dataset inventory and pool probe when needed"]

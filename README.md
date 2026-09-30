@@ -178,7 +178,8 @@ Local-only runs do not resolve `ssh`; it is required when `-O` or `-T` needs a
 remote transport.
 
 zxfer-managed ssh connections default to `BatchMode=yes` and
-`StrictHostKeyChecking=yes`. Use `ZXFER_SSH_USER_KNOWN_HOSTS_FILE` to pin an
+`StrictHostKeyChecking=yes`; `ZXFER_SSH_BATCH_MODE` and
+`ZXFER_SSH_STRICT_HOST_KEY_CHECKING` replace either value. Use `ZXFER_SSH_USER_KNOWN_HOSTS_FILE` to pin an
 absolute known-hosts file, or `ZXFER_SSH_USE_AMBIENT_CONFIG=1` if you need to
 fall back to the ambient local ssh policy.
 

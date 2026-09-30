@@ -71,9 +71,10 @@ machinery (socket lock waits, capability cache waits and cache bootstraps,
 cache-object writes and readbacks, other-side property reads) still print and
 always read 0. While the run is
 active, `-V` also prints
-prefixed remote ssh commands, remote probe commands, and ssh control-socket
-check/open commands so a slow remote bootstrap shows the exact in-flight
-command.
+prefixed remote ssh commands, remote probe commands, and the ssh
+control-master open and close commands (`Opening ssh control socket [...]`
+before it opens, `Closing origin|target ssh control socket: ...` after it
+closes), so a slow remote bootstrap shows the exact in-flight command.
 
 The manual performance runner in `tests/run_perf_tests.sh` consumes these
 profile lines when producing sample and summary artifacts. Prefer
@@ -159,7 +160,8 @@ datasets while job slots remain.
 ./zxfer -v -x '^tank/projects/(tmp|build-cache)$' -R tank/projects backup/projects
 ```
 
-Use anchored expressions when you want exact matches instead of prefix matches.
+The pattern matches anywhere in a dataset name, so an unanchored `tmp` also
+excludes `tank/projects/build-tmp`; anchor it, as above, to match exact names.
 
 ## Snapshot Cleanup And Safety
 
@@ -229,7 +231,10 @@ Name each property once. A property named twice, as in
 `-o compression=lz4,compression=gzip`, or an item without `NAME=` is a usage
 error (exit 2) found before any `zfs` command runs, so it also stops a `-n`
 run. Every `-o` property must also exist on the source root; one that does not
-stops the run, with exit 2, before the destination is read or changed.
+stops the run, with exit 2, when the root's properties are read: before any
+send or destination property change, but after discovery has listed the
+destination and, with `-d`, after the root's destination-only snapshots are
+destroyed.
 
 ### `-I properties,to,ignore` Skip selected properties
 
@@ -373,8 +378,9 @@ must be preserved.
 	-N tank/apps/api backup/cutover/api
 ```
 
-`-c` requires `-m` and is primarily for illumos or Solaris migrations where
-services should be disabled before unmounting the source.
+`-c` requires `-m` and SMF: without `svcadm` it is a usage error, so it works
+only on illumos or Solaris, where services should be disabled before
+unmounting the source.
 
 ## Notifications
 
@@ -391,7 +397,8 @@ services should be disabled before unmounting the source.
 ```
 
 Use `-B` only on the last `zxfer` invocation in a script; use `-b` on earlier
-steps if you want only failure alerts.
+steps if you want only failure alerts. Beeps need the FreeBSD speaker(4)
+device; on other hosts zxfer skips them.
 
 ## Composite Recipes
 

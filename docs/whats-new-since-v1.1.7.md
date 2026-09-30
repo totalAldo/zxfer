@@ -100,8 +100,10 @@ allowlist and resolves required tools to absolute paths.
 Current behavior:
 
 - local helper lookup uses a secure PATH model
-- remote helper lookup resolves `zfs`, `cat`, `parallel` when `-j > 1`
-  requires it, and compression helpers on the remote host
+- remote helper lookup resolves `zfs` on each remote host plus only what
+  the options need: `parallel` on the `-O` host when `-j > 1` requires it,
+  `cat` for `-e` on the `-O` host or `-k` on the `-T` host, and the `-z`
+  compression and decompression helpers
 - zxfer does not assume the same absolute helper paths exist everywhere
 
 What to do:
@@ -316,8 +318,10 @@ whether you still need it.
 - per-run ssh control sockets, in-memory remote capability state, and
   lock-free validated `ZXFER_ERROR_LOG` appends
 - faster large runs: each dataset is planned from its own slice of the
-  snapshot listings, `-P` no longer grows with the square of the dataset
-  count, and `-e` checks its backup file once
+  snapshot listings, a `-P` lookup reads only that dataset's stored
+  property list (total work still grows with the square of the dataset
+  count, but with a much smaller constant), and `-e` checks its backup file
+  once
 - a destination that another tool changes after discovery is seen by the
   next pass; only a dataset whose snapshots zxfer's own `-d` destroyed is
   listed again before its send

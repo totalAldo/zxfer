@@ -87,8 +87,11 @@ neither it nor `tests/validation_map.tsv` is evaluated as shell.
 - `bootstrap` installs the pinned lint tools; `doctor` reports shells, QEMU,
   ZFS commands and cached tools without downloading or running them.
 
-`quick` and `full` run four suites at a time; `ZXFER_VALIDATE_JOBS` changes
-that. No profile runs `tests/run_integration_zxfer.sh` on the host.
+`quick` and the unit step of `full` run four suites at a time;
+`ZXFER_VALIDATE_JOBS` changes that. The coverage step of `full` reruns every
+suite at the unit runner's default (the CPU count, at most 4), which
+`ZXFER_VALIDATE_JOBS` does not change. No profile runs
+`tests/run_integration_zxfer.sh` on the host.
 
 ## Unit Runner
 
@@ -146,7 +149,7 @@ Contract suites come first:
 | `test_contract_cli_golden.sh` | Help, usage-error, dependency-failure and failure-report output byte for byte (`tests/golden/cli_*.golden`; rewrite with `ZXFER_UPDATE_GOLDEN=1` and review the diff), with fail-loud zfs, zstd and ssh stand-ins; the reported version matches `packaging/zxfer.spec`. |
 | `test_contract_failures.sh` | Fail-closed behavior when any zfs or ssh call fails (see Fail-Closed Sweep), plus single runs for the EXIT trap's status and report when its own cleanup fails, dry runs with remote hosts, `-m`/`-c` service handling through a mock `svcadm`, and the unsafe-`TMPDIR` fallback. |
 | `test_contract_planning.sh` | The zfs argv of whole runs: GUID-aware planning, discovery's no-op proof and listings (`-x`, `-j`, `-O -Z`), fail-closed listings and the failure stage they report, `-d` deletes and their source recheck, the `-F` rollback and divergence, `-g`, the SunOS existence probes, `-Y` passes, `-j` order and cleanup, and the property pass. |
-| `test_contract_properties.sh` | `-P` property argument boundaries, the recursive prefetch and its read races, the set/inherit plan, creates with their creation-time properties, `-U`, per-dataset fallback reads, read and change failures, and the `-o` rules: a repeated item is a usage error before any zfs call (the CLI goldens also pin a malformed one), and a property the source lacks stops the run before the destination is touched. |
+| `test_contract_properties.sh` | `-P` property argument boundaries, the recursive prefetch and its read races, the set/inherit plan, creates with their creation-time properties, `-U`, per-dataset fallback reads, read and change failures, and the `-o` rules: a repeated item is a usage error before any zfs call (the CLI goldens also pin a malformed one), and a property the source lacks stops the run before any send or destination property change. |
 | `test_contract_remote.sh` | `-O`/`-T` transport: discovery and property reads over the target master, wrapper host specs, the ssh policy environment, one master per host spec and its close at exit, capability probes, their retries and the dependency errors they report. |
 | `test_contract_send_receive.sh` | Seeding, the re-plan after a `-d` destroy, `-n`/`-s`/`-m`/`-Y` passes, the post-seed property pass, `-j` scheduling and job failures, `-D` progress templates, probes and failures, and `-z` across every ssh hop. |
 | `test_contract_verbose.sh` | `-v`/`-V` output for hostile property values, and `-V` counters that start at zero whatever the environment holds. |
@@ -319,6 +322,7 @@ sequenceDiagram
   `tests/vm/guest_manifest.tsv` holds the guest metadata, validated before
   use and pinned by `tests/test_run_vm_matrix.sh`.
 - Options: `--guest NAME`, `--jobs N` (guests in parallel), `--test-layer`,
+  `--backend auto|qemu|ci-managed`, `--artifacts-dir`, `--cache-dir`,
   `--only-test NAME[,NAME]` and `--failed-tests-only` (integration layer
   only), `--stream-guest-output`, `--preserve-failed-guests`.
 - Environment: `ZXFER_VM_ARTIFACT_ROOT`, `ZXFER_VM_CACHE_DIR`,
@@ -327,15 +331,20 @@ sequenceDiagram
   `ZXFER_VM_PERF_PROFILE` (`smoke` or `standard`),
   `ZXFER_VM_PERF_BASELINE_REF` (default `upstream-compat-final`),
   `ZXFER_VM_PERF_CASES`, `ZXFER_VM_QEMU_AARCH64_EFI`, and
-  `ZXFER_VM_CI_MANAGED_GUEST` (selects the `ci-managed` backend for one
-  in-guest CI job; `perf-compare` needs `qemu`).
-- Hosts: Linux and macOS with QEMU, and Windows through WSL2. On `amd64`
-  hosts with KVM, and Intel Macs, guests run hardware-virtualized `amd64`;
-  on Apple Silicon and other `arm64` hosts Ubuntu and FreeBSD use `arm64`
-  images and OmniOS stays a best-effort TCG lane. Host tools:
-  `qemu-system-x86_64`, `qemu-system-aarch64` with aarch64 UEFI firmware,
-  `qemu-img`, `curl`, `python3`, `ssh`, `ssh-keygen`, `ssh-keyscan`, `tar`,
-  `xz`.
+  `ZXFER_VM_CI_MANAGED_GUEST=NAME` (makes `--backend auto` pick `ci-managed`,
+  which runs that one guest's layer on the current machine, for a runner
+  already inside the guest; no workflow sets it, and `perf-compare` needs
+  `qemu`).
+- Hosts: Linux and macOS with QEMU, and Windows through WSL2. On Linux
+  `amd64` hosts with KVM, and Intel Macs, guests run hardware-virtualized
+  `amd64`; on Apple Silicon and other `arm64` hosts Ubuntu and FreeBSD use
+  `arm64` images and OmniOS stays a best-effort TCG lane. WSL2 always runs
+  guests under TCG, and the `ci` profile refuses TCG for its Ubuntu guest.
+  Host tools: `qemu-system-x86_64`, `qemu-system-aarch64` with aarch64 UEFI
+  firmware, `qemu-img`, `curl`, `python3`, `ssh`, `ssh-keygen`, `ssh-keyscan`,
+  `tar`, `xz`, and `sha256sum` or `shasum`; FreeBSD guests also need a
+  `cidata` image builder (`hdiutil` on macOS; `xorriso`, `genisoimage` or
+  `mkisofs` on Linux and WSL2), and `perf-compare` needs `git`.
 - Boot: Ubuntu gets a 16G overlay; FreeBSD uses a `cidata` config drive; the
   runner pins the guest's ed25519 key and connects only with
   `StrictHostKeyChecking=yes`, requires three consecutive SSH probes on
@@ -366,8 +375,9 @@ ZFS host; without `--yes` it asks once before creating pools.
 - Artifacts: `run-info.tsv`, `samples.tsv` (every warmup and sample, with the
   `-V` counters; counters an older binary lacks stay empty), `summary.tsv`
   and `summary.md` (measured samples only), `raw/`, and with a baseline
-  `compare.tsv` and `compare.md`. A regression (wall, startup or cleanup time
-  up, or throughput down, by more than 10%) is a warning; only setup, zxfer
+  `compare.tsv` and `compare.md`. A regression (any averaged metric, `-V`
+  counters included, up by more than `ZXFER_PERF_REGRESSION_THRESHOLD_PCT`,
+  default 10%, or throughput down by as much) is a warning; only setup, zxfer
   or correctness failures fail the run.
 - `upstream-compat-final` needs a BSD-userland guest (GNU `mktemp` rejects
   its template) and fails the property fanout cases on current OpenZFS; limit

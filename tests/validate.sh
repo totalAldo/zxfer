@@ -47,7 +47,8 @@ the offline budget and unit checks. It never downloads tools, starts VMs,
 invokes ZFS, or runs the direct host integration harness.
 
 Set ZXFER_VALIDATE_JOBS to a positive integer to change the default four-way
-unit-suite concurrency used by quick and full.
+unit-suite concurrency of quick and of full's unit step; full's coverage step
+uses the unit runner's default (the CPU count, at most 4).
 EOF
 }
 

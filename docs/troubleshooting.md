@@ -48,9 +48,10 @@ What it usually means:
 All three are usage errors: zxfer prints the usage text and exits 2 with
 `failure_class: usage`. The first two are found during CLI validation
 (`failure_stage: cli validation`), before any `zfs` command runs, so they also
-stop a `-n` run; the third is reported once the source properties are read,
-before the destination is read or changed (`failure_stage: property
-transfer`). `Failed to plan dataset properties.` is different: the property
+stop a `-n` run; the third is reported once the source root's properties are
+read (`failure_stage: property transfer`): before any send or destination
+property change, but after discovery has listed the destination and, with
+`-d`, after the root's destination-only snapshots are destroyed. `Failed to plan dataset properties.` is different: the property
 plan program itself failed, so check the stderr lines before it.
 
 ## Remote Dependency Probe Failures
@@ -289,8 +290,10 @@ What to inspect:
 - `raw/<case>/*.mock_ssh.log` when a remote-mock case changes round-trip
   counts
 
-If `startup_latency_ms` is `0`, zxfer did not dispatch a live send/receive
-pipeline for that sample. If `cleanup_ms` increases unexpectedly, inspect the
+If `startup_latency_ms` and `send_receive_pipeline_commands` are both `0`,
+zxfer did not dispatch a live send/receive pipeline for that sample. Where
+`date` lacks `%N` (BSD, illumos, BusyBox) the `_ms` timings have whole-second
+resolution, so a fast sample can also read `0`. If `cleanup_ms` increases unexpectedly, inspect the
 same stderr log for trap-time cleanup warnings before treating the sample as a
 pure throughput regression.
 
@@ -380,7 +383,11 @@ ZXFER_ERROR_LOG=/var/log/zxfer/error.log \
 ./zxfer -v -R tank/src backup/dst
 ```
 
-The log file receives the same structured block that zxfer writes to `stderr`:
+The log file receives the same structured block that zxfer writes to `stderr`
+(abridged here: a full report also carries `timestamp`, `hostname`,
+`zxfer_version`, `exit_status`, `message`, `current_source`,
+`current_destination`, `dry_run`, `mode`, `yield_iterations` and
+`invocation`, plus `origin_host` and `target_host` when set):
 
 ```text
 zxfer: failure report begin

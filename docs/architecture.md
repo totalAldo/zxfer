@@ -75,8 +75,9 @@ module or a chain of setters.
   local and rendered-remote directory/write/read/storage-listing protections,
   rows buffered in memory and published at completed property checkpoints and
   run end, per-dataset forwarded provenance (each alias read at most once per
-  run), and the `-e` restore lookup: the file is validated once at startup,
-  its rows go to the property row store, and each dataset looks its row up
+  run), and the `-e` restore lookup: the file is validated once per live
+  pass, before discovery, its rows go to the property row store, and each
+  dataset looks its row up
 - [../src/zxfer_property_state.sh](../src/zxfer_property_state.sh): the
   name-list property parser (`ZXFER_PROPERTY_NORMALIZE_AWK`: per-dataset merge
   and recursive prefetch, trusting only a unique-headed run of one-line
@@ -135,7 +136,8 @@ module or a chain of setters.
 
 [../src/zxfer_cleanup_child_wrapper.sh](../src/zxfer_cleanup_child_wrapper.sh)
 is not in the manifest: it is the standalone script a background shell runs
-under when the host offers no process-group isolation (see below).
+under when the host offers no process-group isolation (see below), and the
+one the `-D` progress dialog always runs under.
 
 ## Initialization And State Ownership
 
@@ -419,7 +421,7 @@ lookup takes the dataset's first index line and reads that row alone,
 whatever the size of every other list; a row file that is missing or lacks
 its final line feed is a miss, which only forces a live read. The `-e`
 restore rows live in the same directory (prefix `r`, one index line per
-relative key), stored once when startup validates the backup file. A
+relative key), stored when each live pass validates the backup file. A
 destination receive puts a tombstone line ahead of the dataset's rows, and a
 create, set or inherit also strips its descendants' lines. Property lists
 reach `awk` only through `ENVIRON`, never `awk -v`, and every call sets each
@@ -606,7 +608,8 @@ flowchart TD
     A["Start zxfer_process_source_dataset(source) with failure_stage replication"] --> B["Map source to actual destination dataset and select its slices"]
     B --> C["Plan from the dataset's slices of the source and destination record files"]
     C --> D["Find last common snapshot and build transfer list"]
-    D --> E{"-d enabled?"}
+    D --> D1["Refuse destination snapshots that share a source snapshot's name but not its guid, unless -d and -F are both set (then warn and converge)"]
+    D1 --> E{"-d enabled?"}
     E -- "yes" --> F["Read creation times in one batched query (rollback eligibility and -g), then delete destination-only snapshots"]
     E -- "no" --> G{"Property pass required?"}
     F --> G
@@ -834,11 +837,11 @@ an empty destination.
 flowchart LR
     A["Enter zxfer_transfer_properties()"] --> B["Collect raw live source properties and validate source create metadata"]
     B --> C{"-e restore mode?"}
-    C -- "yes" --> D["Replace the effective source property view with the exact v2 relative backup row, looked up in the rows stored when startup validated the file"]
+    C -- "yes" --> D["Replace the effective source property view with the exact v2 relative backup row, looked up in the rows stored when this pass validated the file"]
     C -- "no" --> E["Keep the live effective source property view"]
     D --> F["Backfill required creation-time properties"]
     E --> F
-    F --> G["Check every -o property against the initial source, before the destination is read, probed or changed"]
+    F --> G["Check every -o property against the initial source, before any destination property is read or changed (-d may already have destroyed destination-only snapshots)"]
     G --> I{"Does the destination exist (recursive listing, else a live probe)?"}
     I -- "no" --> J["Plan the creation and override sets with the readonly, -I and dataset-type -U filters in one awk, and create the destination (a child drops inheritable -o overrides its parent already supplies)"]
     I -- "yes" --> K["Read destination properties, derive and diff them in the same plan awk, adjust child inheritance, and apply zfs set or inherit changes"]

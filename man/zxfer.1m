@@ -27,7 +27,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.TH "ZXFER" "1M" "April 11, 2026" "zxfer" "System Administration Commands"
+.TH "ZXFER" "1M" "September 30, 2026" "zxfer" "System Administration Commands"
 .nh
 .if n .ad l
 .SH "NAME"
@@ -36,17 +36,15 @@
 .SH "SYNOPSIS"
 .HP 6n
 \fBzxfer\fR
-[\fB\-b\fR]
-[\fB\-B\fR]
+[\fB\-b\fR\ |\ \fB\-B\fR]
 [\fB\-c\fR\ \fIFMRI|pattern[ FMRI|pattern]...\fR]
 [\fB\-d\fR]
 [\fB\-D\fR\ \fI'progress\ dialog\ options'\fR]
-[\fB\-e\fR]
+[\fB\-e\fR\ |\ \fB\-k\fR]
 [\fB\-F\fR]
 [\fB\-g\fR\ \fIdays\fR]
 [\fB\-I\fR\ \fIproperties,to,ignore\fR]
 [\fB\-j\fR\ \fIjobs\fR]
-[\fB\-k\fR]
 [\fB\-m\fR]
 [\fB\-n\fR]
 {-N\ path/to/src\ |\ -R\ path/to/src}
@@ -195,6 +193,11 @@ It plays a success or failure tune before exit. If you are executing
 \fBzxfer\fR
 multiple times, use -b for everything but the last execution, for which you
 should use -B.
+Giving both
+\fB\-b\fR
+and
+\fB\-B\fR
+is a usage error (exit status 2).
 .TP 8n
 \fB\-e\fR
 R(e)store property mode. This restores all filesystem properties from the
@@ -247,6 +250,11 @@ files stored in the hardened directory (which defaults to
 \fI/var/db/zxfer\fR
 and can be changed by exporting
 \fBZXFER_BACKUP_DIR\fR).
+.sp
+\fB\-e\fR
+with
+\fB\-k\fR
+is a usage error (exit status 2).
 .TP 8n
 \fB\-h\fR
 Prints (h)elp.
@@ -257,6 +265,9 @@ to the current keyed metadata path
 \fI.zxfer_backup_info.v2/h/<id-chunks>/.zxfer_backup_info.v2\fR
 stored inside the hardened metadata directory
 (\fIZXFER_BACKUP_DIR/source/dataset/path/\fR).
+\fB\-k\fR
+also turns on
+[\fB\-P\fR].
 This file lives outside the dataset mountpoints so unprivileged users cannot
 pre-create symlinks. The
 \(lq#zxfer property backup file\(rq
@@ -282,6 +293,8 @@ Current-format files emit only those versioned root markers; the older
 compatibility alias lines are no longer written.
 For example, if you are backing up
 \fItank/src\fR
+to
+\fIbackup/dst\fR
 and you keep the default
 \fBZXFER_BACKUP_DIR\fR
 of
@@ -345,8 +358,7 @@ has a storage directory on that host (for example after an earlier
 hop into it).
 .TP 8n
 \fB\-n\fR
-Dry ru(n) mode. Prints out the commands that would otherwise execute, but
-current releases now treat this as a strict no-exec preview: launcher ssh
+Dry ru(n) mode, a strict no-exec preview: launcher ssh
 preflight, remote helper validation, live backup-restore checks,
 unsupported-property discovery, snapshot discovery, and
 \fB\-D\fR
@@ -355,7 +367,13 @@ templates that reference
 are all skipped instead of validated against the live source or destination.
 This means dry runs no longer render the eventual send/receive or
 property-reconcile commands, because those require live snapshot state. Use
-this when you need a safe preflight preview rather than live validation. When combined with
+this when you need a safe preflight preview rather than live validation.
+The preview commands print only with
+\fB\-v\fR
+or
+\fB\-V\fR;
+without either, a dry run prints nothing and exits 0.
+When combined with
 \fB\-k\fR,
 \fBzxfer\fR
 also previews the local or remote secure backup-directory preparation under
@@ -400,7 +418,10 @@ or a property named twice, such as
 \fB\-o\fR \fIcompression=lz4,compression=gzip\fR,
 is a usage error (exit status 2). Every property in the list must also exist
 on the source; one that does not is a usage error once the source properties
-are read, before the destination is read or changed.
+are read: before any send or destination property change, but after
+discovery has listed the destination and, with
+\fB\-d\fR,
+after the destination-only snapshots of the root are destroyed.
 .sp
 For example,
 \fB\-o\fR \fIcompression=lzjb\fR
@@ -526,15 +547,23 @@ they are:
 \fIvscan\fR,
 \fIxattr\fR,
 \fIdnodesize\fR.
-.TP 8n
-\fB\-v\fR
-(v)erbose mode.
 .SS "ZFS send/receive mode"
 .TP 8n
 \fB\-c\fR
 A space delimited list of SMF services in quotes to be temporarily disabled
 before unmounting the source, then re-enable after changing the mountpoint
-of the destination. Requires -m.
+of the destination. Requires
+[\fB\-m\fR]
+(without it the run stops with exit status 1) and a local
+\fBsvcadm\fR;
+without
+\fBsvcadm\fR,
+or with
+[\fB\-O\fR]
+or
+[\fB\-T\fR],
+\fB\-c\fR
+is a usage error (exit status 2).
 .TP 8n
 \fB\-d\fR
 (d)elete snapshots on the destination that are absent on the source. This may
@@ -643,6 +672,9 @@ collection on a destination. Grandfathers (as defined by
 \fBzxfer\fR)
 are the snapshots that never get
 deleted (often yearly, half yearly or quarterly snapshots).
+\fIdays\fR
+must be a whole number of at least 1; anything else is a usage error (exit
+status 2).
 .sp
 With
 [\fB\-d\fR],
@@ -685,10 +717,16 @@ less than 375 days old are not protected.
 Do not copy this comma separated list of properties when performing replication.
 Useful for skipping properties like quotas that can interfere with replication,
 or properties that are not supported on the destination.
+An
+[\fB\-o\fR]
+override of a listed property is still applied.
 .TP 8n
 \fB\-j\fR \fIjobs\fR
 Run up to this many zfs send/receive jobs concurrently and use the explicit
 per-dataset source snapshot-discovery path when determining the work queue.
+\fIjobs\fR
+must be a whole number of at least 1; anything else is a usage error (exit
+status 2).
 When jobs is greater than 1, zxfer uses a direct per-dataset source listing
 pipeline instead of the single recursive snapshot list. Local-origin and
 remote-origin runs through
@@ -875,6 +913,10 @@ at the end, and ensure that a current snapshot is taken before or during the
 second execution. e.g. use this option to ensure that a relatively current
 snapshot exists, create it manually, or wait until your own snapshotting
 regime does the job for you (if you have one).
+The snapshot is named
+\fIzxfer_<pid>_<YYYYmmddHHMMSS>\fR
+and is recursive with
+[\fB\-R\fR].
 .sp
 With
 \fB\-n\fR,
@@ -920,10 +962,16 @@ OpenZFS 2.0+ support floor and removes source properties that the destination
 does not accept for the current dataset type.
 This is a current-platform skip mechanism, not a compatibility bridge for
 pre-OpenZFS 2.0 destinations.
+Unsupported properties are dropped even when
+[\fB\-o\fR]
+names them; with
+\fB\-v\fR
+each one prints a warning.
 .TP 8n
 \fB\-v\fR
-(v) verbose mode; property values are shown escaped (control bytes as
-\exHH, a backslash as \e\e)
+(v)erbose mode; property values are shown escaped: a backslash as \e\e,
+tab, carriage return and line feed as \et, \er and \en, and other control
+bytes and DEL as \exHH.
 .TP 8n
 \fB\-V\fR
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run
@@ -931,14 +979,22 @@ profiling counters plus startup latency, trap-cleanup timing, and accumulated
 stage timings for ssh setup, snapshot listing, and diff/sort hot paths, along
 with runtime temp-file counts, command-rendering counts, live destination
 snapshot recheck counts, ssh/zfs invocation counts by role, and direct remote
-helper-probe counters. Counter keys and their order are stable across
+helper-probe counters. They print to stderr at exit as
+\(lqzxfer profile: key=value\(rq
+lines, the first being
+\(lqelapsed_seconds\(rq;
+a run that timed or counted nothing prints none. Counter keys and their
+order are stable across
 releases; counters for machinery that no longer exists (socket lock waits,
 capability cache waits and cache bootstraps, cache-object writes and
 readbacks, other-side property reads) still print and always read 0. While
 the run is active it also prints prefixed live
-remote ssh commands, remote probe commands, and any ssh control-socket
-check/open commands before each execution so slow startup or remote-probe phases are
-visible in real time.
+remote ssh commands, remote probe commands, and each ssh control-master
+open command before it runs (and each close command after it runs), so
+slow startup or remote-probe phases are visible in real time.
+\fB\-V\fR
+also turns on
+[\fB\-v\fR].
 .TP 8n
 \fB\-w\fR
 uses zfs ra(w) send mode
@@ -986,6 +1042,9 @@ Pass the zstd command to use during compression.
 or
 [\fB\-T\fR]
 must also be provided.
+\fB\-Z\fR
+also turns on
+[\fB\-z\fR].
 .sp
 e.g.
 .sp
@@ -1183,8 +1242,12 @@ following command (see Ex3 about
 \fB-dFPv -N backup01/filesystems/home storage\fR
 .SS "Ex6 - Migrate a filesystem"
 We might want to migrate a filesystem (including properties).
-Note that this is only allowable when the original mountpoint is
-not the default (i.e. pool/filesystem). In the following example,
+Note that this is only useful when the original mountpoint is
+not the default (i.e. pool/filesystem);
+\fBzxfer\fR
+does not refuse a default mountpoint (see
+[\fB\-m\fR]).
+In the following example,
 the new filesystem will be located in
 \fInew_pool/location/fs\fR.
 If the old mountpoint was
@@ -1468,7 +1531,12 @@ and ends with
 \(lqzxfer: failure report end\(rq,
 using stable
 \(lqkey: value\(rq
-lines so operators can archive or post-process the output. When available, the
+lines so operators can archive or post-process the output. The keys, in
+order, are timestamp, hostname, zxfer_version, exit_status, failure_class
+(usage, dependency or runtime), failure_stage, message, source_root,
+current_source, destination_root, current_destination, origin_host,
+target_host, dry_run, mode (recursive or nonrecursive), yield_iterations,
+invocation and last_command; a key whose value is empty is left out. The
 report includes the failure class and stage, source and destination context,
 and redacted
 \(lqinvocation\(rq

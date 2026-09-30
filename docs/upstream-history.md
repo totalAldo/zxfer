@@ -6,7 +6,7 @@ operation, and maintainable documentation.
 
 ## Branch Guide
 
-The repository keeps three long-lived branches for different purposes:
+The repository keeps four long-lived branches for different purposes:
 
 - `main`: the active development branch for this fork. New features, fixes,
   refactors, and documentation work merge here.
@@ -14,13 +14,18 @@ The repository keeps three long-lived branches for different purposes:
   rsync-mode removal and before the later breaking divergence on `main`. It
   represents the forked codebase while it was still closer to the older
   behavior and still carried the rsync-capable path.
+- `upstream-compat-final-backup-info-fix`: `upstream-compat-final` plus one
+  fix to its `-k` backup-file write, which ran the ssh command and host as
+  one quoted word and failed. Without `-T` the file is now written through
+  local `sh` instead of through ssh with an empty host; with `-T` the ssh
+  command is split into words.
 - `upstream-archive`: a reference branch containing the latest imported history from
   [allanjude/zxfer](https://github.com/allanjude/zxfer). It exists to make the
   upstream codebase easy to inspect without leaving this repository.
 
 Only `main` is the active branch for ongoing development.
-`upstream-compat-final` and `upstream-archive` are reference branches, not the
-place where new work lands.
+`upstream-compat-final`, `upstream-compat-final-backup-info-fix` and
+`upstream-archive` are reference branches, not the place where new work lands.
 
 ## What This Fork Focuses On
 

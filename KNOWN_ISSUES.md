@@ -28,16 +28,6 @@ black-box harness shows the repeated name (one `snapshot -r` per pass with the
 same name) but does not model the failure. Choosing either one snapshot per
 run or a fresh name per pass is an interface decision still to be made.
 
-### Low: `-U` checks only the types of the datasets this pass sends
-
-`zxfer_calculate_unsupported_properties` in `src/zxfer_property_transfer.sh`
-reads the types of `g_recursive_source_list` (else the initial source): the
-datasets with snapshots to send. On a partial or no-op pass a volume child with
-nothing to send is never checked, so when no other volume is in that list, the
-property pass still sets a property the destination volume does not support
-(the canned-zfs harness shows `set dedup=on` on such a child); on real ZFS that
-set fails and the run stops.
-
 ### Low: a dataset recreated during a recursive property read can take forged property values
 
 With `-R` and `-P` or `-o`, each side's properties are read with two
@@ -128,6 +118,35 @@ provides it. Reading the name list, or the machine view, a second time costs
 one more `zfs get` per read but only narrows the window: a property created
 and removed again at the right moments still passes.
 
+### Low: report escaping passes C1 controls, and the `-U` warning prints values raw
+
+`zxfer_escape_report_value` (`src/zxfer_reporting.sh`) escapes C0 control
+bytes and DEL, but its `LC_ALL=C` `awk` passes every byte from 0x80 up
+unchanged. A C1 control character, UTF-8 encoded (`C2 80` to `C2 9F`, such as
+`C2 9B`, the 8-bit CSI) or as a raw byte, therefore reaches structured failure
+reports, `ZXFER_ERROR_LOG` and the `-v`/`-V` property lines as is, and some
+terminals (xterm, for example) act on it. This predates the 2026.09.26
+verbose escaping. Separately, with `-U` and `-v`, the warning
+`Destination does not support property NAME=VALUE` (`ZXFER_PROPERTY_RULES_AWK`
+and `zxfer_plan_property_changes` in `src/zxfer_property_transfer.sh`) prints
+the decoded value raw, one warning line per line of the value, so a value can
+print C0 control bytes and forge output lines. User properties are never
+marked unsupported, so the permission to set user properties alone cannot
+reach that warning; it needs write access to a native property on the source,
+or a hostile `-O` host. A fix would escape the UTF-8 sequences `C2 80` to
+`C2 9F` in the report escaper, and keep the `-U` warning's value encoded in
+`awk` and print it through `zxfer_escape_report_value`.
+
+### Low: `-U` checks only the types of the datasets this pass sends
+
+`zxfer_calculate_unsupported_properties` in `src/zxfer_property_transfer.sh`
+reads the types of `g_recursive_source_list` (else the initial source): the
+datasets with snapshots to send. On a partial or no-op pass a volume child with
+nothing to send is never checked, so when no other volume is in that list, the
+property pass still sets a property the destination volume does not support
+(the canned-zfs harness shows `set dedup=on` on such a child); on real ZFS that
+set fails and the run stops.
+
 ### Low: `-P` cannot set or inherit a user property whose name starts with `-`
 
 OpenZFS accepts user property names that start with `-` (for example `-x:y`;
@@ -181,39 +200,6 @@ leader reused the PID. In both modes, the `kill -0` liveness check in
 `zxfer_wait_for_any_send_job` for a job with no status can be fooled by a
 recycled PID, so the wait keeps polling until the PID exits.
 
-### Low: a BusyBox userland is unvalidated
-
-BusyBox ash itself is supported, but a host whose whole userland is BusyBox
-(Alpine-like) is unvalidated: BusyBox `ps` rejects `-p`, which wrapper-mode
-teardown and the setsid launcher check in `zxfer_signal_background_shell`
-use. Those checks fail closed rather than signal the wrong process.
-
-### Low: under a UTF-8 locale, bash 3.2 and ksh93 digit checks accept some non-ASCII characters
-
-bash 3.2, which is `/bin/sh` on macOS, matches a bracket range in a `case`
-pattern by the locale's collation order, and so does ksh93u+ on macOS
-(illumos `/bin/sh` is ksh93; not checked there). zxfer does not set
-`LC_ALL` or `LC_COLLATE` for its own shell, so under a UTF-8 locale such as
-`en_US.UTF-8`, `[0-9]` also matches characters that collate between `0` and
-`9`, such as U+2185. `zxfer_is_uint` in `src/zxfer_quoting.sh`, which
-rejects `*[!0-9]*`, then accepts a value made of them, and so do the other
-range patterns in `src`, such as the `ls -ldin` field checks in
-`src/zxfer_path_security.sh`. The only operator input among them is `-j`
-and `-g`. `-j` with such a value passes CLI validation; every numeric test
-on it then fails with a shell error (`integer expression expected` under
-bash), which zxfer reads as false, and the run goes on as if the value were
-above 1 with no job limit: it needs `parallel` (GNU parallel accepts the
-value), and every ready send/receive job starts at once (a destination still
-waits for its parent's receive). `-g` with such a value also passes; `awk`
-reads it as 0, so a `-d` run that plans a delete stops with the
-grandfather-protection error.
-No byte but an ASCII digit matches, so no shell metacharacter gets through,
-and the other checks see values that zxfer, a local tool or the remote
-capability probe produces. dash, bash 5 and zsh compare code points and are
-not affected. A fix lists the characters in every such pattern
-(`[!0123456789]`), as the test tooling now does, with a test that runs under
-`LC_ALL=en_US.UTF-8`.
-
 ### Low: an internal error in the startup capability probe can exit without a message
 
 Outside `-v`/`-V`, `zxfer_preload_remote_host_capabilities` in
@@ -260,42 +246,35 @@ unbalanced quote gets through (fuzzed across bash, dash, ksh, and `/bin/sh`),
 so the risk is ambiguous log text, not terminal injection. See
 `zxfer_quote_token_for_report` in `src/zxfer_reporting.sh`.
 
-### Low: report escaping passes C1 controls, and the `-U` warning prints values raw
+### Low: a BusyBox userland is unvalidated
 
-`zxfer_escape_report_value` (`src/zxfer_reporting.sh`) escapes C0 control
-bytes and DEL, but its `LC_ALL=C` `awk` passes every byte from 0x80 up
-unchanged. A C1 control character, UTF-8 encoded (`C2 80` to `C2 9F`, such as
-`C2 9B`, the 8-bit CSI) or as a raw byte, therefore reaches structured failure
-reports, `ZXFER_ERROR_LOG` and the `-v`/`-V` property lines as is, and some
-terminals (xterm, for example) act on it. This predates the 2026.09.26
-verbose escaping. Separately, with `-U` and `-v`, the warning
-`Destination does not support property NAME=VALUE` (`ZXFER_PROPERTY_RULES_AWK`
-and `zxfer_plan_property_changes` in `src/zxfer_property_transfer.sh`) prints
-the decoded value raw, one warning line per line of the value, so a value can
-print C0 control bytes and forge output lines. User properties are never
-marked unsupported, so the permission to set user properties alone cannot
-reach that warning; it needs write access to a native property on the source,
-or a hostile `-O` host. A fix would escape the UTF-8 sequences `C2 80` to
-`C2 9F` in the report escaper, and keep the `-U` warning's value encoded in
-`awk` and print it through `zxfer_escape_report_value`.
+BusyBox ash itself is supported, but a host whose whole userland is BusyBox
+(Alpine-like) is unvalidated: BusyBox `ps` rejects `-p`, which wrapper-mode
+teardown and the setsid launcher check in `zxfer_signal_background_shell`
+use. Those checks fail closed rather than signal the wrong process.
 
-### Resolved: silent destroy/rollback/resend churn on GUID-diverged destinations (fixed 2026-06-12)
+### Low: under a UTF-8 locale, bash 3.2 and ksh93 digit checks accept some non-ASCII characters
 
-Before 2026-06-12, when destination snapshots matched source snapshots by
-NAME but carried different GUIDs (diverged data under identical names), a
-`-d` run silently destroyed those destination snapshots, rolled the
-destination back to the last GUID-matching common snapshot, and re-sent the
-whole range — on every run, with no operator messaging. The legacy name-only
-matching variant of the same fixture was silent in the opposite direction: it
-reported "No new snapshots to transfer" and treated diverged data as in sync.
-
-This is resolved by the divergence contract (see `README.md` and the `-d`/`-F`
-entries in `man/zxfer.8`): an always-on stderr warning names the diverged
-dataset, the count, and example snapshots with both GUIDs; destructive
-convergence requires BOTH `-d` and `-F` (otherwise the run fails closed with
-zero actions for the diverged dataset); and a post-receive verification of the
-live destination listing turns any re-divergence into a structured error
-naming the snapshot. Regression coverage:
-`tests/test_contract_planning.sh` (divergence contract pins) and
-`tests/test_zxfer_snapshot_plan.sh` (classifier, gate, and verification
-units).
+bash 3.2, which is `/bin/sh` on macOS, matches a bracket range in a `case`
+pattern by the locale's collation order, and so does ksh93u+ on macOS
+(illumos `/bin/sh` is ksh93; not checked there). zxfer does not set
+`LC_ALL` or `LC_COLLATE` for its own shell, so under a UTF-8 locale such as
+`en_US.UTF-8`, `[0-9]` also matches characters that collate between `0` and
+`9`, such as U+2185. `zxfer_is_uint` in `src/zxfer_quoting.sh`, which
+rejects `*[!0-9]*`, then accepts a value made of them, and so do the other
+range patterns in `src`, such as the `ls -ldin` field checks in
+`src/zxfer_path_security.sh`. The only operator input among them is `-j`
+and `-g`. `-j` with such a value passes CLI validation; every numeric test
+on it then fails with a shell error (`integer expression expected` under
+bash), which zxfer reads as false, and the run goes on as if the value were
+above 1 with no job limit: it needs `parallel` (GNU parallel accepts the
+value), and every ready send/receive job starts at once (a destination still
+waits for its parent's receive). `-g` with such a value also passes; `awk`
+reads it as 0, so a `-d` run that plans a delete stops with the
+grandfather-protection error.
+No byte but an ASCII digit matches, so no shell metacharacter gets through,
+and the other checks see values that zxfer, a local tool or the remote
+capability probe produces. dash, bash 5 and zsh compare code points and are
+not affected. A fix lists the characters in every such pattern
+(`[!0123456789]`), as the test tooling now does, with a test that runs under
+`LC_ALL=en_US.UTF-8`.

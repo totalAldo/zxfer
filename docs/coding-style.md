@@ -273,10 +273,10 @@ zxfer_get_temp_file() {
   `tests/helpers/*_fixtures.sh` files and must be sourced explicitly only by
   the suites that own those cases.
 - Keep fixtures explicit and local to the suite unless they are broadly useful.
-- Start an entry suite's `setUp` with `zxfer_test_reset_all_owner_state`
-  (directly or through a domain fixture's setup helper), then override only
-  suite-specific values; move domain-specific preparation into named fixture
-  helpers.
+- A suite that needs clean module state starts its `setUp` with
+  `zxfer_test_reset_all_owner_state` (directly or through a domain fixture's
+  setup helper), then overrides only suite-specific values; move
+  domain-specific preparation into named fixture helpers.
 - Pin behavior an operator can observe in a contract suite, and unit-test
   only what the black-box harness cannot reach (see "Where a new test
   goes" in [testing.md](./testing.md)). Do not stub collaborators to pin

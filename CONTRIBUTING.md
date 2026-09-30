@@ -54,8 +54,11 @@ groups, performance cases, and documentation surfaces. Neither file is
 evaluated as shell code. `quick` executes only the offline budget and unit
 checks; `vm` accepts only `smoke` or `local`.
 No profile invokes the direct host integration harness.
-`quick` and `full` run independent suites with four workers by default; set
-`ZXFER_VALIDATE_JOBS` to another positive integer for a constrained host.
+`quick` and the unit step of `full` run independent suites with four workers
+by default; set `ZXFER_VALIDATE_JOBS` to another positive integer for a
+constrained host. The coverage step of `full` reruns every suite at the unit
+runner's default (the CPU count, at most 4), which `ZXFER_VALIDATE_JOBS` does
+not change.
 
 Run unit tests:
 
@@ -234,8 +237,8 @@ When behavior changes, update the relevant docs:
 - relevant `.github/` workflow or template files when validation entrypoints,
   required checks, or contributor expectations change
 - When modifying replication logic, state initialization, or adding new
-  features, ensure the corresponding Mermaid diagrams in `architecture.md` and
-  `README.md` are updated to reflect the new control flow.
+  features, ensure the corresponding Mermaid diagrams in
+  `docs/architecture.md` are updated to reflect the new control flow.
 
 ## Versioning
 

@@ -44,12 +44,12 @@ These tools are only required when the corresponding feature is used.
 | Tool | Used by | When required | Packaging guidance |
 | --- | --- | --- | --- |
 | `ssh` | remote host probing, remote command execution, control sockets | required when `-O` or `-T` is used, and resolved lazily through the secure-PATH model when remote transport is actually needed | base system on the supported host families; do not make it a local-only hard dependency |
-| `cat` | property backup restore, staged publication, and recovery copies | `-e` restore mode on the origin side and `-k` publication on the destination side; remote `cat` is resolved per host role | base system; do not add a separate FreeBSD package dependency |
+| `cat` | property backup restore, forwarded-alias reads, staged publication, and recovery copies | `-e` restore and `-k` forwarded-alias reads on the origin side, and `-k` publication on the destination side; remote `cat` is resolved per host role for `-e` restores and `-T` writes (a `-k` alias read on the `-O` host runs the `cat` on its secure PATH) | base system; do not add a separate FreeBSD package dependency |
 | `find` | listing the origin's backup storage directories for forwarded `-k` provenance | `-k` with `-O`, on the origin host, once per run, only when the source dataset already has a storage directory there | base system; do not add a package dependency |
 | `parallel` | explicit per-dataset source snapshot discovery for `-j > 1` | required on the executing origin host whenever `-j > 1` is requested (without `-O`, the local `parallel` is checked at startup, before any other work); zxfer intentionally validates only that a helper named `parallel` resolves through the secure-PATH model, then assumes the operator/package supplied a compatible implementation; the rendered pipeline uses GNU Parallel-style options and does not silently fall back to the serial recursive listing once `-j > 1` is requested | consider a package dependency if the port should guarantee `-j > 1` support out of the box |
 | `setsid` | background-job process-group isolation | optional; a working local `setsid` isolates background pipelines; verified shell job control is also supported without a controlling terminal (bash only: FreeBSD sh, dash and ksh93 cannot give a job its own group from a subshell, so without `setsid` they use the cleanup wrapper); a descendant-tracking cleanup wrapper is the fallback | usually a base or util-linux userland tool; do not make it a hard dependency unless packaging wants to require process-group isolation everywhere |
 | `zstd` | compressed send/receive streams and remote snapshot-discovery metadata compression | `-z` or default/custom `-Z` compression paths, including the `-O` source snapshot listings of the recursive no-op proof and of `-j` discovery when `-z` is active | consider a package dependency only if the port should guarantee compression support out of the box |
-| `svcadm` | migration/service handling | `-c` and `-m` on OmniOS/illumos systems | not a FreeBSD package dependency |
+| `svcadm` | migration/service handling | `-c` (which requires `-m`) on OmniOS/illumos systems; `-m` alone does not use it | not a FreeBSD package dependency |
 | `kldstat`, `kldload`, `/dev/speaker` | audible status beeps | FreeBSD-only `-b` / `-B` path | base system and device availability; not a package dependency |
 
 ### Operator-Supplied Wrapper Commands
@@ -109,9 +109,10 @@ probe runs `uname` on every `-O`/`-T` host. The `-k` backup-metadata write on
 a `-T` host uses target-side POSIX `sh`, `mkdir`, `chmod`, `id`, `ls`, `awk`,
 `mktemp`, `mv`, `rm`, and the resolved `cat`; an `-e` read on the `-O` host
 uses `id`, `ls`, `awk` and the resolved `cat`; and `-k` with `-O` lists the
-origin's storage directories with `find` when one already exists. `-T`
-destination discovery runs no script: it needs only the resolved target
-`zfs`.
+origin's storage directories once (with `find` when the source dataset already
+has one) and reads each forwarded alias found there with `id`, `ls`, `awk` and
+`cat`. `-T` destination discovery runs no script: it needs only the resolved
+target `zfs`.
 
 ## Direct Integration Harness Dependencies
 

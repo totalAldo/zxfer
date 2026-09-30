@@ -50,7 +50,7 @@ Keep issues ordered by remediation priority within their section: `Critical`, th
 
 After adding or updating issues, review the full issue inventory, including pre-existing entries, for repeated root causes.
 
-- Add or revise an `Architectural Remediation Themes` suggestion only when one design change would address multiple concrete issues.
+- `KNOWN_ISSUES.md` has no `Architectural Remediation Themes` section today; add one, or revise an existing theme, only when one design change would address multiple concrete issues.
 - Tie each theme to the shared failure class and representative issue titles or modules.
 - Keep suggestions implementation-oriented but not over-specified; describe the architectural direction, invariants it should enforce, and the issue cluster it would reduce.
 - Do not add generic architecture notes for a single issue or vague maintainability concern.

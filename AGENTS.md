@@ -169,9 +169,8 @@ A change is complete only when it:
   `CHANGELOG.txt`, man pages, `docs/`, examples, and inline help. Review
   `CONTRIBUTING.md`, `SECURITY.md`, `KNOWN_ISSUES.md`, packaging metadata,
   workflow files, and the PR template when their concerns are affected.
-- Update Mermaid control-flow diagrams in `README.md` or
-  `docs/architecture.md` when replication flow, lifecycle/state ownership, or
-  module boundaries change.
+- Update the Mermaid control-flow diagrams in `docs/architecture.md` when
+  replication flow, lifecycle/state ownership, or module boundaries change.
 - Document platform-specific differences explicitly and gate or annotate tests
   so FreeBSD, Linux/OpenZFS, illumos/Solaris, and OpenZFS-on-macOS expectations
   remain visible.
