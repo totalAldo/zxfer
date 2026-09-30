@@ -475,12 +475,22 @@ test_usage_error_shell_quoted_compression_command() {
 	assertEquals "A shell-quoted -Z command must exit with status 2." 2 "$g_golden_exit_status"
 }
 
-# The prescan finds -h only before the first operand; after an option
-# argument the full parser prints the same usage.
+# The -h prescan parses the options as the CLI does, so it skips -R's value
+# and finds the -h after it.
 test_help_after_an_option_argument_prints_usage_and_exits_zero() {
 	zxfer_golden_assert_case_matches_golden cli_help -R tank/src -h backup/dest
 
 	assertEquals "zxfer -R SRC -h must exit with status 0." 0 "$g_golden_exit_status"
+}
+
+# An h inside a dash-leading option value is not -h: the run goes on to the
+# full parser, which reports the missing destination, instead of printing the
+# usage and exiting 0 without replicating.
+test_h_inside_a_dash_leading_option_value_is_not_help() {
+	zxfer_golden_assert_case_matches_golden cli_usage_missing_destination \
+		-x '-cache$' -R tank/src
+
+	assertEquals "An -x value with an h must not stop the run as -h." 2 "$g_golden_exit_status"
 }
 
 # -h prints the usage before any module loads: it needs no helper on the

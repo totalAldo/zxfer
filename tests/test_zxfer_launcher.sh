@@ -240,6 +240,57 @@ prescan=<1>
 prescan=<0>" "$(sed 's/^.* prescan=/prescan=/' "$log_path")"
 }
 
+# The -h prescan skips option values: an h inside a value that starts with -
+# (an -x pattern here) is not a flag, so the run goes on, and a -h that is
+# -x's value is only a pattern. A real -h prints the usage before any module
+# loads, in a cluster or after an option's value.
+test_launcher_help_prescan_skips_option_values() {
+	fixture_dir="$TEST_TMPDIR/launcher-help-prescan"
+	rm -rf "$fixture_dir"
+	zxfer_test_create_launcher_fixture "$fixture_dir"
+	log_path="$fixture_dir/launcher.log"
+	out_path="$fixture_dir/stdout"
+
+	(
+		ZXFER_TEST_LOG=$log_path
+		export ZXFER_TEST_LOG
+		"$fixture_dir/zxfer" -x '-cache$' -R tank/src backup/dst &&
+			"$fixture_dir/zxfer" -v -x '-hat' -R tank/src backup/dst &&
+			"$fixture_dir/zxfer" -x -h -R tank/src backup/dst
+	) >"$out_path" 2>&1
+	l_value_status=$?
+	assertEquals "Runs whose only h is inside an option value must succeed." 0 "$l_value_status"
+	assertEquals "An h inside an option value must never print the usage." \
+		"" "$(cat "$out_path")"
+	assertEquals "Each run must reach zxfer_main with its arguments." \
+		"main -x -cache\$ -R tank/src backup/dst
+main -v -x -hat -R tank/src backup/dst
+main -x -h -R tank/src backup/dst" "$(sed 's/ prescan=.*//' "$log_path")"
+
+	for l_help_args in "-h" "-vh backup/dst" "-R tank/src -h backup/dst"; do
+		: >"$log_path"
+		# shellcheck disable=SC2086 # One argument per word on purpose.
+		l_help_out=$(ZXFER_TEST_LOG=$log_path "$fixture_dir/zxfer" $l_help_args)
+		l_help_status=$?
+		assertEquals "zxfer $l_help_args must exit 0." 0 "$l_help_status"
+		assertContains "zxfer $l_help_args must print the usage." "$l_help_out" "usage:"
+		assertEquals "zxfer $l_help_args must stop before zxfer_main." "" "$(cat "$log_path")"
+	done
+}
+
+# The prescan knows which options take a value only through its option
+# string, so it must stay the one the CLI parser uses.
+test_launcher_help_prescan_uses_the_cli_option_string() {
+	l_prescan_spec=$(sed -n 's/^[[:space:]]*while getopts ":\([^"]*\)" l_opt "\$@"; do$/\1/p' \
+		"$ZXFER_ROOT/zxfer")
+	l_cli_spec=$(sed -n 's/^[[:space:]]*while getopts \([^ ]*\) l_cli_option; do$/\1/p' \
+		"$ZXFER_ROOT/src/zxfer_cli.sh")
+
+	assertNotEquals "The launcher's prescan option string must be found." "" "$l_prescan_spec"
+	assertEquals "The -h prescan and the CLI parser must use the same option string." \
+		"$l_cli_spec" "$l_prescan_spec"
+}
+
 test_launcher_renders_the_unsafe_invocation_with_every_argument_escaped() {
 	invalid_path=$(printf '/bin\t/untrusted')
 	stderr_file="$TEST_TMPDIR/launcher-invocation.stderr"

@@ -72,10 +72,14 @@ export PATH
 
 # Purpose: Print usage and exit 0 when -h appears before any module loads.
 # Usage: zxfer_prescan_help_flag "$@"
+# The option string is zxfer_read_command_line_switches' (src/zxfer_cli.sh),
+# so an option's value is skipped: with ":h" alone, -x '-cache$' read as a
+# cluster of flags and its h printed the usage instead of replicating.
+# tests/test_zxfer_launcher.sh keeps the two strings equal.
 zxfer_prescan_help_flag() {
 	l_opt=""
 	OPTIND=1
-	while getopts ":h" l_opt "$@"; do
+	while getopts ":bBc:dD:eFg:hI:j:kmnN:o:O:PR:sT:UvVwx:YzZ:" l_opt "$@"; do
 		case $l_opt in
 		h)
 			zxfer_usage

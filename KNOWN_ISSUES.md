@@ -28,19 +28,6 @@ black-box harness shows the repeated name (one `snapshot -r` per pass with the
 same name) but does not model the failure. Choosing either one snapshot per
 run or a fresh name per pass is an interface decision still to be made.
 
-### Medium: a dash-leading option value with an `h` before the first operand prints usage and exits 0
-
-`./zxfer` looks for `-h` before it parses anything
-(`zxfer_prescan_help_flag`, `getopts ":h"`), and that scan does not know
-which options take a value. A value that starts with `-` and contains an `h`,
-placed before the first argument that does not start with `-`, reads as a
-cluster of flags: `zxfer -x '-cache$' -R tank/src backup/dst` (or
-`-v -x '-cache$' ...`) prints the usage and exits 0 without replicating, so a
-scheduled run reports success and does nothing. An earlier plain argument ends
-the scan first (`-R tank/src -x '-cache$' backup/dst` and `-g 375 -x ...`
-replicate). Until the scan skips option values, put such an option after the
-first plain argument.
-
 ### Low: `-U` checks only the types of the datasets this pass sends
 
 `zxfer_calculate_unsupported_properties` in `src/zxfer_property_transfer.sh`

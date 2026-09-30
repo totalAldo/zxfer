@@ -81,6 +81,9 @@ zxfer_init_cli_option_defaults() {
 # Purpose: Parse the command-line switches into the g_option_* state.
 # Usage: zxfer_read_command_line_switches "$@"; the caller shifts by OPTIND.
 # An unknown option is a usage error, and -h prints usage and exits 0.
+# The launcher's -h prescan (zxfer_prescan_help_flag) parses with this option
+# string too, so it handles -h before this runs; keep the two equal
+# (tests/test_zxfer_launcher.sh checks).
 zxfer_read_command_line_switches() {
 	while getopts bBc:dD:eFg:hI:j:kmnN:o:O:PR:sT:UvVwx:YzZ: l_cli_option; do
 		case $l_cli_option in
