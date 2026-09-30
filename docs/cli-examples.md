@@ -129,6 +129,9 @@ Replicates only `tank/apps/api`.
 
 Each pass lists the source and destination afresh, so a destination that
 another tool changed after one pass's discovery is seen by the next pass.
+With `-s` or `-m`, only the first pass takes the snapshot (and, for `-m`,
+stops the `-c` services and unmounts the source); later passes send what is
+still missing, so a run takes one snapshot.
 
 ### `-j jobs` Run concurrent send/receive jobs
 

@@ -131,7 +131,8 @@ Use remote compression:
 - `-Y`: repeat replication until no sends or destroys are performed, or until
   the built-in iteration cap is reached; each pass lists the destination
   afresh, so a destination that another tool changed after one pass's
-  discovery is seen by the next pass
+  discovery is seen by the next pass. Only the first pass takes the `-s` or
+  `-m` snapshot (and runs the `-m` service stops and unmounts)
 - `-z`: compress ssh send/receive streams with `zstd`
 - `-Z "command"`: replace the default `zstd` compressor command with a custom
   variant such as `zstd -T0 -3`

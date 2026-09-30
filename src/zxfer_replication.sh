@@ -41,7 +41,9 @@
 #   g_dest_seed_requires_property_reconcile, the post-seed accumulator
 #   g_zxfer_post_seed_property_sources, g_zxfer_replication_iteration_list_result,
 #   the run's -s/-m snapshot name g_zxfer_new_snapshot_name (stamped once by
-#   zxfer_stamp_new_snapshot_name), and the per-pass mutation marker
+#   zxfer_stamp_new_snapshot_name), g_zxfer_new_snapshot_taken (set once
+#   zxfer_newsnap has taken that snapshot, so later -Y passes skip the -s
+#   snapshot and the -m preparation), and the per-pass mutation marker
 #   g_is_performed_send_destroy, which the -Y loop reads. The marker has two
 #   writers on purpose: this module sets it after a dataset's -d destroy, and
 #   the send/receive scheduler in zxfer_send_jobs.sh after each send, the one
@@ -68,6 +70,7 @@ zxfer_reset_replication_runtime_state() {
 	g_zxfer_post_seed_property_sources=""
 	g_zxfer_replication_iteration_list_result=""
 	g_zxfer_new_snapshot_name=""
+	g_zxfer_new_snapshot_taken=0
 }
 
 # Purpose: Make SOURCE the current dataset and map its destination.
@@ -213,6 +216,7 @@ zxfer_stamp_new_snapshot_name() {
 
 # Purpose: Create the -s or -m snapshot of the source root.
 # Usage: zxfer_newsnap SOURCE; recursive under -R, and only rendered under -n.
+# Side effects: Sets g_zxfer_new_snapshot_taken once the snapshot exists.
 zxfer_newsnap() {
 	zxfer_stamp_new_snapshot_name
 	# Snapshot the dataset part of SOURCE.
@@ -239,6 +243,7 @@ zxfer_newsnap() {
 	fi
 	zxfer_echov "$l_cmd"
 	zxfer_run_source_zfs_cmd "$@" || zxfer_throw_error "Error when executing command."
+	g_zxfer_new_snapshot_taken=1
 }
 
 # Purpose: Check whether -U must probe destination property support.
@@ -543,8 +548,8 @@ zxfer_refresh_dataset_iteration_state() {
 }
 
 # Purpose: Take the -s snapshot and rediscover, unless -m takes it instead.
-# Usage: zxfer_maybe_capture_preflight_snapshot, after discovery or from the
-# dry-run preview.
+# Usage: zxfer_maybe_capture_preflight_snapshot, after the first pass's
+# discovery or from the dry-run preview.
 zxfer_maybe_capture_preflight_snapshot() {
 	if [ "$g_option_s_make_snapshot" -eq 0 ] || [ "$g_option_m_migrate" -eq 1 ]; then
 		return
@@ -628,8 +633,13 @@ zxfer_run_zfs_mode() {
 	fi
 
 	zxfer_initialize_replication_context
-	zxfer_maybe_capture_preflight_snapshot
-	zxfer_prepare_migration_services
+	# One -s or -m snapshot per run: a later -Y pass takes none and repeats no
+	# -m service stop, mount check or unmount; it sends what is still missing.
+	# Only an exact 1 skips, so a malformed flag never skips the snapshot.
+	if [ "${g_zxfer_new_snapshot_taken:-0}" != 1 ]; then
+		zxfer_maybe_capture_preflight_snapshot
+		zxfer_prepare_migration_services
+	fi
 	# Discovery and -m preparation name their own stages; failures from here
 	# on that set none (the -g pre-pass, planning) are replication failures.
 	zxfer_set_failure_stage "replication"
@@ -642,7 +652,7 @@ zxfer_run_zfs_mode() {
 }
 
 # Purpose: Repeat replication passes until one performs no send or destroy,
-# or the -Y limit is reached.
+# or the -Y limit is reached; only the first pass takes the -s or -m snapshot.
 # Usage: zxfer_run_zfs_mode_loop, the launcher entry point for replication.
 zxfer_run_zfs_mode_loop() {
 	l_num_iterations=0
