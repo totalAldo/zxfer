@@ -231,6 +231,57 @@ auto_snapshot_nonrecursive_test() {
 	log "Auto-snapshot non-recursive test passed"
 }
 
+auto_snapshot_yield_test() {
+	log "Starting auto-snapshot yield test"
+
+	src_dataset="$SRC_POOL/newsnap_yield_src"
+	child_dataset="$src_dataset/child"
+	dest_root="$DEST_POOL/newsnap_yield_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+	dest_child="$dest_dataset/${child_dataset##*/}"
+
+	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
+
+	zfs create "$src_dataset"
+	zfs create "$child_dataset"
+	zfs create "$dest_root"
+
+	append_data_to_dataset "$src_dataset" "parent.txt" "parent data"
+	append_data_to_dataset "$child_dataset" "child.txt" "child data"
+	zfs snap -r "$src_dataset@preseed"
+
+	# The first pass takes the -s snapshot and sends it, so a second pass
+	# runs. It must take no snapshot (zfs refuses the run's name a second
+	# time) and, with nothing left to send, end the loop.
+	set +e
+	output=$(run_zxfer -v -Y -s -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -ne 0 ]; then
+		fail "Expected zxfer -Y -s to exit successfully. Output: $output"
+	fi
+
+	iter_count=$(printf '%s\n' "$output" | awk '/Begin Iteration/ { n++ } END { print n + 0 }')
+	if [ "$iter_count" -ne 2 ]; then
+		fail "Expected two iterations under -Y -s, the second with nothing to send; found $iter_count. Output: $output"
+	fi
+
+	snap_count=$(list_exact_snapshot_names_for_dataset "$src_dataset" |
+		awk '/@zxfer_/ { n++ } END { print n + 0 }')
+	if [ "$snap_count" -ne 1 ]; then
+		fail "Expected one -s snapshot of $src_dataset per run; found $snap_count."
+	fi
+
+	src_snapshot_name=$(get_latest_snapshot_name_for_dataset "$src_dataset")
+	snap_suffix=${src_snapshot_name#*@}
+	assert_snapshot_exists "$child_dataset" "$snap_suffix"
+	assert_snapshot_exists "$dest_dataset" "$snap_suffix"
+	assert_snapshot_exists "$dest_child" "$snap_suffix"
+
+	log "Auto-snapshot yield test passed"
+}
+
 trailing_slash_destination_test() {
 	log "Starting trailing slash destination test"
 
