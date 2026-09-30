@@ -241,10 +241,11 @@ closed), and requires every value to arrive as one byte-identical argument
 and the destination to converge. The generator has its own Park-Miller
 stream, so a seed reproduces with any awk; a failure prints
 `./tests/run_argv_fuzz.sh --seed N --case K --iterations 1 --keep`.
-`tests/test_run_argv_fuzz.sh` runs one fixed seed and proves that injected
+`tests/test_run_argv_fuzz.sh` runs one fixed seed, proves that injected
 bugs (`ZXFER_ARGV_FUZZ_FAULT=split`, `truncate`, `inject`, `prefetch`) are
-reported; the `argv-fuzz` CI job runs 200 iterations with the run number as
-the seed on every push.
+reported, and checks that each expected `-P` change agrees with the
+generated values; the `argv-fuzz` CI job runs 200 iterations with the run
+number as the seed on every push.
 
 ## Micro-Bench and Budgets
 

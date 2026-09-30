@@ -514,7 +514,11 @@ function gen_property(prop, with_required,    start, i, parent, choice, value, d
 				choice = 2
 			if (choice != 0) {
 				value = (choice == 1) ? src_value[i] : gen_value(0)
-				dest_same = choice == 1
+				# Judge by the values, not the choice: another value can
+				# repeat the source's by chance (seed 437 case 19 drew a
+				# lone backslash for both), and a destination that already
+				# holds the source's value locally must be left alone.
+				dest_same = src_has[i] && (value "") == (src_value[i] "")
 				dest_own = 1
 				model_line("P", dst_name[i], prop, value, "local")
 				summary_property(prop, dst_name[i], value)

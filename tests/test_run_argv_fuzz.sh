@@ -168,6 +168,45 @@ test_every_case_holds_each_required_hostile_byte() {
 	done
 }
 
+# A -P pass must set a destination whose source row is local unless the
+# destination already holds the source's value locally, so a "never" row
+# needs that value and a "must" row needs another or none. A generated other
+# value can repeat the source's by chance: seed 437 case 19 drew a lone
+# backslash for both, marked the row "must", and failed on main although
+# zxfer rightly left the property alone. The verdicts are judged by the
+# values now; these 40 cases include that one.
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_every_expectation_matches_the_generated_values() {
+	l_case=1
+	while [ "$l_case" -le 40 ]; do
+		argv_fuzz_generate_case 437 "$l_case" "$CASE_DIR/$l_case" ||
+			fail "generation failed"
+		# Values are compared as strings: awk compares numeric-looking
+		# fields as numbers.
+		l_wrong=$(awk -F '\t' '
+			FNR == NR {
+				if ($1 == "map")
+					source_of[$2] = $3
+				else if ($1 == "must" || $1 == "never")
+					verdict[$2, $3] = $1
+				next
+			}
+			$1 == "P" && $5 == "local" { own[$2, $3] = $4 "" }
+			END {
+				for (key in verdict) {
+					split(key, f, SUBSEP)
+					same = (key in own) && ((source_of[f[1]], f[2]) in own) &&
+						own[key] == own[source_of[f[1]], f[2]]
+					if ((verdict[key] == "must") == same)
+						print verdict[key] " " f[2] " on [" f[1] "]"
+				}
+			}
+		' "$CASE_DIR/$l_case/expect" "$CASE_DIR/$l_case/model")
+		assertEquals "case $l_case: every verdict must match the values" "" "$l_wrong"
+		l_case=$((l_case + 1))
+	done
+}
+
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_fake_zfs_answers_whole_names_and_flags_split_ones() {
 	argv_fuzz_generate_case 3 1 "$CASE_DIR/case" || fail "generation failed"
