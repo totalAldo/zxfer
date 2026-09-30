@@ -181,22 +181,7 @@ test_zxfer_profile_timers_ignore_failed_clock_readings() {
 		"$output" "stop_status=0 elapsed=0 has_data=0"
 }
 
-test_zxfer_profile_emit_summary_returns_without_output_when_already_emitted() {
-	output=$(
-		(
-			g_option_V_very_verbose=1
-			g_zxfer_profile_has_data=1
-			g_zxfer_profile_summary_emitted=1
-			zxfer_profile_emit_summary
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "An already-emitted profile summary should return success." 0 "$status"
-	assertEquals "An already-emitted profile summary should not emit duplicate output." "" "$output"
-}
-
-test_zxfer_profile_emit_summary_stays_silent_until_V_timed_or_counted_something() {
+test_zxfer_profile_emit_summary_prints_once_and_only_after_V_timed_or_counted_something() {
 	output=$(
 		(
 			g_option_V_very_verbose=1
@@ -208,6 +193,8 @@ test_zxfer_profile_emit_summary_stays_silent_until_V_timed_or_counted_something(
 			printf 'quiet_status=%s\n' "$?"
 			g_option_V_very_verbose=1
 			zxfer_profile_emit_summary
+			zxfer_profile_emit_summary
+			printf 'again_status=%s\n' "$?"
 		) 2>&1
 	)
 	timed_output=$(
@@ -222,59 +209,40 @@ test_zxfer_profile_emit_summary_stays_silent_until_V_timed_or_counted_something(
 		"nothing_status=0" "$(printf '%s\n' "$output" | sed -n 1p)"
 	assertEquals "Without -V a counted run should print no summary." \
 		"quiet_status=0" "$(printf '%s\n' "$output" | sed -n 2p)"
-	assertEquals "One counted value should print the summary under -V, once." \
+	assertEquals "One counted value should print the summary under -V, once, however often it is asked." \
 		1 "$(printf '%s\n' "$output" | grep -c '^zxfer profile: elapsed_seconds=')"
+	assertContains "An already-emitted summary should return success." \
+		"$output" "again_status=0"
 	assertContains "A counted value should reach the summary." \
 		"$output" "zxfer profile: command_render_calls=5"
 	assertContains "A timed stage should print the summary even when every count is 0." \
 		"$timed_output" "zxfer profile: command_render_calls=0"
 }
 
-test_zxfer_reset_profile_state_clears_owned_timing_and_counter_state() {
-	g_zxfer_profile_has_data=1
-	g_zxfer_profile_summary_emitted=1
-	g_zxfer_profile_startup_latency_recorded=1
-	g_zxfer_profile_cleanup_ms=999
-	g_zxfer_profile_source_ssh_shell_invocations=999
-	g_zxfer_profile_runtime_artifact_files_created=999
-	g_zxfer_profile_live_destination_snapshot_rechecks=999
-	g_zxfer_profile_diverged_snapshot_warnings=999
-
-	zxfer_reset_profile_state
-
-	assertEquals "Profile reset should clear the data marker." 0 "$g_zxfer_profile_has_data"
-	assertEquals "Profile reset should rearm summary emission." 0 "$g_zxfer_profile_summary_emitted"
-	assertEquals "Profile reset should rearm the startup latency reading." \
-		0 "$g_zxfer_profile_startup_latency_recorded"
-	assertEquals "Profile reset should clear cleanup timing." 0 "$g_zxfer_profile_cleanup_ms"
-	assertEquals "Profile reset should clear ssh counters." 0 "$g_zxfer_profile_source_ssh_shell_invocations"
-	assertEquals "Profile reset should clear runtime artifact counters." \
-		0 "$g_zxfer_profile_runtime_artifact_files_created"
-	assertEquals "Profile reset should clear destination-recheck counters." \
-		0 "$g_zxfer_profile_live_destination_snapshot_rechecks"
-	assertEquals "Profile reset should clear diverged-snapshot counters." \
-		0 "$g_zxfer_profile_diverged_snapshot_warnings"
-}
-
-test_zxfer_reset_profile_state_zeroes_every_printed_counter_against_inherited_values() {
+test_zxfer_reset_profile_state_zeroes_every_counter_and_flag_against_inherited_values() {
 	# Producers bump counters with plain arithmetic, which bash and ksh would
 	# evaluate as an expression; the reset must neutralize every inherited
-	# value first. export NAME=VALUE assigns a computed name without eval.
+	# value first, flags included. export NAME=VALUE assigns a computed name
+	# without eval.
 	injected_file="$TEST_TMPDIR/profile-injected"
 	rm -f "$injected_file"
 	output=$(
 		(
-			for l_key in $(profile_test_counter_keys); do
+			for l_key in $(profile_test_counter_keys) has_data summary_emitted \
+				startup_latency_recorded; do
 				export "g_zxfer_profile_$l_key=x[\$(: >$injected_file)]"
 			done
 			g_option_V_very_verbose=1
 			zxfer_reset_profile_state
+			printf 'flags=%s:%s:%s\n' "$g_zxfer_profile_has_data" \
+				"$g_zxfer_profile_summary_emitted" "$g_zxfer_profile_startup_latency_recorded"
 			zxfer_render_shell_command_from_argv zfs list
-			g_zxfer_profile_has_data=1
 			zxfer_profile_emit_summary
 		) 2>&1
 	)
 
+	assertContains "The reset should clear the data marker and rearm the summary and the startup latency reading." \
+		"$output" "flags=0:0:0"
 	for key in $(profile_test_counter_keys); do
 		if [ "$key" = command_render_calls ]; then
 			assertContains "An inline producer should count from 0 after the reset." \

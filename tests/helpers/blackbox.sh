@@ -8,8 +8,8 @@
 # test_* functions, and finally sources shunit2. This file supplies the shunit2
 # lifecycle hooks: every case gets a private CASE_DIR, removed afterwards.
 # Helpers publish their paths in MOCKBIN_DIR, FIXTURE_DIR, ZFS_LOG, STATE_DIR,
-# JOB_TMP_DIR, SSH_LOG, ARGV_LOG, and the backup-mode variables named where
-# they are set.
+# JOB_TMP_DIR, SSH_LOG, ARGV_LOG, PARALLEL_ARGV_LOG, and the backup-mode
+# variables named where they are set.
 #
 # shellcheck disable=SC1090,SC2034,SC2154
 
@@ -804,4 +804,190 @@ file: $(cat "$l_backup_file")"
 	done
 	assertEquals "no stage files may be left behind under the backup root" \
 		"" "$(find "$BACKUP_ROOT" -name '.zxfer-backup-write.*' 2>/dev/null)"
+}
+
+# ---------------------------------------------------------------------------
+# -m / -c service manager fixture.
+
+# Purpose: Write a mock SMF svcadm that appends "svcadm <argv>" to MOCK_ZFS_LOG,
+# so the log orders every service change against the zfs calls, and fails
+# (status 1, with a stderr note) each call whose space-joined argv matches the
+# sh glob in MOCK_SVCADM_FAIL. Placed in MOCKBIN_DIR, it shadows the real
+# svcadm of an illumos host, which a test must never run.
+# Usage: planning_write_mock_svcadm <path>
+planning_write_mock_svcadm() {
+	cat >"$1" <<'EOF'
+#!/bin/sh
+[ -z "${MOCK_ZFS_LOG:-}" ] || printf 'svcadm %s\n' "$*" >>"$MOCK_ZFS_LOG"
+if [ -n "${MOCK_SVCADM_FAIL:-}" ]; then
+	case "$*" in
+	$MOCK_SVCADM_FAIL)
+		printf 'svcadm: mock failure: %s\n' "$*" >&2
+		exit 1
+		;;
+	esac
+fi
+exit 0
+EOF
+	chmod +x "$1"
+}
+
+# Purpose: Write the forwarded alias an earlier -k hop leaves for ROOT (the
+# current-format file keyed ROOT/ROOT) under BACKUP_ROOT: 0700 directories,
+# a 0600 file, and the given relative rows.
+# Usage: planning_write_backup_alias <root> <row>...
+planning_write_backup_alias() {
+	l_alias_root=$1
+	shift
+	l_alias_file=$(planning_backup_metadata_file "$BACKUP_ROOT" "$l_alias_root" \
+		"$l_alias_root")
+	(umask 077 && mkdir -p "${l_alias_file%/*}") ||
+		fail "Unable to create the alias directory of $l_alias_root."
+	printf '%s\n' "#zxfer property backup file" "#format_version:2" \
+		"#source_root:$l_alias_root" "#destination_root:$l_alias_root" "$@" \
+		>"$l_alias_file" || fail "Unable to write the alias of $l_alias_root."
+	chmod 600 "$l_alias_file"
+}
+
+# Purpose: Run planning_run_backup_zxfer for an -O or -T case: the mock ssh
+# logs to a fresh SSH_LOG, and PATH leads with MOCKBIN_DIR in a subshell so
+# it never leaks into the suite.
+# Usage: planning_run_backup_zxfer_over_ssh [zxfer-arg...]; needs SSH_LOG
+# and a mock ssh in MOCKBIN_DIR. Returns zxfer's status.
+planning_run_backup_zxfer_over_ssh() {
+	: >"$SSH_LOG"
+	export MOCK_SSH_LOG="$SSH_LOG"
+	(
+		PATH=$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")
+		export PATH
+		planning_run_backup_zxfer "$@"
+	)
+	l_over_ssh_status=$?
+	unset MOCK_SSH_LOG
+	return "$l_over_ssh_status"
+}
+
+# ---------------------------------------------------------------------------
+# Listing fault and codec fixtures.
+
+# Purpose: Make one exact manifest key in STATE_DIR succeed with no output: a
+# listing that finds nothing.
+# Usage: planning_answer_manifest_key_with_nothing <argv-key>
+planning_answer_manifest_key_with_nothing() {
+	planning_force_manifest_failure "$1" 0
+}
+
+# Purpose: Wrap the canned zfs so the first call whose space-joined argv is
+# exactly ARGV answers from the manifest as usual and then prints STDERR and
+# exits STATUS: a listing that dies after streaming its rows, or with STATUS
+# 0 one that succeeds with a warning. Later calls with that argv answer
+# normally. Calling the helper again re-arms the wrapper with new values.
+# Usage: planning_fail_canned_zfs_after_output <argv> <status> [<stderr>]
+planning_fail_canned_zfs_after_output() {
+	l_after_dir="$CASE_DIR/after_output"
+	mkdir -p "$l_after_dir" ||
+		fail "Unable to create the after-output wrapper state."
+	printf '%s\n' "$1" >"$l_after_dir/argv" ||
+		fail "Unable to arm the after-output wrapper."
+	printf '%s\n' "$2" >"$l_after_dir/status" ||
+		fail "Unable to arm the after-output wrapper."
+	: >"$l_after_dir/stderr" || fail "Unable to arm the after-output wrapper."
+	if [ -n "${3:-}" ]; then
+		printf '%s\n' "$3" >"$l_after_dir/stderr" ||
+			fail "Unable to write the after-output stderr."
+	fi
+	rm -f "$l_after_dir/fired"
+	[ ! -f "$MOCKBIN_DIR/zfs.answering" ] || return 0
+	mv "$MOCKBIN_DIR/zfs" "$MOCKBIN_DIR/zfs.answering" ||
+		fail "Unable to stage the canned zfs behind the after-output wrapper."
+	cat >"$MOCKBIN_DIR/zfs" <<WRAPPER
+#!/bin/sh
+IFS= read -r after_argv <"$l_after_dir/argv"
+# The first matching call claims the marker; noclobber makes the claim
+# atomic when the no-op proof lists both sides at once.
+if [ "\$*" = "\$after_argv" ] &&
+	(set -C && printf '' >"$l_after_dir/fired") 2>/dev/null; then
+	"$MOCKBIN_DIR/zfs.answering" "\$@"
+	cat "$l_after_dir/stderr" >&2
+	IFS= read -r after_status <"$l_after_dir/status"
+	exit "\$after_status"
+fi
+exec "$MOCKBIN_DIR/zfs.answering" "\$@"
+WRAPPER
+	chmod +x "$MOCKBIN_DIR/zfs" ||
+		fail "Unable to make the after-output wrapper executable."
+}
+
+# Purpose: Write a zstd stand-in whose "compression" prefixes every line with
+# "zstd:" and whose -d strips that prefix again, failing on a line without
+# it, so a stream that skips either side of the codec no longer parses. Each
+# call appends its arguments to <path>.argv.
+# Usage: planning_write_mock_zstd <path>
+planning_write_mock_zstd() {
+	cat >"$1" <<EOF_ZSTD
+#!/bin/sh
+printf '%s\n' "\$*" >>"$1.argv"
+for mock_zstd_arg in "\$@"; do
+	[ "\$mock_zstd_arg" = -d ] || continue
+	exec awk 'substr(\$0, 1, 5) != "zstd:" { bad = 1; next }
+		{ print substr(\$0, 6) }
+		END { exit bad }'
+done
+exec sed 's/^/zstd:/'
+EOF_ZSTD
+	chmod +x "$1"
+}
+
+# Purpose: Wrap the mock parallel so each call also appends its arguments,
+# space-joined, to PARALLEL_ARGV_LOG, locally and on a mock-ssh origin alike.
+# Usage: planning_log_mock_parallel_argv, after planning_setup_parallel_jobs_env;
+# sets PARALLEL_ARGV_LOG.
+planning_log_mock_parallel_argv() {
+	PARALLEL_ARGV_LOG="$CASE_DIR/parallel.argv"
+	mv "$MOCKBIN_DIR/parallel" "$MOCKBIN_DIR/parallel.mock" ||
+		fail "Unable to stage the mock parallel behind its argv log."
+	cat >"$MOCKBIN_DIR/parallel" <<EOF_PARALLEL
+#!/bin/sh
+printf '%s\n' "\$*" >>"$PARALLEL_ARGV_LOG"
+exec "$MOCKBIN_DIR/parallel.mock" "\$@"
+EOF_PARALLEL
+	chmod +x "$MOCKBIN_DIR/parallel" ||
+		fail "Unable to make the parallel argv log executable."
+}
+
+# Purpose: Make the -T destination root and its mapped datasets answer like
+# missing datasets, while the pool rule is left to the caller. The recursive
+# snapshot listing fails, each exact probe prints zfs's missing-dataset line
+# (probes read stdout and stderr together) and the dataset inventory fails
+# once with that line on stderr, through the zfs fault injector.
+# Usage: planning_make_remote_destination_root_missing; exports the MOCK_FAIL_*
+# variables, which the caller unsets.
+# shellcheck disable=SC2089,SC2090  # the quotes are part of the zfs message
+planning_make_remote_destination_root_missing() {
+	planning_force_manifest_failure \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" 1
+	for l_missing_suffix in "" /child1 /child2; do
+		l_missing_dataset=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_missing_suffix
+		l_missing_fixture="missing_${l_missing_suffix#/}.list"
+		printf "cannot open '%s': dataset does not exist\n" "$l_missing_dataset" \
+			>"$STATE_DIR/$l_missing_fixture" ||
+			fail "Unable to write the missing-dataset fixture."
+		# The first matching rule wins, so these go first.
+		{
+			printf 'list -H %s\t%s\t1\n' "$l_missing_dataset" "$l_missing_fixture"
+			cat "$STATE_DIR/manifest"
+		} >"$STATE_DIR/manifest.new" ||
+			fail "Unable to prepend the missing-dataset rule."
+		mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
+			fail "Unable to install the missing-dataset rule."
+	done
+	mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
+	MOCK_FAIL_TOOL=zfs
+	MOCK_FAIL_CALL=1
+	MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
+	MOCK_FAIL_MATCH="list -t filesystem,volume -Hr -o name $ZXFER_MOCKBIN_DEST_ROOT"
+	MOCK_FAIL_STDERR="cannot open '$ZXFER_MOCKBIN_DEST_ROOT': dataset does not exist"
+	MOCK_FAIL_STATUS=1
+	export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
+		MOCK_FAIL_STDERR MOCK_FAIL_STATUS
 }

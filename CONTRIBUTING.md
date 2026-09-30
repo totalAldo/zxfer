@@ -103,7 +103,9 @@ runners.
 Run targeted suites when editing a specific area. The tests of
 `src/zxfer_NAME.sh` live in `tests/test_zxfer_NAME.sh` and the
 `tests/suites/zxfer_NAME_*_tests.sh` fragments it runs; the black-box contract
-suites that drive the real launcher are `tests/test_contract_*.sh`:
+suites that drive the real launcher are `tests/test_contract_*.sh`. A new
+behavior gets a contract case first; unit tests cover what the canned zfs
+cannot express (`docs/testing.md`, "Where a new test goes"):
 
 ```sh
 ./tests/run_shunit_tests.sh tests/test_zxfer_replication.sh

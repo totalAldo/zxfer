@@ -29,16 +29,6 @@ test_execute_command_respects_dry_run_mode() {
 	assertFalse "Dry run should skip running the command." "[ -f \"$temp_file\" ]"
 }
 
-test_execute_command_runs_command_when_not_dry_run() {
-	# When --dry-run is off, the helper must execute commands verbatim.
-	temp_file="$TEST_TMPDIR/run_output"
-
-	zxfer_execute_rendered_shell_command "printf 'ran' > '$temp_file'"
-
-	assertTrue "Command should run when dry run is disabled." "[ -f \"$temp_file\" ]"
-	assertEquals "ran" "$(cat "$temp_file")"
-}
-
 test_signal_background_shell_covers_group_initialization_race() {
 	for launch_case in launcher transition gone denied_launcher denied_group; do
 		output=$(

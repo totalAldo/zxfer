@@ -4,7 +4,10 @@
 # Prefers kcov when available; otherwise falls back to a bash xtrace report.
 # The bash-xtrace mode runs the suites through tests/run_shunit_tests.sh with
 # a ZXFER_TEST_SHELL wrapper that traces each suite into its own file, so it
-# shares that runner's worker pool, watchdog and signal teardown.
+# shares that runner's worker pool, watchdog and signal teardown. The zxfer
+# runs the black-box suites start are traced too: tests/test_helper.sh
+# launches ZXFER_COVERAGE_ZXFER_BIN, a wrapper that runs ./zxfer under the
+# same xtrace.
 #
 
 set -eu
@@ -13,7 +16,7 @@ ZXFER_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TEST_DIR="$ZXFER_ROOT/tests"
 COVERAGE_DIR=${COVERAGE_DIR:-"$ZXFER_ROOT/coverage"}
 ZXFER_COVERAGE_MODE=${ZXFER_COVERAGE_MODE:-auto}
-ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=${ZXFER_COVERAGE_INCLUDE_ENTRYPOINT:-0}
+ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=${ZXFER_COVERAGE_INCLUDE_ENTRYPOINT:-1}
 TARGET_LIST_FILE=
 COVERAGE_TRACE_DIR=
 COVERAGE_RUNNER_PID=
@@ -25,11 +28,12 @@ Usage: tests/run_coverage.sh [--report-only] [--] [suite ...]
 Runs the shunit2 suites under a coverage collector and writes results to
 ./coverage by default.
 
-The bash-xtrace fallback covers sourced shell modules under src/. It excludes
-the top-level ./zxfer entrypoint by default because child-shell execution is
-not traced reliably without kcov. Set ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=1 to
-include it anyway. It runs the suites through tests/run_shunit_tests.sh, so
-that runner's default worker count and ZXFER_TEST_SUITE_TIMEOUT apply.
+The bash-xtrace fallback covers the ./zxfer launcher and the modules under
+src/. It traces each suite's shell and every zxfer run a black-box suite
+starts, so tests/test_contract_*.sh alone reports black-box coverage. Set
+ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=0 to leave the launcher out of the report.
+It runs the suites through tests/run_shunit_tests.sh, so that runner's
+default worker count and ZXFER_TEST_SUITE_TIMEOUT apply.
 
 Modes:
   auto        Prefer kcov when installed, otherwise use bash xtrace.
@@ -188,6 +192,31 @@ EOF
 	ZXFER_COVERAGE_BASH_BIN=$1
 	ZXFER_COVERAGE_TRACE_DIR=$2
 	export ZXFER_COVERAGE_BASH_BIN ZXFER_COVERAGE_TRACE_DIR
+}
+
+# Purpose: Write the launcher wrapper the black-box suites run in place of
+# ./zxfer (tests/test_helper.sh reads ZXFER_COVERAGE_ZXFER_BIN), so the zxfer
+# processes they start count for coverage. Each run appends its trace to
+# ZXFER_COVERAGE_TRACE_DIR/zxfer.<pid>.trace on fd 7; subshells and
+# background jobs of that run share the file.
+# Usage: write_bash_xtrace_zxfer WRAPPER_PATH, after write_bash_xtrace_shell
+# has exported the bash and the trace directory the wrapper reads.
+write_bash_xtrace_zxfer() {
+	# $0 stays the real launcher, so zxfer finds src/ beside it as a direct
+	# run does. --posix keeps bash close to the /bin/sh the launcher names.
+	cat >"$1" <<'EOF'
+#!/bin/sh
+exec "$ZXFER_COVERAGE_BASH_BIN" --posix --noprofile --norc -c '
+PS4="+\${BASH_SOURCE[0]-\$0}:\${LINENO:-0}: "
+BASH_XTRACEFD=7
+set -x
+. "$0"
+' "$ZXFER_COVERAGE_ZXFER_LAUNCHER" "$@" 7>>"$ZXFER_COVERAGE_TRACE_DIR/zxfer.$$.trace"
+EOF
+	chmod 700 "$1"
+	ZXFER_COVERAGE_ZXFER_LAUNCHER=$ZXFER_ROOT/zxfer
+	ZXFER_COVERAGE_ZXFER_BIN=$1
+	export ZXFER_COVERAGE_ZXFER_LAUNCHER ZXFER_COVERAGE_ZXFER_BIN
 }
 
 # Purpose: Succeed when BASH_BIN writes "+file:line:" xtrace lines to fd 7.
@@ -763,6 +792,7 @@ run_with_bash_xtrace() {
 	fi
 	write_bash_xtrace_shell "$l_bash_bin" "$COVERAGE_TRACE_DIR/traces" \
 		"$COVERAGE_TRACE_DIR/xtrace-shell"
+	write_bash_xtrace_zxfer "$COVERAGE_TRACE_DIR/xtrace-zxfer"
 
 	mkdir -p "$COVERAGE_DIR/bash-xtrace"
 	l_merged_trace="$COVERAGE_DIR/bash-xtrace/merged.trace"

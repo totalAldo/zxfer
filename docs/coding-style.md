@@ -277,6 +277,10 @@ zxfer_get_temp_file() {
   (directly or through a domain fixture's setup helper), then override only
   suite-specific values; move domain-specific preparation into named fixture
   helpers.
+- Pin behavior an operator can observe in a contract suite, and unit-test
+  only what the black-box harness cannot reach (see "Where a new test
+  goes" in [testing.md](./testing.md)). Do not stub collaborators to pin
+  the order of a module's calls.
 - Stub `src/` functions inside a subshell so the stub cannot leak into later
   cases.
 - Capture a command's status (`l_run_status=$?`) on the line after it before

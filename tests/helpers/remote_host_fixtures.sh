@@ -12,17 +12,6 @@
 # shellcheck source=tests/helpers/fake_tool_fixtures.sh
 . "$TESTS_DIR/helpers/fake_tool_fixtures.sh"
 
-# Purpose: Publish a mocked capability response through the same parsed-result
-# channel that production ensure calls guarantee to their OS and tool
-# consumers.
-# Usage: zxfer_test_accept_remote_capability_response RESPONSE
-zxfer_test_accept_remote_capability_response() {
-	l_test_capability_response=$1
-	g_zxfer_remote_capability_response_result=$l_test_capability_response
-	zxfer_parse_remote_capability_response "$l_test_capability_response" || return 1
-	printf '%s\n' "$l_test_capability_response"
-}
-
 # Purpose: Create the private default temp root and the ssh stand-in once
 # TEST_TMPDIR exists.
 # Usage: zxfer_test_remote_host_fixture_one_time_setup, from oneTimeSetUp

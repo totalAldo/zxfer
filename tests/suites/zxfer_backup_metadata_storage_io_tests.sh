@@ -109,23 +109,6 @@ test_backup_pair_second_publish_failure_removes_a_new_primary() {
 	done
 }
 
-test_backup_pair_refuses_an_unsafe_alias_before_replacing_the_primary() {
-	for pair_mode in local remote; do
-		zxfer_backup_test_use_private_root "pair_alias_guard_$pair_mode"
-		g_backup_file_contents=$(zxfer_test_backup_metadata_row "." "compression=lz4=local")
-		(umask 077 && mkdir -p "${BACKUP_TEST_PRIMARY_FILE%/*}" "${BACKUP_TEST_FORWARDED_FILE%/*}")
-		printf 'old primary\n' >"$BACKUP_TEST_PRIMARY_FILE"
-		ln -s "$BACKUP_TEST_PRIMARY_FILE" "$BACKUP_TEST_FORWARDED_FILE"
-		output=$(zxfer_backup_test_fail_pair_write none "$pair_mode" 2>&1)
-		assertEquals "$pair_mode must reject the alias: $output" 1 "$?"
-		assertContains "$output" "because it is a symlink"
-		assertEquals "Primary remains unchanged when the alias is unsafe." "old primary" "$(cat "$BACKUP_TEST_PRIMARY_FILE")"
-		assertTrue "The alias itself is not removed or followed." "[ -L '$BACKUP_TEST_FORWARDED_FILE' ]"
-		assertEquals "No stage files should be allocated for invalid targets." \
-			"" "$(find "$g_backup_storage_root" -name '.zxfer-backup-*')"
-	done
-}
-
 test_backup_pair_rollback_failure_keeps_private_recovery_and_reports_its_path() {
 	for pair_mode in local remote; do
 		zxfer_backup_test_use_private_root "pair_recovery_$pair_mode"
@@ -174,86 +157,36 @@ test_backup_pair_defers_signals_until_publication_state_is_consistent() {
 	done
 }
 
-test_init_backup_storage_root_reads_the_override_once_and_rejects_unsafe_roots() {
-	g_backup_storage_root="/cached/root"
-	ZXFER_BACKUP_DIR="$TEST_TMPDIR_PHYSICAL/override root"
-	zxfer_init_backup_storage_root
-	assertEquals "$TEST_TMPDIR_PHYSICAL/override root" "$g_backup_storage_root"
-
-	zxfer_backup_test_use_private_root "init_root_once"
-	ZXFER_BACKUP_DIR="$TEST_TMPDIR_PHYSICAL/init_root_ignored"
-	g_backup_file_contents=$(zxfer_test_backup_metadata_row "." "compression=lz4=local")
-	zxfer_write_backup_properties >/dev/null
-	assertTrue "The write uses the session root." "[ -f '$BACKUP_TEST_PRIMARY_FILE' ]"
-	assertFalse "A later change to ZXFER_BACKUP_DIR is not re-read." \
-		"[ -e '$TEST_TMPDIR_PHYSICAL/init_root_ignored' ]"
-	unset ZXFER_BACKUP_DIR
-
-	zxfer_init_backup_storage_root
-	assertEquals "Without an override the default is used, never an inherited value." \
-		"/var/db/zxfer" "$g_backup_storage_root"
-
-	for unsafe_root in "relative/root" "$(printf '/tmp/a\tb')" "$(printf '/tmp/a\rb')" "$(printf '/tmp/a\nb')"; do
-		output=$(
-			(
-				ZXFER_BACKUP_DIR=$unsafe_root
-				zxfer_init_backup_storage_root
-			) 2>&1
-		)
-		assertEquals "Unsafe root [$unsafe_root] must be refused." 1 "$?"
-		assertContains "$output" "ZXFER_BACKUP_DIR"
-	done
-}
-
-test_init_backup_storage_root_rejects_relative_override() {
-	zxfer_test_capture_subshell '
-		ZXFER_BACKUP_DIR="relative-backups"
-		zxfer_init_backup_storage_root
-	'
-
-	assertEquals "Relative ZXFER_BACKUP_DIR overrides should fail closed." 1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Relative backup-root errors should explain the absolute-path requirement." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ZXFER_BACKUP_DIR must be an absolute path"
-}
-
-test_init_backup_storage_root_ignores_inherited_internal_state() {
-	output=$(
-		(
-			unset ZXFER_BACKUP_DIR
-			g_backup_storage_root="$TEST_TMPDIR/inherited-internal-root"
-			zxfer_init_backup_storage_root
-			printf 'default=%s\n' "$g_backup_storage_root"
-
-			ZXFER_BACKUP_DIR="$TEST_TMPDIR/public-backup-root"
-			g_backup_storage_root="$TEST_TMPDIR/second-inherited-root"
-			zxfer_init_backup_storage_root
-			printf 'public=%s\n' "$g_backup_storage_root"
-		)
-	)
-
-	assertContains "Backup-root initialization must ignore an inherited internal cache when the public override is unset." \
-		"$output" "default=/var/db/zxfer"
-	assertContains "Backup-root initialization should still honor the documented public environment override." \
-		"$output" "public=$TEST_TMPDIR/public-backup-root"
-}
-
-test_get_backup_metadata_filename_chunks_long_identities_and_keeps_pairs_distinct() {
+test_get_backup_metadata_filename_renders_the_documented_identity_paths() {
 	g_backup_file_extension=".zxfer_backup_info"
 	long_source="tank/$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30)"
-	long_name=$(zxfer_get_backup_metadata_filename "$long_source" "backup/dst")
+	# The man page example is the hex of "tank/src\nbackup/dst" in 48-character
+	# chunks under the fixed v2 leaf name; a longer identity takes more chunks.
+	# Retired writers keyed the name by cksum of "tank/src<LF>backup/dst" with
+	# no final newline. source|destination|kind|name
+	for case_spec in \
+		"tank/src|backup/dst||.zxfer_backup_info.v2/h/74616e6b2f7372630a6261636b75702f647374/.zxfer_backup_info.v2" \
+		"tank/my :src|backup/dst||.zxfer_backup_info.v2/h/74616e6b2f6d79203a7372630a6261636b75702f647374/.zxfer_backup_info.v2" \
+		"$long_source|backup/dst||.zxfer_backup_info.v2/h/74616e6b2f61616161616161616161616161616161616161/61616161616161616161610a6261636b75702f647374/.zxfer_backup_info.v2" \
+		"tank/src|backup/dst|legacy|.zxfer_backup_info.src.k1537737481.19"; do
+		name_source=${case_spec%%|*}
+		rest=${case_spec#*|}
+		name_destination=${rest%%|*}
+		rest=${rest#*|}
+		name_kind=${rest%%|*}
+		assertEquals "[$name_source] -> [$name_destination] ${name_kind:-current} name." \
+			"${rest#*|}" \
+			"$(zxfer_get_backup_metadata_filename "$name_source" "$name_destination" ${name_kind:+"$name_kind"})"
+	done
 
-	assertEquals "Every identity component stays within 48 hex characters." \
-		"" "$(printf '%s\n' "$long_name" | tr '/' '\n' | awk 'length($0) > 48')"
-	assertContains "$long_name" ".zxfer_backup_info.v2/h/"
-	assertNotEquals "Distinct sources with the same tail differ." \
-		"$(zxfer_get_backup_metadata_filename tank/a/src backup/one)" \
-		"$(zxfer_get_backup_metadata_filename tank/b/src backup/one)"
-	assertNotEquals "Distinct destinations differ." \
-		"$(zxfer_get_backup_metadata_filename tank/a/src backup/one)" \
-		"$(zxfer_get_backup_metadata_filename tank/a/src backup/two)"
-	assertEquals "Names with spaces and colons survive the hex identity." \
-		".zxfer_backup_info.v2/h/74616e6b2f6d79203a7372630a6261636b75702f647374/.zxfer_backup_info.v2" \
-		"$(zxfer_get_backup_metadata_filename "tank/my :src" "backup/dst")"
+	for name_kind in current legacy; do
+		output=$(
+			g_cmd_awk=false
+			zxfer_get_backup_metadata_filename tank/src backup/dst "$name_kind"
+		)
+		assertEquals "A failed $name_kind identity pass fails closed without a partial name." \
+			"1 " "$? $output"
+	done
 }
 
 test_ensure_local_backup_dir_creates_private_directories_and_refuses_unsafe_paths() {
@@ -271,70 +204,41 @@ test_ensure_local_backup_dir_creates_private_directories_and_refuses_unsafe_path
 
 	ln -s "$base/new" "$base/link"
 	: >"$base/file"
+	failing_chmod_dir="$TEST_TMPDIR/ensure_local_failing_chmod"
+	mkdir -p "$failing_chmod_dir"
+	printf '#!/bin/sh\nexit 1\n' >"$failing_chmod_dir/chmod"
+	chmod +x "$failing_chmod_dir/chmod"
+	# directory|simulated failure|expected error
 	for case_spec in \
-		"$base/link|Refusing to use backup directory $base/link because it is a symlink." \
-		"$base/link/child|Refusing to use backup directory $base/link/child because path component $base/link is a symlink." \
-		"$base/file|Refusing to use backup directory $base/file because it is not a directory."; do
+		"$base/link||Refusing to use backup directory $base/link because it is a symlink." \
+		"$base/link/child||Refusing to use backup directory $base/link/child because path component $base/link is a symlink." \
+		"$base/file||Refusing to use backup directory $base/file because it is not a directory." \
+		"$base/new|owner 4321|Refusing to use backup directory $base/new because it is owned by UID 4321 instead of" \
+		"$base/new|owner unknown|Cannot determine the owner of backup directory $base/new." \
+		"$base/missing|mkdir|Error creating secure backup directory $base/missing." \
+		"$base/new|chmod|Error securing backup directory $base/new."; do
+		dir=${case_spec%%|*}
+		rest=${case_spec#*|}
+		failure=${rest%%|*}
 		output=$(
 			(
-				zxfer_ensure_local_backup_dir "${case_spec%%|*}"
+				# No case statement here: bash 3.2 (macOS /bin/sh) mis-parses
+				# case patterns inside command substitution.
+				if [ "$failure" = "owner unknown" ]; then
+					zxfer_get_path_owner_uid() { return 1; }
+				elif [ "${failure%% *}" = owner ]; then
+					zxfer_get_path_owner_uid() { printf '%s\n' "${failure#owner }"; }
+				elif [ "$failure" = mkdir ]; then
+					mkdir() { return 1; }
+				elif [ "$failure" = chmod ]; then
+					PATH="$failing_chmod_dir:$PATH"
+				fi
+				zxfer_ensure_local_backup_dir "$dir"
 			) 2>&1
 		)
-		assertEquals "Unsafe directory [${case_spec%%|*}] must be refused." 1 "$?"
-		assertContains "$output" "${case_spec#*|}"
+		assertEquals "Directory [$dir] ${failure:+with $failure }must be refused." 1 "$?"
+		assertContains "$output" "${rest#*|}"
 	done
-
-	output=$(
-		(
-			zxfer_get_path_owner_uid() { printf '4321\n'; }
-			zxfer_ensure_local_backup_dir "$base/new"
-		) 2>&1
-	)
-	assertEquals 1 "$?"
-	assertContains "$output" "Refusing to use backup directory $base/new because it is owned by UID 4321 instead of"
-}
-
-test_write_backup_properties_refuses_symlinked_targets_and_cleans_the_stage_on_failure() {
-	zxfer_backup_test_use_private_root write_guards
-	g_option_T_target_host=""
-	g_option_n_dryrun=0
-	g_backup_file_contents=$(zxfer_test_backup_metadata_row "." "compression=lz4=local")
-	decoy="$TEST_TMPDIR_PHYSICAL/write_guards_decoy"
-	printf 'decoy\n' >"$decoy"
-	(umask 077 && mkdir -p "${BACKUP_TEST_PRIMARY_FILE%/*}")
-	ln -s "$decoy" "$BACKUP_TEST_PRIMARY_FILE"
-
-	output=$(
-		(
-			zxfer_write_backup_properties
-		) 2>&1
-	)
-	assertEquals 1 "$?"
-	assertContains "$output" "Refusing to write backup metadata $BACKUP_TEST_PRIMARY_FILE because it is a symlink."
-	assertEquals "The symlink target is untouched." "decoy" "$(cat "$decoy")"
-	assertTrue "[ -L '$BACKUP_TEST_PRIMARY_FILE' ]"
-	rm -f "$BACKUP_TEST_PRIMARY_FILE"
-
-	mkdir -p "$BACKUP_TEST_PRIMARY_FILE"
-	output=$(
-		(
-			zxfer_write_backup_properties
-		) 2>&1
-	)
-	assertEquals 1 "$?"
-	assertContains "$output" "Refusing to write backup metadata $BACKUP_TEST_PRIMARY_FILE because it is not a regular file."
-	rmdir "$BACKUP_TEST_PRIMARY_FILE"
-
-	output=$(
-		(
-			zxfer_backup_test_fail_pair_write primary local
-		) 2>&1
-	)
-	assertEquals 1 "$?"
-	assertContains "$output" "Error writing backup file. Is filesystem mounted?"
-	assertFalse "A failed rename leaves no target." "[ -e '$BACKUP_TEST_PRIMARY_FILE' ]"
-	assertEquals "A failed rename leaves no stage file." \
-		"" "$(find "${BACKUP_TEST_PRIMARY_FILE%/*}" -name '.zxfer-backup-write.*')"
 }
 
 # The local pair writer runs /bin/sh, like job shells, so a secure PATH
@@ -364,34 +268,6 @@ test_write_backup_properties_runs_bin_sh_without_sh_on_path() {
 		assertContains "The write publishes $metadata_file." \
 			"$(cat "$metadata_file" 2>/dev/null)" "$g_backup_file_contents"
 	done
-}
-
-test_write_backup_properties_publishes_remote_files_through_the_write_program() {
-	zxfer_backup_test_use_private_root write_remote
-	g_option_T_target_host="target.example"
-	g_option_n_dryrun=0
-	literal_note="user:note=\$(touch $TEST_TMPDIR/write_remote_sentinel)\\literal=local"
-	g_backup_file_contents=$(zxfer_test_backup_metadata_row "." "$literal_note")
-
-	output=$(
-		(
-			zxfer_backup_test_stub_local_transport
-			zxfer_resolve_cli_command_safe() { g_zxfer_resolved_cli_command_result="cat"; }
-			zxfer_write_backup_properties
-		) 2>&1
-	)
-	assertEquals "Remote publication succeeds through the stubbed transport; output: $output" 0 "$?"
-	for metadata_file in "$BACKUP_TEST_PRIMARY_FILE" "$BACKUP_TEST_FORWARDED_FILE"; do
-		assertTrue "The remote program lands the file: $metadata_file" "[ -f '$metadata_file' ]"
-		case "$(ls -ldn "$metadata_file")" in
-		-rw-------*) ;;
-		*) fail "Remote metadata must be 0600: $(ls -ldn "$metadata_file")" ;;
-		esac
-		assertEquals "Payload travels through stdin verbatim to both metadata files." \
-			"$(printf '.\t%s' "$literal_note")" "$(sed -n '/^\.	/p' "$metadata_file")"
-		assertEquals "" "$(find "${metadata_file%/*}" -name '.zxfer-backup-write.*')"
-	done
-	assertFalse "Property values are never evaluated as shell." "[ -e '$TEST_TMPDIR/write_remote_sentinel' ]"
 }
 
 test_write_backup_properties_reports_remote_dependency_write_and_transport_failures() {
@@ -849,21 +725,4 @@ test_remote_backup_renderers_treat_host_and_path_metacharacters_as_data() {
 	assertFalse "Host metacharacters never execute." "[ -e '$marker' ]"
 	assertEquals "The read program handles the same quoting." \
 		"quoted payload" "$(sh -c "$(zxfer_build_remote_backup_read_cmd "$path" "$host")")"
-}
-
-test_render_remote_backup_dry_run_shell_command_collapses_to_one_ssh_line() {
-	g_cmd_ssh="/usr/bin/ssh"
-	script=$(zxfer_build_remote_backup_dir_prepare_cmd "/var/db/zxfer" "target.example doas")
-
-	zxfer_render_remote_backup_dry_run_shell_command "target.example doas" "$script"
-	assertEquals 0 "$?"
-	assertEquals "The preview is one physical line." \
-		1 "$(printf '%s\n' "$g_zxfer_remote_backup_dry_run_shell_command_result" | wc -l | tr -d '[:space:]')"
-	assertContains "$g_zxfer_remote_backup_dry_run_shell_command_result" \
-		"'/usr/bin/ssh' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' 'target.example'"
-	assertContains "$g_zxfer_remote_backup_dry_run_shell_command_result" "doas"
-	assertContains "$g_zxfer_remote_backup_dry_run_shell_command_result" "Refusing to use symlinked zxfer backup directory."
-
-	zxfer_render_remote_backup_dry_run_shell_command "target.example" ""
-	assertEquals "An empty program cannot be previewed." 1 "$?"
 }

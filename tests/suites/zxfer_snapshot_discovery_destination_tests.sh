@@ -1,7 +1,10 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Destination snapshot listing, normalization and no-op-proof stream cases for
-# src/zxfer_snapshot_discovery.sh. Run by tests/test_zxfer_snapshot_discovery.sh.
+# Destination listing, normalization and no-op-proof producer cases for
+# src/zxfer_snapshot_discovery.sh that only a unit test can reach: the
+# snapshot record awk's rewrite and exclude rules, awk/sort and staging
+# failures, and producer registration and abort edges. Run by
+# tests/test_zxfer_snapshot_discovery.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 # Destination listing stand-in for the writer tests: the recursive snapshot
@@ -20,169 +23,6 @@ zxfer_test_stub_destination_listing() {
 		[ -z "${DEST_PROBE_OUTPUT:-}" ] || printf '%s\n' "$DEST_PROBE_OUTPUT" >&2
 		return "${DEST_PROBE_STATUS:-0}"
 	}
-}
-
-test_write_destination_snapshot_list_to_files_lists_without_an_existence_probe() {
-	set +e
-	full_file="$TEST_TMPDIR/dest_existing_full.txt"
-	norm_file="$TEST_TMPDIR/dest_existing_norm.txt"
-	DEST_LIST_LOG="$TEST_TMPDIR/dest_existing.log"
-	stderr_file="$TEST_TMPDIR/dest_existing.err"
-	: >"$DEST_LIST_LOG"
-
-	output=$(
-		(
-			zxfer_test_stub_destination_listing
-			DEST_LIST_STDOUT="backup/dst/src@snap1	111"
-			DEST_LIST_STDERR="zfs: listing warning"
-			zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
-			printf 'status=%s\n' "$?"
-			zxfer_lookup_destination_existence_cache "backup/dst/src"
-			printf 'cache=%s\n' "$g_zxfer_destination_existence_cache_entry_result"
-		) 2>"$stderr_file"
-	)
-
-	assertContains "A successful destination listing should succeed." "$output" "status=0"
-	assertEquals "A successful listing should pass its warnings on to stderr." \
-		"zfs: listing warning" "$(cat "$stderr_file")"
-	assertEquals "A successful listing should be the only destination zfs call." \
-		"list -Hr -o name,guid -t snapshot backup/dst/src" "$(cat "$DEST_LIST_LOG")"
-	assertContains "A successful listing should record that the destination root exists." \
-		"$output" "cache=1"
-	assertEquals "The raw listing should be staged unchanged." \
-		"backup/dst/src@snap1	111" "$(cat "$full_file")"
-	assertEquals "The normalized listing should use source paths." \
-		"tank/src@snap1	111" "$(cat "$norm_file")"
-}
-
-test_write_destination_snapshot_list_to_files_outputs_empty_when_destination_missing() {
-	set +e
-	full_file="$TEST_TMPDIR/dest_missing_full.txt"
-	norm_file="$TEST_TMPDIR/dest_missing_norm.txt"
-	DEST_LIST_LOG="$TEST_TMPDIR/dest_missing.log"
-	: >"$DEST_LIST_LOG"
-
-	(
-		zxfer_test_stub_destination_listing
-		DEST_LIST_STDERR="cannot open 'backup/dst/src': dataset does not exist"
-		DEST_LIST_STATUS=1
-		DEST_PROBE_OUTPUT=$DEST_LIST_STDERR
-		DEST_PROBE_STATUS=1
-		zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
-	)
-
-	assertContains "A failed listing should be classified by an exact existence probe of the root." \
-		"$(cat "$DEST_LIST_LOG")" "list -H backup/dst/src"
-	assertEquals "Missing destination datasets should yield an empty raw snapshot file." "" "$(cat "$full_file")"
-	assertEquals "Missing destination datasets should yield an empty normalized snapshot file." "" "$(cat "$norm_file")"
-}
-
-test_write_destination_snapshot_list_to_files_reports_destination_probe_failures() {
-	full_file="$TEST_TMPDIR/dest_probe_fail_full.txt"
-	norm_file="$TEST_TMPDIR/dest_probe_fail_norm.txt"
-	DEST_LIST_LOG="$TEST_TMPDIR/dest_probe_fail.log"
-	: >"$DEST_LIST_LOG"
-
-	set +e
-	output=$(
-		(
-			zxfer_test_stub_destination_listing
-			DEST_LIST_STATUS=1
-			DEST_PROBE_OUTPUT="permission denied"
-			DEST_PROBE_STATUS=1
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
-		)
-	)
-	status=$?
-
-	assertEquals "Destination snapshot discovery should fail closed when destination existence checks fail." 1 "$status"
-	assertContains "Destination snapshot discovery should surface the destination probe failure." \
-		"$output" "Failed to determine whether destination dataset [backup/dst/src] exists: permission denied"
-}
-
-test_write_destination_snapshot_list_to_files_reports_snapshot_listing_failures() {
-	full_file="$TEST_TMPDIR/dest_list_fail_full.txt"
-	norm_file="$TEST_TMPDIR/dest_list_fail_norm.txt"
-	DEST_LIST_LOG="$TEST_TMPDIR/dest_list_fail.log"
-	: >"$DEST_LIST_LOG"
-
-	set +e
-	output=$(
-		(
-			zxfer_test_stub_destination_listing
-			# A missing child in the listing's stderr must not pass for a
-			# missing root while the exact probe finds the root.
-			DEST_LIST_STDERR="cannot open 'backup/dst/src/child': dataset does not exist"
-			DEST_LIST_STATUS=1
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Destination snapshot discovery should abort when listing snapshots fails." 1 "$status"
-	assertContains "Destination snapshot listing failures should surface the listing stderr." \
-		"$output" "cannot open 'backup/dst/src/child': dataset does not exist"
-	assertContains "Destination snapshot listing failures should surface the generic destination snapshot-list error." \
-		"$output" "Failed to retrieve snapshot list from the destination."
-}
-
-# ssh exits 255 for its own failures: a -T listing that ssh could not deliver
-# stops the run with that status and is never followed by an existence probe
-# over the same connection. A local listing is always probed.
-test_write_destination_snapshot_list_to_files_stops_on_undelivered_remote_listings() {
-	full_file="$TEST_TMPDIR/dest_ssh_fail_full.txt"
-	norm_file="$TEST_TMPDIR/dest_ssh_fail_norm.txt"
-	DEST_LIST_LOG="$TEST_TMPDIR/dest_ssh_fail.log"
-
-	for l_test_target_host in target.example ""; do
-		: >"$DEST_LIST_LOG"
-		set +e
-		output=$(
-			(
-				g_option_T_target_host=$l_test_target_host
-				zxfer_test_stub_destination_listing
-				DEST_LIST_STDERR="Connection to target.example closed by remote host."
-				DEST_LIST_STATUS=255
-				zxfer_throw_error() {
-					printf 'error=%s status=%s\n' "$1" "${2:-1}"
-					exit "${2:-1}"
-				}
-				zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
-			) 2>&1
-		)
-		status=$?
-
-		assertEquals "An undelivered listing should keep ssh's status [target:$l_test_target_host]." \
-			255 "$status"
-		assertContains "An undelivered listing should pass ssh's stderr on [target:$l_test_target_host]." \
-			"$output" "Connection to target.example closed by remote host."
-		assertContains "An undelivered listing should report the snapshot-list failure [target:$l_test_target_host]." \
-			"$output" "error=Failed to retrieve snapshot list from the destination. status=255"
-	done
-	# The loop ends with the local case, which probed the root.
-	assertContains "A local listing failure should still be classified by the exact probe." \
-		"$(cat "$DEST_LIST_LOG")" "list -H backup/dst/src"
-
-	: >"$DEST_LIST_LOG"
-	(
-		g_option_T_target_host=target.example
-		zxfer_test_stub_destination_listing
-		DEST_LIST_STATUS=255
-		zxfer_throw_error() {
-			exit "${2:-1}"
-		}
-		zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
-	) >/dev/null 2>&1
-	assertEquals "An undelivered -T listing must not be followed by a probe over the same connection." \
-		"list -Hr -o name,guid -t snapshot backup/dst/src" "$(cat "$DEST_LIST_LOG")"
 }
 
 test_write_destination_snapshot_list_to_files_reports_empty_stage_failures_when_destination_missing() {
@@ -208,60 +48,10 @@ test_write_destination_snapshot_list_to_files_reports_empty_stage_failures_when_
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to stage empty destination snapshot list."
 }
 
-test_write_destination_snapshot_list_to_files_uses_destination_root_for_trailing_slash_sources() {
-	full_file="$TEST_TMPDIR/dest_trailing_existing_full.txt"
-	norm_file="$TEST_TMPDIR/dest_trailing_existing_norm.txt"
-	cmd_file="$TEST_TMPDIR/dest_trailing_existing_cmd.txt"
-	g_initial_source_had_trailing_slash=1
-	g_initial_source="tank/src"
-	g_destination="backup/dst"
-
-	(
-		g_option_V_very_verbose=1
-		zxfer_record_last_command_string() {
-			:
-		}
-		# shellcheck disable=SC2317,SC2329  # Invoked indirectly via g_cmd_zfs.
-		fake_rzfs() {
-			printf '%s\n' "$*" >"$cmd_file"
-			printf '%s\n' "backup/dst/child@snap2" "backup/dst@snap1"
-		}
-		g_cmd_zfs="fake_rzfs"
-		zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file" 2>/dev/null
-	)
-
-	assertContains "Trailing-slash replication should list snapshots from the destination root dataset, not a child suffix." \
-		"$(cat "$cmd_file")" "snapshot backup/dst"
-	assertNotContains "Trailing-slash replication should not append the source basename to the destination root." \
-		"$(cat "$cmd_file")" "backup/dst/src"
-	assertEquals "Trailing-slash replication should normalize destination snapshots into source-path form for recursive diffing." \
-		"tank/src/child@snap2
-tank/src@snap1" "$(cat "$norm_file")"
-}
-
-test_start_destination_snapshot_name_sorted_fifo_producer_streams_statuses_and_handles_registration_failures() {
-	zxfer_get_temp_file >/dev/null || fail "temp output setup failed"
-	destination_output=$g_zxfer_temp_file_result
-	err_file="$TEST_TMPDIR/dest_fifo.err"
-	status_file="$TEST_TMPDIR/dest_fifo.status"
-
-	zxfer_run_destination_zfs_cmd() {
-		printf '%s\n' "$*" >"$TEST_TMPDIR/dest_fifo.cmd"
-		printf '%s\n' "backup/dst/src@snapA"
-		printf '%s\n' "backup/dst/src/child@snapB"
-	}
-	# Run very-verbose so the lazily gated display render path is exercised.
-	g_option_V_very_verbose=1
-	raw_file="$TEST_TMPDIR/dest_fifo.raw"
-	zxfer_start_destination_snapshot_name_sorted_fifo_producer \
-		"$destination_output" "$err_file" "$status_file" "$raw_file" 2>/dev/null
-	g_option_V_very_verbose=0
-	producer_pid=$g_last_background_pid
-	wait "$producer_pid"
-	producer_status=$?
-	zxfer_unregister_cleanup_pid "$producer_pid"
-
-	registration_status=$(
+# A destination proof producer whose cleanup registration fails is stopped
+# and forgotten, and the start fails closed.
+test_start_destination_snapshot_name_sorted_fifo_producer_stops_an_unregistered_producer() {
+	registration_output=$(
 		(
 			zxfer_get_temp_file >/dev/null || exit 1
 			test_output=$g_zxfer_temp_file_result
@@ -275,29 +65,17 @@ test_start_destination_snapshot_name_sorted_fifo_producer_streams_statuses_and_h
 				kill "$1" 2>/dev/null || :
 				return 0
 			}
-			set +e
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer \
 				"$test_output" \
 				"$TEST_TMPDIR/dest_fifo_registration.err" \
 				"$TEST_TMPDIR/dest_fifo_registration.status" \
 				"$TEST_TMPDIR/dest_fifo_registration.raw"
-			printf '%s\n' "$?"
+			printf 'status=%s pid=<%s>\n' "$?" "$g_last_background_pid"
 		)
 	)
 
-	assertEquals "Destination snapshot producer should complete successfully." 0 "$producer_status"
-	assertContains "Destination FIFO producer should keep the identity-aware unsorted snapshot query." \
-		"$(cat "$TEST_TMPDIR/dest_fifo.cmd")" "list -Hr -o name,guid -t snapshot backup/dst/src"
-	assertEquals "Destination FIFO producer should normalize and byte-sort destination paths." \
-		"tank/src/child@snapB
-tank/src@snapA" "$(cat "$destination_output")"
-	assertEquals "Destination FIFO producer should keep the raw listing for full discovery." \
-		"backup/dst/src@snapA
-backup/dst/src/child@snapB" "$(cat "$raw_file")"
-	assertEquals "Destination FIFO producer should record the list, normalize and sort statuses on one line." \
-		"0 0 0" "$(cat "$status_file")"
-	assertEquals "Destination FIFO producer should fail closed when cleanup registration fails." \
-		1 "$registration_status"
+	assertEquals "Destination FIFO producer should fail closed and forget the producer when cleanup registration fails." \
+		"status=1 pid=<>" "$registration_output"
 }
 
 test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
@@ -361,108 +139,55 @@ test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
 		"$(cat "$log")" "direct_status=1"
 }
 
-test_normalize_destination_snapshot_list_rewrites_trailing_slash_destination_to_source_paths() {
-	input_file="$TEST_TMPDIR/dest_trailing_input.txt"
-	output_file="$TEST_TMPDIR/dest_trailing_output.txt"
-	g_initial_source_had_trailing_slash=1
-	g_initial_source="tank/src"
-	cat <<'EOF' >"$input_file"
-backup/dst/child@snap2
-backup/dst@snap1
-EOF
-
-	# Run very-verbose so the lazily gated display render path is exercised.
-	g_option_V_very_verbose=1
-	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file" 2>/dev/null
-
-	assertEquals "Trailing-slash destinations should be sorted after source-prefix rewriting." \
-		"tank/src/child@snap2
-tank/src@snap1" "$(cat "$output_file")"
-}
-
-test_normalize_destination_snapshot_list_treats_temp_paths_as_literal() {
-	marker="$TEST_TMPDIR/normalize_temp_path_marker"
-	input_file="$TEST_TMPDIR/input.\$(touch normalize_temp_path_marker)"
-	output_file="$TEST_TMPDIR/output.\$(touch normalize_temp_path_marker)"
-	rm -f "$marker" "$input_file" "$output_file"
-	printf '%s\n%s\n' "backup/dst@b" "backup/dst@a" >"$input_file"
-	g_initial_source_had_trailing_slash=0
-	g_initial_source="tank/src"
-
-	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
-
-	assertEquals "Normalization should still rewrite and sort snapshot names when temp paths contain metacharacters." \
-		"tank/src@a
-tank/src@b" "$(cat "$output_file")"
-	assertFalse "Normalization should not execute command substitutions embedded in temp file paths." "[ -e '$marker' ]"
-}
-
-test_normalize_destination_snapshot_list_rewrites_only_leading_destination_prefix() {
-	input_file="$TEST_TMPDIR/dest_repeated_prefix_input.txt"
-	output_file="$TEST_TMPDIR/dest_repeated_prefix_output.txt"
-	g_initial_source_had_trailing_slash=0
-	g_initial_source="tank/src"
-	{
-		printf '%s\t%s\n' "backup/dst/backup/dst/child@snap2" "222"
-		printf '%s\t%s\n' "backup/dst@snap1" "111"
-	} >"$input_file"
-
-	# Run very-verbose so the lazily gated display render path is exercised.
-	g_option_V_very_verbose=1
-	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file" 2>/dev/null
-
-	expected=$(printf '%s\t%s\n%s\t%s' \
-		"tank/src/backup/dst/child@snap2" "222" \
-		"tank/src@snap1" "111")
-	assertEquals "Destination normalization should rewrite only the leading destination root prefix." \
-		"$expected" "$(cat "$output_file")"
-}
-
-test_normalize_destination_snapshot_list_does_not_rewrite_similar_dataset_prefixes() {
-	input_file="$TEST_TMPDIR/dest_similar_prefix_input.txt"
-	output_file="$TEST_TMPDIR/dest_similar_prefix_output.txt"
-	g_initial_source_had_trailing_slash=0
-	g_initial_source="tank/src"
-	cat <<'EOF' >"$input_file"
-backup/dst-old@snap1
-backup/dst@snap1
-EOF
-
-	zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
-
-	expected=$(printf '%s\n%s' "backup/dst-old@snap1" "tank/src@snap1")
-	assertEquals "Destination normalization should not rewrite datasets that only share a text prefix." \
-		"$expected" "$(cat "$output_file")"
-}
-
-test_normalize_destination_snapshot_list_preserves_sort_failures() {
-	input_file="$TEST_TMPDIR/dest_normalize_sort_failure_input.txt"
-	output_file="$TEST_TMPDIR/dest_normalize_sort_failure_output.txt"
-	g_initial_source_had_trailing_slash=0
-	g_initial_source="tank/src"
-	printf '%s\n' "backup/dst@snap1" >"$input_file"
-
-	status=$(
+# ZXFER_SNAPSHOT_RECORD_AWK through its three callers: the exclude filter
+# drops records by their dataset only (never by snapshot name or guid), the
+# destination normalizer rewrites the destination root prefix (and only that
+# exact prefix) to the source's and sorts, and the no-op proof's stream
+# normalizer rewrites before it drops excluded datasets.
+test_snapshot_record_awk_rewrites_destination_paths_and_drops_excluded_datasets() {
+	input_file="$TEST_TMPDIR/record_awk_input.txt"
+	output_file="$TEST_TMPDIR/record_awk_output.txt"
+	# caller|destination|initial source|exclude|records|expected; records are
+	# comma-separated and "=" stands for the tab before a guid.
+	while IFS='|' read -r l_caller l_destination l_source l_exclude l_records l_expected; do
+		printf '%s\n' "$l_records" | tr ',=' '\n\t' >"$input_file"
 		(
-			sort() {
-				return 63
-			}
-			set +e
-			zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
-			printf '%s\n' "$?"
+			g_initial_source=$l_source
+			g_option_x_exclude_datasets=$l_exclude
+			case $l_caller in
+			filter)
+				zxfer_filter_snapshot_file_with_excludes "$input_file" "$output_file"
+				;;
+			normalize)
+				zxfer_normalize_destination_snapshot_list "$l_destination" \
+					"$input_file" "$output_file"
+				;;
+			stream)
+				zxfer_normalize_destination_snapshot_stream_for_noop_proof \
+					"$l_destination" <"$input_file" >"$output_file"
+				;;
+			esac
 		)
-	)
-
-	assertEquals "Destination normalization should preserve sort failures." \
-		63 "$status"
+		assertEquals "The record awk [$l_caller: $l_records]." \
+			"$(printf '%s\n' "$l_expected" | tr ',=' '\n\t')" "$(cat "$output_file")"
+	done <<'EOF'
+filter|||/replica$|tank/src/replica@snapA,tank/src@snap-replica,tank/src@snapA=guidA|tank/src@snap-replica,tank/src@snapA=guidA
+filter||||tank/src/app@snap2,tank/src/app@snap1|tank/src/app@snap2,tank/src/app@snap1
+normalize|tank/backup/app|tank/src/app||tank/backup/app@snap2,tank/backup/app@snap1|tank/src/app@snap1,tank/src/app@snap2
+normalize|backup/dst|tank/src||backup/dst/child@snap2,backup/dst@snap1|tank/src/child@snap2,tank/src@snap1
+normalize|tank/dst|tank/dst||tank/dst@snapB,tank/dst@snapA|tank/dst@snapA,tank/dst@snapB
+normalize|backup/dst|tank/src||backup/dst/backup/dst/child@snap2=222,backup/dst@snap1=111|tank/src/backup/dst/child@snap2=222,tank/src@snap1=111
+normalize|backup/dst|tank/src||backup/dst-old@snap1,backup/dst@snap1|backup/dst-old@snap1,tank/src@snap1
+stream|backup/dst/src|tank/src|/replica$|backup/dst/src@snapA,backup/dst/src/replica@snapB|tank/src@snapA
+stream|backup/dst|tank/src||backup/dst@snapA|tank/src@snapA
+stream|backup/dst|tank/src|/replica$|backup/dst@snapA,backup/dst/replica@snapB|tank/src@snapA
+EOF
 }
 
-test_normalize_destination_snapshot_list_preserves_awk_failures() {
-	input_file="$TEST_TMPDIR/dest_normalize_awk_failure_input.txt"
-	output_file="$TEST_TMPDIR/dest_normalize_awk_failure_output.txt"
-	fake_awk="$TEST_TMPDIR/dest_normalize_awk_failure.sh"
-	g_initial_source_had_trailing_slash=0
-	g_initial_source="tank/src"
+test_normalize_destination_snapshot_list_preserves_awk_and_sort_failures() {
+	input_file="$TEST_TMPDIR/dest_normalize_failure_input.txt"
+	output_file="$TEST_TMPDIR/dest_normalize_failure_output.txt"
+	fake_awk="$TEST_TMPDIR/dest_normalize_failure_awk.sh"
 	printf '%s\n' "backup/dst@snap1" >"$input_file"
 	cat >"$fake_awk" <<'EOF'
 #!/bin/sh
@@ -474,51 +199,22 @@ EOF
 	output=$(
 		(
 			g_cmd_awk=$fake_awk
-			set +e
 			zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
-			printf 'status=%s\n' "$?"
+			printf 'awk=%s\n' "$?"
 		) 2>&1
+		(
+			sort() {
+				return 63
+			}
+			zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file"
+			printf 'sort=%s\n' "$?"
+		)
 	)
 
 	assertContains "Destination normalization should preserve awk diagnostics." \
 		"$output" "normalize awk failed"
 	assertContains "Destination normalization should preserve awk exit status." \
-		"$output" "status=42"
-}
-
-test_normalize_destination_snapshot_stream_for_noop_proof_rewrites_and_filters() {
-	g_initial_source="tank/src"
-	g_initial_source_had_trailing_slash=0
-	g_option_x_exclude_datasets='/replica$'
-
-	output=$(
-		printf '%s\n' \
-			"backup/dst/src@snapA" \
-			"backup/dst/src/replica@snapB" |
-			zxfer_normalize_destination_snapshot_stream_for_noop_proof "backup/dst/src"
-	)
-
-	assertEquals "Streaming destination normalization should rewrite prefixes and filter excluded datasets." \
-		"tank/src@snapA" "$output"
-}
-
-test_normalize_destination_snapshot_stream_for_noop_proof_handles_trailing_slash_streams() {
-	g_initial_source="tank/src"
-	g_initial_source_had_trailing_slash=1
-	g_option_x_exclude_datasets=""
-
-	pass_output=$(
-		printf '%s\n' "backup/dst@snapA" |
-			zxfer_normalize_destination_snapshot_stream_for_noop_proof "backup/dst"
-	)
-	g_option_x_exclude_datasets='/replica$'
-	filter_output=$(
-		printf '%s\n' "backup/dst@snapA" "backup/dst/replica@snapB" |
-			zxfer_normalize_destination_snapshot_stream_for_noop_proof "backup/dst"
-	)
-
-	assertEquals "Trailing-slash stream normalization without excludes should rewrite into source-path form." \
-		"tank/src@snapA" "$pass_output"
-	assertEquals "Trailing-slash stream normalization should rewrite before filtering excluded datasets." \
-		"tank/src@snapA" "$filter_output"
+		"$output" "awk=42"
+	assertContains "Destination normalization should preserve sort failures." \
+		"$output" "sort=63"
 }

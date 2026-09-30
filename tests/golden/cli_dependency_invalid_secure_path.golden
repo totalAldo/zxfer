@@ -1,0 +1,16 @@
+exit_status: 1
+=== stdout ===
+=== stderr ===
+Refusing to use ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND because every secure PATH entry must be a single-line absolute path without control whitespace.
+zxfer: failure report begin
+timestamp: [normalized]
+hostname: [normalized]
+zxfer_version: [normalized]
+exit_status: 1
+failure_class: dependency
+failure_stage: secure PATH validation
+message: Refusing to use ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND because every secure PATH entry must be a single-line absolute path without control whitespace.
+dry_run: 0
+yield_iterations: 1
+invocation: [redacted]
+zxfer: failure report end

@@ -118,6 +118,48 @@ EOS
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_run_coverage_zxfer_wrapper_traces_the_launcher_and_its_modules() {
+	l_bash_bin=${ZXFER_COVERAGE_BASH_BIN:-}
+	if [ -z "$l_bash_bin" ]; then
+		l_bash_bin=$(command -v bash 2>/dev/null || true)
+	fi
+	if [ -z "$l_bash_bin" ] || ! zxfer_test_bash_supports_xtracefd "$l_bash_bin"; then
+		startSkipping
+		assertTrue "No Bash with BASH_XTRACEFD; launcher tracing coverage skipped." true
+		endSkipping
+		return 0
+	fi
+	l_root="$TEST_TMPDIR/wrapped-root"
+	l_trace_dir="$TEST_TMPDIR/wrapped-traces"
+	rm -rf "$l_root" "$l_trace_dir"
+	mkdir -p "$l_root/src" "$l_trace_dir"
+	cat >"$l_root/zxfer" <<'EOS'
+#!/bin/sh
+. "${0%/*}/src/zxfer_mod.sh"
+zxfer_mod_report "$0" "$@"
+exit 3
+EOS
+	cat >"$l_root/src/zxfer_mod.sh" <<'EOS'
+zxfer_mod_report() {
+	printf 'launcher=%s args=%s|%s\n' "$1" "$2" "$3"
+}
+EOS
+	chmod 700 "$l_root/zxfer"
+
+	output=$(run_coverage_helper \
+		"set +e; ZXFER_ROOT='$l_root'; write_bash_xtrace_shell \"$l_bash_bin\" \"$l_trace_dir\" \"$l_trace_dir/xtrace-shell\" && write_bash_xtrace_zxfer \"$l_trace_dir/xtrace-zxfer\" && \"\$ZXFER_COVERAGE_ZXFER_BIN\" 'one arg' two; printf 'status=%s\\n' \"\$?\"; cat \"$l_trace_dir\"/zxfer.*.trace")
+
+	assertContains "The wrapped run should see the real launcher as \$0 and keep each argument whole." \
+		"$output" "launcher=$l_root/zxfer args=one arg|two"
+	assertContains "The wrapper should return the launcher's exit status." \
+		"$output" "status=3"
+	assertContains "The trace should hold the launcher's own lines." \
+		"$output" "+$l_root/zxfer:3: zxfer_mod_report"
+	assertContains "The trace should hold the lines of the modules the launcher sources." \
+		"$output" "+$l_root/src/zxfer_mod.sh:2: printf"
+}
+
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_coverage_appends_total_summary_row() {
 	l_summary_file="$TEST_TMPDIR/summary.tsv"
 	cat >"$l_summary_file" <<'EOF'

@@ -10,14 +10,14 @@ TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
-# The usage-error cases run the launcher against a stand-in secure PATH.
+# The concurrent error-log case runs the launcher against a stand-in secure
+# PATH.
 # shellcheck source=tests/helpers/fake_tool_fixtures.sh
 . "$TESTS_DIR/helpers/fake_tool_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_reporting.sh"
 
-# zxfer_throw_usage_error prints this after its message; the usage cases look
-# for "usage: zxfer" or "usage output".
+# The usage throws print this after their message; the throw case looks for it.
 zxfer_usage() {
 	printf '%s\n' "usage: zxfer (usage output)"
 }
@@ -54,139 +54,118 @@ setUp() {
 	fi
 }
 
-test_zxfer_render_failure_report_redacts_command_fields_by_default() {
+# By default a report keeps every context field but redacts the command
+# fields, and leaves out a field that has no value.
+test_zxfer_render_failure_report_redacts_command_fields_and_omits_empty_ones_by_default() {
+	g_zxfer_failure_stage="send/receive"
+	g_zxfer_failure_message="replication failed"
 	zxfer_set_failure_roots "tank/src" "backup/dst"
 	zxfer_set_current_dataset_context "tank/src/child" "backup/dst/child"
-	zxfer_record_last_command_string "zfs send tank/src@snap1"
-	g_zxfer_failure_message="boom"
-
-	report=$(zxfer_render_failure_report 1)
-
-	assertContains "Failure report should include the selected stage." \
-		"$report" "failure_stage: unit"
-	assertContains "Failure report should include the current source dataset." \
-		"$report" "current_source: tank/src/child"
-	assertContains "Failure reports should redact the invocation by default." \
-		"$report" "invocation: [redacted]"
-	assertContains "Failure reports should redact the last command by default." \
-		"$report" "last_command: [redacted]"
-}
-
-test_zxfer_record_last_command_helpers_store_redaction_marker_by_default() {
-	zxfer_record_last_command_string "printf '%s' super-secret"
-	assertEquals "String-based last-command tracking should store the redaction marker by default." \
-		"[redacted]" "$g_zxfer_failure_last_command"
-
-	zxfer_record_last_command_argv "/usr/bin/ssh" "backup.example" "super-secret"
-	assertEquals "Argv-based last-command tracking should store the redaction marker by default." \
-		"[redacted]" "$g_zxfer_failure_last_command"
-}
-
-test_zxfer_record_last_command_helpers_preserve_empty_input_semantics_by_default() {
-	zxfer_record_last_command_string ""
-	assertEquals "String-based last-command tracking should keep empty command strings empty by default." \
-		"" "$g_zxfer_failure_last_command"
-
-	zxfer_record_last_command_argv
-	assertEquals "Argv-based last-command tracking should keep empty argv lists empty by default." \
-		"" "$g_zxfer_failure_last_command"
-}
-
-test_zxfer_command_display_render_enabled_tracks_display_consumers() {
-	quiet_status=$(
-		(
-			g_option_v_verbose=0
-			g_option_V_very_verbose=0
-			zxfer_command_display_render_enabled
-			printf '%s\n' "$?"
-		)
-	)
-	verbose_status=$(
-		(
-			g_option_v_verbose=1
-			g_option_V_very_verbose=0
-			zxfer_command_display_render_enabled
-			printf '%s\n' "$?"
-		)
-	)
-	very_verbose_status=$(
-		(
-			g_option_v_verbose=0
-			g_option_V_very_verbose=1
-			zxfer_command_display_render_enabled
-			printf '%s\n' "$?"
-		)
-	)
-	unsafe_status=$(
-		(
-			g_option_v_verbose=0
-			g_option_V_very_verbose=0
-			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
-			zxfer_command_display_render_enabled
-			printf '%s\n' "$?"
-		)
-	)
-
-	assertEquals "Quiet runs should skip display command rendering." "1" "$quiet_status"
-	assertEquals "Verbose (-v) runs should render display commands." "0" "$verbose_status"
-	assertEquals "Very-verbose (-V) runs should render display commands." "0" "$very_verbose_status"
-	assertEquals "Unsafe failure-report mode should render commands for failure context." "0" "$unsafe_status"
-}
-
-test_zxfer_render_failure_report_preserves_command_fields_in_unsafe_mode() {
-	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
-	zxfer_set_failure_roots "tank/src" "backup/dst"
 	g_zxfer_original_invocation="'./zxfer' '-Z' 'super-secret-token' 'backup/dst'"
 	g_zxfer_failure_last_command="'/usr/bin/ssh' 'backup.example' 'super-secret-token'"
-	g_zxfer_failure_message="boom"
 
 	report=$(zxfer_render_failure_report 1)
 
-	assertContains "Unsafe failure-report mode should preserve the original invocation." \
-		"$report" "invocation: './zxfer' '-Z' 'super-secret-token' 'backup/dst'"
-	assertContains "Unsafe failure-report mode should preserve the last command." \
-		"$report" "last_command: '/usr/bin/ssh' 'backup.example' 'super-secret-token'"
-}
+	for l_line in "zxfer: failure report begin" "failure_stage: send/receive" \
+		"source_root: tank/src" "current_source: tank/src/child" \
+		"destination_root: backup/dst" "current_destination: backup/dst/child" \
+		"origin_host: origin.example" "target_host: target.example" \
+		"invocation: [redacted]" "last_command: [redacted]" \
+		"zxfer: failure report end"; do
+		assertContains "A default report should hold [$l_line]." "$report" "$l_line"
+	done
+	assertNotContains "A default report should keep secrets out." \
+		"$report" "super-secret-token"
 
-test_zxfer_render_failure_report_keeps_missing_last_command_omitted_by_default() {
-	g_zxfer_original_invocation="'./zxfer' '-R' 'tank/src' 'backup/dst'"
-	g_zxfer_failure_message="boom"
-
+	g_zxfer_failure_current_source=""
+	g_zxfer_failure_current_destination=""
+	g_zxfer_original_invocation=""
+	g_zxfer_failure_last_command=""
 	report=$(zxfer_render_failure_report 1)
 
-	assertContains "Default failure-report mode should still redact the invocation when present." \
-		"$report" "invocation: [redacted]"
-	assertNotContains "Default failure-report mode should keep an unset last-command field omitted." \
-		"$report" "last_command:"
+	for l_field in current_source current_destination invocation last_command; do
+		assertNotContains "An empty $l_field should be left out." "$report" "$l_field:"
+	done
 }
 
-test_zxfer_emit_failure_report_redacts_command_fields_in_stderr_and_log_by_default() {
-	log_path="$TEST_TMPDIR/redacted_failure.log"
-	stdout_file="$TEST_TMPDIR/redacted_failure.stdout"
-	stderr_file="$TEST_TMPDIR/redacted_failure.stderr"
+# Command fields hold the redaction marker unless unsafe report mode is on,
+# which keeps each argument as an escaped report word; an empty command
+# records nothing.
+test_zxfer_command_field_recorders_redact_by_default_and_escape_in_unsafe_mode() {
+	tab=$(printf '\t')
+	trailing_arg=$(printf 'line-with-trailing-newline\n_')
+	trailing_arg=${trailing_arg%_}
 
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
-		ZXFER_ERROR_LOG=\"$log_path\"
-		g_zxfer_failure_report_emitted=0
-		g_zxfer_original_invocation=\"'./zxfer' '-D' 'api-token=super-secret-token'\"
-		g_zxfer_failure_last_command=\"'/usr/bin/ssh' 'backup.example' 'super-secret-token'\"
-		g_zxfer_failure_message='boom'
-		zxfer_emit_failure_report 1
-	"
+	zxfer_record_last_command_string "printf '%s' super-secret"
+	assertEquals "A command string should be recorded as the redaction marker by default." \
+		"[redacted]" "$g_zxfer_failure_last_command"
+	zxfer_record_last_command_argv "/usr/bin/ssh" "backup.example" "super-secret"
+	assertEquals "An argv should be recorded as the redaction marker by default." \
+		"[redacted]" "$g_zxfer_failure_last_command"
+	zxfer_set_original_invocation ./zxfer -R "tank/it's"
+	assertEquals "The invocation should be recorded as the redaction marker by default." \
+		"[redacted]" "$g_zxfer_original_invocation"
+	zxfer_record_last_command_string ""
+	assertEquals "An empty command string should stay empty." "" "$g_zxfer_failure_last_command"
+	zxfer_record_last_command_argv
+	assertEquals "An empty argv should stay empty." "" "$g_zxfer_failure_last_command"
 
-	assertEquals "Default failure-report emission should succeed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Default failure-report emission should redact the invocation in stderr." \
-		"$(cat "$stderr_file")" "invocation: [redacted]"
-	assertContains "Default failure-report emission should redact the last command in stderr." \
-		"$(cat "$stderr_file")" "last_command: [redacted]"
-	assertNotContains "Default failure-report emission should keep secrets out of stderr." \
-		"$(cat "$stderr_file")" "super-secret-token"
-	assertContains "Default failure-report emission should also redact the invocation in ZXFER_ERROR_LOG." \
-		"$(cat "$log_path")" "invocation: [redacted]"
-	assertContains "Default failure-report emission should also redact the last command in ZXFER_ERROR_LOG." \
-		"$(cat "$log_path")" "last_command: [redacted]"
-	assertNotContains "Default failure-report emission should keep secrets out of ZXFER_ERROR_LOG." \
-		"$(cat "$log_path")" "super-secret-token"
+	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
+	zxfer_record_last_command_argv "/usr/bin/printf" "$trailing_arg"
+	assertEquals "Unsafe mode should keep a trailing newline as an escaped marker." \
+		"'/usr/bin/printf' 'line-with-trailing-newline\\n'" "$g_zxfer_failure_last_command"
+	zxfer_set_original_invocation ./zxfer -R "tank/it's" "a${tab}b"
+	assertEquals "Unsafe mode should store every argument as an escaped report word." \
+		"'./zxfer' '-R' 'tank/it'\"'\"'s' 'a\\tb'" "$g_zxfer_original_invocation"
+}
+
+# -v, -V and unsafe report mode each read rendered display commands; rendered
+# trace commands only have -V, which prints them, and unsafe report mode,
+# which records them. Unsafe mode takes 1, yes, true or on in any case.
+test_zxfer_command_render_predicates_and_trace_follow_their_readers() {
+	output=$(
+		(
+			while read -r l_v l_V l_unsafe; do
+				g_option_v_verbose=$l_v
+				g_option_V_very_verbose=$l_V
+				ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=$l_unsafe
+				zxfer_command_display_render_enabled
+				l_display=$?
+				zxfer_command_trace_enabled
+				printf 'v=%s V=%s unsafe=%s: display=%s trace=%s\n' \
+					"$l_v" "$l_V" "$l_unsafe" "$l_display" "$?"
+			done <<'ROWS'
+0 0 off
+1 0 off
+0 1 off
+0 0 1
+0 0 yes
+0 0 TRUE
+0 0 On
+ROWS
+			g_option_v_verbose=1
+			g_option_V_very_verbose=1
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=off
+			zxfer_trace_rendered_command "Running command" "'zfs' 'list'"
+			printf 'V_last=<%s>\n' "$g_zxfer_failure_last_command"
+			g_option_V_very_verbose=0
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=yes
+			zxfer_trace_rendered_command "Running command" "'zfs' 'get'"
+			printf 'unsafe_last=<%s>\n' "$g_zxfer_failure_last_command"
+		) 2>&1
+	)
+
+	assertEquals "Each reader should enable its predicates, and a trace should print only under -V." \
+		"v=0 V=0 unsafe=off: display=1 trace=1
+v=1 V=0 unsafe=off: display=0 trace=1
+v=0 V=1 unsafe=off: display=0 trace=0
+v=0 V=0 unsafe=1: display=0 trace=0
+v=0 V=0 unsafe=yes: display=0 trace=0
+v=0 V=0 unsafe=TRUE: display=0 trace=0
+v=0 V=0 unsafe=On: display=0 trace=0
+Running command: 'zfs' 'list'
+V_last=<[redacted]>
+unsafe_last=<'zfs' 'get'>" "$output"
 }
 
 test_zxfer_render_failure_report_escapes_raw_control_bytes_in_unsafe_mode() {
@@ -223,83 +202,6 @@ test_zxfer_render_failure_report_escapes_raw_control_bytes_in_unsafe_mode() {
 		1 "$raw_bell_status"
 }
 
-test_zxfer_emit_failure_report_escapes_raw_control_bytes_in_stderr_and_log_in_unsafe_mode() {
-	log_path="$TEST_TMPDIR/control_escaped_failure.log"
-	stdout_file="$TEST_TMPDIR/control_escaped_failure.stdout"
-	stderr_file="$TEST_TMPDIR/control_escaped_failure.stderr"
-	esc=$(printf '\033')
-	bell=$(printf '\007')
-
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
-		ZXFER_ERROR_LOG=\"$log_path\"
-		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
-		g_zxfer_failure_report_emitted=0
-		g_zxfer_original_invocation=\$(zxfer_quote_command_argv './zxfer' '-D' \"\$(printf 'token%swarn' '$esc')\")
-		zxfer_record_last_command_argv '/usr/bin/printf' \"\$(printf 'line%sbell' '$bell')\"
-		g_zxfer_failure_message='boom'
-		zxfer_emit_failure_report 1
-	"
-	grep -F -x "invocation: './zxfer' '-D' 'token\\x1Bwarn'" "$stderr_file" >/dev/null 2>&1
-	stderr_invocation_status=$?
-	grep -F -x "last_command: '/usr/bin/printf' 'line\\x07bell'" "$stderr_file" >/dev/null 2>&1
-	stderr_last_command_status=$?
-	grep -F "\\\\x1B" "$stderr_file" >/dev/null 2>&1
-	stderr_double_esc_status=$?
-	grep -F "$esc" "$stderr_file" >/dev/null 2>&1
-	stderr_raw_esc_status=$?
-	grep -F "$bell" "$stderr_file" >/dev/null 2>&1
-	stderr_raw_bell_status=$?
-	grep -F -x "invocation: './zxfer' '-D' 'token\\x1Bwarn'" "$log_path" >/dev/null 2>&1
-	log_invocation_status=$?
-	grep -F -x "last_command: '/usr/bin/printf' 'line\\x07bell'" "$log_path" >/dev/null 2>&1
-	log_last_command_status=$?
-	grep -F "\\\\x1B" "$log_path" >/dev/null 2>&1
-	log_double_esc_status=$?
-	grep -F "$esc" "$log_path" >/dev/null 2>&1
-	log_raw_esc_status=$?
-	grep -F "$bell" "$log_path" >/dev/null 2>&1
-	log_raw_bell_status=$?
-
-	assertEquals "Unsafe control-byte escaping failure-report emission should succeed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Unsafe stderr failure reports should escape ESC bytes in invocation." \
-		0 "$stderr_invocation_status"
-	assertEquals "Unsafe stderr failure reports should escape BEL bytes in last_command." \
-		0 "$stderr_last_command_status"
-	assertEquals "Unsafe stderr failure reports should not double-escape control-byte markers." \
-		1 "$stderr_double_esc_status"
-	assertEquals "Unsafe stderr failure reports should not contain raw ESC bytes." \
-		1 "$stderr_raw_esc_status"
-	assertEquals "Unsafe stderr failure reports should not contain raw BEL bytes." \
-		1 "$stderr_raw_bell_status"
-	assertEquals "Unsafe ZXFER_ERROR_LOG mirrors should escape ESC bytes in invocation." \
-		0 "$log_invocation_status"
-	assertEquals "Unsafe ZXFER_ERROR_LOG mirrors should escape BEL bytes in last_command." \
-		0 "$log_last_command_status"
-	assertEquals "Unsafe ZXFER_ERROR_LOG mirrors should not double-escape control-byte markers." \
-		1 "$log_double_esc_status"
-	assertEquals "Unsafe ZXFER_ERROR_LOG mirrors should not contain raw ESC bytes." \
-		1 "$log_raw_esc_status"
-	assertEquals "Unsafe ZXFER_ERROR_LOG mirrors should not contain raw BEL bytes." \
-		1 "$log_raw_bell_status"
-}
-
-test_zxfer_record_last_command_argv_preserves_trailing_newlines_in_unsafe_mode() {
-	trailing_arg=$(printf 'line-with-trailing-newline\n_')
-	trailing_arg=${trailing_arg%_}
-	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
-
-	zxfer_record_last_command_argv "/usr/bin/printf" "$trailing_arg"
-	g_zxfer_failure_message="boom"
-
-	report=$(zxfer_render_failure_report 1)
-	printf '%s\n' "$report" >"$TEST_TMPDIR/trailing_newline_report.txt"
-	grep -F -x "last_command: '/usr/bin/printf' 'line-with-trailing-newline\\n'" "$TEST_TMPDIR/trailing_newline_report.txt" >/dev/null 2>&1
-	trailing_newline_status=$?
-
-	assertEquals "Unsafe argv-based failure-report command capture should preserve trailing newline markers." \
-		0 "$trailing_newline_status"
-}
-
 test_zxfer_failure_context_setters_ignore_empty_values_and_succeed() {
 	# The setters are often a caller's last statement, so an ignored empty
 	# value must not become a non-zero return.
@@ -324,25 +226,34 @@ test_zxfer_failure_context_setters_ignore_empty_values_and_succeed() {
 		"backup/dst/a" "$g_zxfer_failure_current_destination"
 }
 
-test_throw_usage_error_writes_message_and_usage_to_stderr() {
-	stdout_file="$TEST_TMPDIR/throw_usage.stdout"
-	stderr_file="$TEST_TMPDIR/throw_usage.stderr"
+test_throw_helpers_exit_with_the_requested_status_and_keep_an_earlier_class() {
+	stdout_file="$TEST_TMPDIR/throw.stdout"
+	stderr_file="$TEST_TMPDIR/throw.stderr"
 
 	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" '
-		zxfer_throw_usage_error "boom" 2
+		zxfer_set_failure_class dependency
+		trap "printf \"class=%s message=%s\n\" \"\$g_zxfer_failure_class\" \"\$g_zxfer_failure_message\" >&2" EXIT
+		zxfer_throw_error "missing tool" 3
 	'
 
-	assertEquals "zxfer_throw_usage_error should preserve the requested exit status." 2 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "zxfer_throw_usage_error should not write to stdout." "" "$(cat "$stdout_file")"
-	assertContains "zxfer_throw_usage_error should write the error message to stderr." \
-		"$(cat "$stderr_file")" "Error: boom"
-	assertContains "zxfer_throw_usage_error should print usage to stderr." \
-		"$(cat "$stderr_file")" "usage output"
-}
+	assertEquals "zxfer_throw_error should exit with the requested status." 3 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "zxfer_throw_error should not write to stdout." "" "$(cat "$stdout_file")"
+	assertEquals "zxfer_throw_error should print the message as-is and keep a class set before the throw." \
+		"missing tool
+class=dependency message=missing tool" "$(cat "$stderr_file")"
 
-test_throw_error_with_usage_keeps_runtime_class_and_skips_blank_message() {
-	stdout_file="$TEST_TMPDIR/throw_with_usage.stdout"
-	stderr_file="$TEST_TMPDIR/throw_with_usage.stderr"
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" '
+		trap - EXIT INT TERM HUP QUIT
+		zxfer_throw_error_with_usage "boom with usage" 3
+	'
+
+	assertEquals "zxfer_throw_error_with_usage should preserve the requested exit status." \
+		3 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "zxfer_throw_error_with_usage should not write to stdout." "" "$(cat "$stdout_file")"
+	assertContains "zxfer_throw_error_with_usage should print the error to stderr." \
+		"$(cat "$stderr_file")" "Error: boom with usage"
+	assertContains "zxfer_throw_error_with_usage should print usage to stderr." \
+		"$(cat "$stderr_file")" "usage: zxfer (usage output)"
 
 	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" '
 		zxfer_emit_failure_report() {
@@ -355,24 +266,10 @@ test_throw_error_with_usage_keeps_runtime_class_and_skips_blank_message() {
 	assertEquals "zxfer_throw_error_with_usage should default to exit status 1." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertNotContains "A blank message should not print an Error: line." \
 		"$(cat "$stderr_file")" "Error:"
-	assertContains "zxfer_throw_error_with_usage should print usage to stderr." \
+	assertContains "A blank message should still print usage to stderr." \
 		"$(cat "$stderr_file")" "usage output"
 	assertContains "zxfer_throw_error_with_usage should classify the failure as runtime and keep the message empty." \
 		"$(cat "$stderr_file")" "class=runtime message=<>"
-}
-
-test_throw_error_keeps_an_earlier_failure_class() {
-	zxfer_test_capture_subshell '
-		zxfer_set_failure_class dependency
-		trap "printf \"class=%s message=%s\n\" \"\$g_zxfer_failure_class\" \"\$g_zxfer_failure_message\"" EXIT
-		zxfer_throw_error "missing tool" 3
-	'
-
-	assertEquals "zxfer_throw_error should exit with the requested status." 3 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "zxfer_throw_error should print the message as-is." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "missing tool"
-	assertContains "zxfer_throw_error should keep a class set before the throw and record the message." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "class=dependency message=missing tool"
 }
 
 test_zxfer_emit_failure_report_marks_the_report_emitted_before_mirroring() {
@@ -396,51 +293,6 @@ test_zxfer_emit_failure_report_marks_the_report_emitted_before_mirroring() {
 	assertContains "A failed mirror should not change the emit status." "$output" "after_failure=0"
 	assertEquals "A second emit should print nothing." \
 		1 "$(printf '%s\n' "$output" | grep -c '^zxfer: failure report begin$')"
-}
-
-test_zxfer_command_trace_helpers_follow_V_and_unsafe_mode() {
-	output=$(
-		(
-			g_option_v_verbose=1
-			g_option_V_very_verbose=0
-			zxfer_command_trace_enabled
-			printf 'v_only=%s\n' "$?"
-			g_option_V_very_verbose=1
-			zxfer_command_trace_enabled
-			printf 'V=%s\n' "$?"
-			zxfer_trace_rendered_command "Running command" "'zfs' 'list'"
-			printf 'V_last=<%s>\n' "$g_zxfer_failure_last_command"
-			g_option_V_very_verbose=0
-			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=yes
-			zxfer_command_trace_enabled
-			printf 'unsafe=%s\n' "$?"
-			zxfer_trace_rendered_command "Running command" "'zfs' 'get'"
-			printf 'unsafe_last=<%s>\n' "$g_zxfer_failure_last_command"
-		) 2>&1
-	)
-
-	assertContains "Plain -v should not need rendered trace commands." "$output" "v_only=1"
-	assertContains "-V should need rendered trace commands." "$output" "V=0"
-	assertContains "-V should print the labeled command to stderr." "$output" "Running command: 'zfs' 'list'"
-	assertContains "Safe mode should record only the redaction marker." "$output" "V_last=<[redacted]>"
-	assertContains "Unsafe report mode should need rendered trace commands." "$output" "unsafe=0"
-	assertNotContains "Without -V the trace should not be printed." "$output" "Running command: 'zfs' 'get'"
-	assertContains "Unsafe report mode should record the rendered command." "$output" "unsafe_last=<'zfs' 'get'>"
-}
-
-test_zxfer_set_original_invocation_redacts_unless_unsafe_mode() {
-	tab=$(printf '\t')
-
-	zxfer_set_original_invocation ./zxfer -R "tank/it's"
-	safe_invocation=$g_zxfer_original_invocation
-	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
-	zxfer_set_original_invocation ./zxfer -R "tank/it's" "a${tab}b"
-	unsafe_invocation=$g_zxfer_original_invocation
-
-	assertEquals "Safe mode should store only the redaction marker." \
-		"[redacted]" "$safe_invocation"
-	assertEquals "Unsafe mode should store every argument as an escaped report word." \
-		"'./zxfer' '-R' 'tank/it'\"'\"'s' 'a\\tb'" "$unsafe_invocation"
 }
 
 test_zxfer_report_quoting_skips_awk_and_sed_for_plain_tokens() {

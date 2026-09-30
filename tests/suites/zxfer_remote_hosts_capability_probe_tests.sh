@@ -1,6 +1,9 @@
 #!/bin/sh
-# Remote capability parsing, tool scope, per-role cache, probe capture, and
-# tool-resolution tests.
+# Remote capability tests for src/zxfer_remote_hosts.sh: the V2 answer
+# parser, the probe script, the tool scope, the per-role cache, and the
+# fail-closed probe and resolution branches the black-box suites cannot
+# reach. Probes over the mock ssh, direct-probe fallbacks and dependency
+# reports are pinned black-box in tests/test_contract_remote.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
 # Stand in for zxfer_capture_remote_probe_output: count probes in
@@ -21,41 +24,6 @@ zxfer_test_stub_remote_probe_capture() {
 	}
 }
 
-# Stand in for ssh in the OS fallback test: the capability probe fails
-# (CASE_NAME=unavailable) or returns a response without an os line
-# (CASE_NAME=malformed); the direct uname probe logs to $log and answers.
-zxfer_test_stub_os_fallback_invoke() {
-	zxfer_invoke_ssh_shell_command_for_host() {
-		case $2 in
-		*ZXFER_REMOTE_CAPS_V2*)
-			[ "$CASE_NAME" = malformed ] || return 255
-			printf 'ZXFER_REMOTE_CAPS_V2\ntool\tzfs\t0\t/remote/bin/zfs\nend\n'
-			return 0
-			;;
-		esac
-		printf '%s|%s|%s\n' "$1" "$2" "${3:-}" >"$log"
-		printf '%s\n' "FallbackOS" "ignored-extra-line"
-	}
-}
-
-# Stand in for the live capability fetch: it fails (CASE_NAME=unavailable),
-# publishes an unparsable response (malformed) or one without the requested
-# tool (absent).
-zxfer_test_stub_fetch_without_tool_record() {
-	zxfer_fetch_remote_host_capabilities_live() {
-		case $CASE_NAME in
-		unavailable) return 1 ;;
-		malformed) zxfer_parse_remote_capability_response "ZXFER_REMOTE_CAPS_V2" ;;
-		*)
-			zxfer_parse_remote_capability_response 'ZXFER_REMOTE_CAPS_V2
-os	RemoteOS
-tool	zfs	0	/remote/bin/zfs
-end'
-			;;
-		esac
-	}
-}
-
 # Stand in for ssh in the direct tool probe: DIRECT_CASE picks the outcome.
 zxfer_test_stub_direct_tool_probe_invoke() {
 	zxfer_invoke_ssh_shell_command_for_host() {
@@ -69,7 +37,7 @@ zxfer_test_stub_direct_tool_probe_invoke() {
 			printf '%s\n' "wrapper startup noise"
 			return 255
 			;;
-		*) printf '%s\n' "bin/zfs" ;;
+		*) printf '%s\n' "bin/zstd" ;;
 		esac
 	}
 }
@@ -84,299 +52,167 @@ zxfer_test_reset_remote_probe_counters() {
 	ZXFER_TEST_TARGET_PROBE_RESPONSE=""
 }
 
-test_remote_host_direct_load_includes_transport_but_not_snapshot_state() {
-	/bin/sh -c '
-		ZXFER_SOURCE_MODULES_ROOT=$1
-		. "$1/src/zxfer_modules.sh"
-		zxfer_load_modules zxfer_remote_hosts.sh || exit 1
-		command -v zxfer_ensure_remote_host_capabilities >/dev/null 2>&1 || exit 2
-		command -v zxfer_invoke_ssh_shell_command_for_host >/dev/null 2>&1 || exit 3
-		command -v zxfer_reset_live_destination_listing_state >/dev/null 2>&1 && exit 4
-		exit 0
-	' zxfer-remote-direct-load "$ZXFER_ROOT"
-
-	assertEquals "Remote capability loading should include transport without pulling snapshot state." \
-		0 "$?"
+# Set the options a host's capability scope depends on, then print the
+# requested tools for each HOST:TOOL operand (TOOL may be empty), one per line.
+# Usage: zxfer_test_print_capability_scopes O_HOST T_HOST R_SOURCE JOBS
+# RESTORE BACKUP COMPRESS COMPRESS_CMD DECOMPRESS_CMD HOST:TOOL...
+zxfer_test_print_capability_scopes() {
+	g_option_O_origin_host=$1
+	g_option_T_target_host=$2
+	g_option_R_recursive=$3
+	g_option_j_jobs=$4
+	g_option_e_restore_property_mode=$5
+	g_option_k_backup_property_mode=$6
+	g_option_z_compress=$7
+	g_cmd_compress=$8
+	g_cmd_decompress=$9
+	shift 9
+	for l_scope_operand in "$@"; do
+		zxfer_get_remote_capability_requested_tools_for_host \
+			"${l_scope_operand%%:*}" "${l_scope_operand#*:}"
+		printf '%s\n' "$g_zxfer_remote_capability_requested_tools_result"
+	done
 }
 
 ################################################################################
 # Parser
 ################################################################################
 
-test_zxfer_parse_remote_capability_response_extracts_fields() {
-	result=$(
-		(
-			zxfer_parse_remote_capability_response "$(fake_remote_capability_response)"
-			printf 'os=%s\n' "$g_zxfer_remote_capability_os"
-			zxfer_get_parsed_remote_capability_tool_record zfs
-			printf 'zfs=%s:%s\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
-			zxfer_get_parsed_remote_capability_tool_record parallel
-			printf 'parallel=%s:%s\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
-			zxfer_get_parsed_remote_capability_tool_record cat
-			printf 'cat=%s:%s\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
-		)
-	)
-
-	assertContains "The parser should extract the remote operating system." "$result" "os=RemoteOS"
-	assertContains "The parser should extract the remote zfs helper path." "$result" "zfs=0:/remote/bin/zfs"
-	assertContains "The parser should extract the remote parallel helper path." "$result" "parallel=0:/opt/bin/parallel"
-	assertContains "The parser should extract the remote cat helper path." "$result" "cat=0:/remote/bin/cat"
-}
-
-test_zxfer_parse_remote_capability_response_clears_optional_paths_for_missing_tools() {
-	result=$(
-		(
-			zxfer_parse_remote_capability_response "ZXFER_REMOTE_CAPS_V2
-os	RemoteOS
-tool	zfs	0	/remote/bin/zfs
-tool	parallel	1	-
-tool	cat	127	-
-end"
-			zxfer_get_parsed_remote_capability_tool_record parallel
-			printf 'parallel=<%s:%s>\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
-			zxfer_get_parsed_remote_capability_tool_record cat
-			printf 'cat=<%s:%s>\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
-		)
-	)
-
-	assertContains "A missing helper should keep status 1 with an empty path." \
-		"$result" "parallel=<1:>"
-	assertContains "Any other lookup status should be kept with an empty path." \
-		"$result" "cat=<127:>"
-}
-
-test_zxfer_parse_remote_capability_response_rejects_retired_v1_protocol() {
-	set +e
-	output=$(
-		(
-			zxfer_parse_remote_capability_response "ZXFER_REMOTE_CAPS_V1
-os	RemoteOS
-tool	zfs	0	/remote/bin/zfs
-end"
-		)
-	)
-	status=$?
-
-	assertEquals "Capability payloads that still advertise the retired V1 protocol should be rejected." \
-		1 "$status"
-	assertEquals "Rejected V1 capability payloads should not print a parsed payload." "" "$output"
-}
-
-test_zxfer_parse_remote_capability_response_rejects_malformed_records() {
-	set +e
-	output=$(
-		(
-			zxfer_parse_remote_capability_response "ZXFER_REMOTE_CAPS_V2
-os	RemoteOS
-tool	zfs	oops	/remote/bin/zfs
-tool	parallel	0	/opt/bin/parallel
-tool	cat	0	/remote/bin/cat
-end"
-		)
-	)
-	status=$?
-
-	assertEquals "Malformed capability records should be rejected." 1 "$status"
-	assertEquals "Malformed capability records should not print a parsed payload." "" "$output"
-}
-
-test_zxfer_parse_remote_capability_response_rejects_missing_os_payload() {
-	set +e
-	output=$(
-		(
-			zxfer_parse_remote_capability_response "ZXFER_REMOTE_CAPS_V2
-os
-tool	zfs	0	/remote/bin/zfs
-end"
-		)
-	)
-	status=$?
-
-	assertEquals "Capability records without an OS payload should be rejected." 1 "$status"
-	assertEquals "Capability records without an OS payload should not print a parsed payload." "" "$output"
-}
-
-test_zxfer_parse_remote_capability_response_preserves_additional_tool_entries() {
-	output=$(
-		(
-			zxfer_parse_remote_capability_response "ZXFER_REMOTE_CAPS_V2
-os	RemoteOS
-tool	zfs	0	/remote/bin/zfs
-tool	weirdtool	0	/remote/bin/weirdtool
-tool	cat	0	/remote/bin/cat
-end"
-			printf 'zfs_status=%s\n' "$g_zxfer_remote_capability_zfs_status"
-			zxfer_get_parsed_remote_capability_tool_record cat
-			printf 'cat_path=%s\n' "$g_zxfer_remote_capability_tool_path_result"
-			zxfer_get_parsed_remote_capability_tool_record weirdtool
-			printf 'weirdtool=%s:%s\n' "$g_zxfer_remote_capability_tool_status_result" "$g_zxfer_remote_capability_tool_path_result"
-		)
-	)
-	status=$?
-
-	assertEquals "Capability records should tolerate additional advertised tool names." 0 "$status"
-	assertContains "Capability records with additional tool names should preserve the required zfs status." \
-		"$output" "zfs_status=0"
-	assertContains "Capability records with additional tool names should preserve known helper paths." \
-		"$output" "cat_path=/remote/bin/cat"
-	assertContains "Capability records with additional tool names should keep the extra tool record." \
-		"$output" "weirdtool=0:/remote/bin/weirdtool"
-}
-
-test_zxfer_parse_remote_capability_response_preserves_unset_ifs_and_globbing() {
+test_parse_remote_capability_response_accepts_well_formed_answers() {
+	tab=$(printf '\t')
+	# One answer holds every accepted record shape: a found tool whose path
+	# OmniOS sh quotes, a missing one (status 1), another status, and a tool
+	# zxfer did not ask about. It is parsed with IFS unset and globbing off,
+	# which the parser must restore.
+	answer="ZXFER_REMOTE_CAPS_V2
+os${tab}SunOS
+tool${tab}zfs${tab}0${tab}'/usr/sbin/zfs'
+tool${tab}parallel${tab}1${tab}-
+tool${tab}cat${tab}127${tab}-
+tool${tab}weirdtool${tab}0${tab}/remote/bin/weirdtool
+end
+"
 	(
 		unset IFS
 		set -f
-		zxfer_parse_remote_capability_response "$(fake_remote_capability_response)" \
-			"zfs parallel" || exit 8
-		[ "${IFS+set}" != "set" ] || exit 9
-		case $- in
-		*f*) ;;
-		*) exit 10 ;;
-		esac
-	)
-	l_status=$?
-
-	assertEquals "Capability parsing must restore an originally unset IFS and disabled globbing." \
-		0 "$l_status"
-}
-
-test_zxfer_parse_remote_capability_response_rejects_a_response_truncated_before_end() {
-	truncated_response='ZXFER_REMOTE_CAPS_V2
-os	RemoteOS
-tool	zfs	0	/remote/bin/zfs'
-
-	zxfer_parse_remote_capability_response "$truncated_response"
-	parse_status=$?
-
-	assertEquals "Capability framing must reject a zfs-only prefix that is truncated before the explicit end record." \
-		1 "$parse_status"
-}
-
-test_zxfer_parse_remote_capability_response_rejects_extra_lines() {
-	set +e
-	zxfer_parse_remote_capability_response "$(fake_remote_capability_response)
-extra	line"
+		zxfer_parse_remote_capability_response "$answer" "zfs parallel cat" || exit 8
+		[ "${IFS+set}" != set ] || exit 9
+		[ "${-#*f}" != "$-" ] || exit 10
+		printf 'os=%s zfs_status=%s\n' "$g_zxfer_remote_capability_os" \
+			"$g_zxfer_remote_capability_zfs_status"
+		for l_test_tool in zfs parallel cat weirdtool absent ""; do
+			zxfer_get_parsed_remote_capability_tool_record "$l_test_tool"
+			printf '%s=%s:%s:%s\n' "$l_test_tool" "$?" \
+				"$g_zxfer_remote_capability_tool_status_result" \
+				"$g_zxfer_remote_capability_tool_path_result"
+		done
+		# A stored record without its path field is never returned.
+		g_zxfer_remote_capability_tool_records=$(printf 'zfs\t0')
+		zxfer_get_parsed_remote_capability_tool_record zfs
+		printf 'partial=%s\n' "$?"
+	) >"$TEST_TMPDIR/accepted_answer.out"
 	status=$?
 
-	assertEquals "Capability records with a line after the end record should be rejected." 1 "$status"
+	assertEquals "Parsing must restore an unset IFS and disabled globbing." 0 "$status"
+	assertEquals "Each record should keep its status, and a validated, unquoted path only for status 0." \
+		"os=SunOS zfs_status=0
+zfs=0:0:/usr/sbin/zfs
+parallel=0:1:
+cat=0:127:
+weirdtool=0:0:/remote/bin/weirdtool
+absent=1::
+=1::
+partial=1" "$(cat "$TEST_TMPDIR/accepted_answer.out")"
 }
 
-test_zxfer_parse_remote_capability_response_rejects_control_whitespace_helper_paths() {
-	tab=$(printf '\t')
-	cr=$(printf '\r')
-
-	set +e
-	zxfer_parse_remote_capability_response "ZXFER_REMOTE_CAPS_V2
-os${tab}RemoteOS
-tool${tab}zfs${tab}0${tab}/remote/bin/zfs${cr}
-tool${tab}parallel${tab}0${tab}/opt/bin/parallel
-end"
-	status=$?
-
-	assertEquals "Capability payloads with control-whitespace helper paths should be rejected as invalid handshakes." \
-		1 "$status"
-}
-
-test_zxfer_parse_remote_capability_response_rejects_duplicate_tool_records() {
-	set +e
-	zxfer_parse_remote_capability_response "ZXFER_REMOTE_CAPS_V2
-os	RemoteOS
-tool	zfs	0	/remote/bin/zfs
-tool	zfs	0	/remote/bin/zfs-second
-end"
-	status=$?
-
-	assertEquals "Capability parsing should reject duplicate tool records." \
-		1 "$status"
-}
-
-test_zxfer_parse_remote_capability_response_fails_closed_on_each_record_shape_problem() {
+test_parse_remote_capability_response_rejects_every_malformed_answer() {
 	tab=$(printf '\t')
 	cr=$(printf '\r')
 	header="ZXFER_REMOTE_CAPS_V2
 os${tab}RemoteOS"
 	zfs_record="tool${tab}zfs${tab}0${tab}/remote/bin/zfs"
 	failures=""
+	# Each case: name|the whole answer. A malformed line anywhere fails it all.
 	for case_spec in \
-		"five fields|$zfs_record${tab}extra" \
-		"three fields|tool${tab}zfs${tab}0" \
-		"empty tool name|tool${tab}${tab}0${tab}/remote/bin/zfs" \
-		"carriage return in tool name|tool${tab}zfs${cr}${tab}0${tab}/remote/bin/zfs" \
-		"empty status|tool${tab}zfs${tab}${tab}/remote/bin/zfs" \
-		"found tool without a path|tool${tab}zfs${tab}0${tab}-" \
-		"missing tool with a path|$zfs_record
-tool${tab}cat${tab}1${tab}/remote/bin/cat" \
-		"relative helper path|tool${tab}zfs${tab}0${tab}bin/zfs" \
-		"unknown record kind|$zfs_record
-helper${tab}cat${tab}0${tab}/remote/bin/cat" \
-		"no zfs record|tool${tab}cat${tab}0${tab}/remote/bin/cat" \
-		"blank record line|$zfs_record
-"; do
-		case_name=${case_spec%%|*}
-		case_records=${case_spec#*|}
-		if zxfer_parse_remote_capability_response "$header
-$case_records
-end"; then
-			failures="$failures [$case_name]"
+		"retired V1 header|ZXFER_REMOTE_CAPS_V1
+os${tab}RemoteOS
+$zfs_record
+end" \
+		"os line without a value|ZXFER_REMOTE_CAPS_V2
+os
+$zfs_record
+end" \
+		"no end line|$header
+$zfs_record" \
+		"a line after end|$header
+$zfs_record
+end
+extra${tab}line" \
+		"non-numeric status|$header
+tool${tab}zfs${tab}oops${tab}/remote/bin/zfs
+end" \
+		"five fields|$header
+$zfs_record${tab}extra
+end" \
+		"three fields|$header
+tool${tab}zfs${tab}0
+end" \
+		"empty tool name|$header
+tool${tab}${tab}0${tab}/remote/bin/zfs
+end" \
+		"carriage return in a tool name|$header
+tool${tab}zfs${cr}${tab}0${tab}/remote/bin/zfs
+end" \
+		"carriage return in a path|$header
+tool${tab}zfs${tab}0${tab}/remote/bin/zfs${cr}
+end" \
+		"empty status|$header
+tool${tab}zfs${tab}${tab}/remote/bin/zfs
+end" \
+		"found tool without a path|$header
+tool${tab}zfs${tab}0${tab}-
+end" \
+		"missing tool with a path|$header
+$zfs_record
+tool${tab}cat${tab}1${tab}/remote/bin/cat
+end" \
+		"relative helper path|$header
+tool${tab}zfs${tab}0${tab}bin/zfs
+end" \
+		"unknown record kind|$header
+$zfs_record
+helper${tab}cat${tab}0${tab}/remote/bin/cat
+end" \
+		"no zfs record|$header
+tool${tab}cat${tab}0${tab}/remote/bin/cat
+end" \
+		"blank record line|$header
+$zfs_record
+
+end" \
+		"duplicate tool|$header
+$zfs_record
+tool${tab}zfs${tab}0${tab}/remote/bin/zfs-second
+end"; do
+		if zxfer_parse_remote_capability_response "${case_spec#*|}"; then
+			failures="$failures [${case_spec%%|*}]"
 		fi
 	done
+	# An answer without a record for a requested tool is truncated.
+	if zxfer_parse_remote_capability_response "$header
+$zfs_record
+end" "zfs parallel"; then
+		failures="$failures [missing requested tool]"
+	fi
 
-	assertEquals "Every malformed record shape should fail the whole response." \
-		"" "$failures"
-}
-
-test_zxfer_parse_remote_capability_response_requires_each_requested_tool() {
-	response='ZXFER_REMOTE_CAPS_V2
-os	RemoteOS
-tool	zfs	0	/remote/bin/zfs
-tool	cat	1	-
-end'
-
-	zxfer_parse_remote_capability_response "$response" "zfs cat"
-	covered_status=$?
-	zxfer_parse_remote_capability_response "$response" "zfs parallel"
-	missing_status=$?
-
-	assertEquals "A response with a record for every requested tool should be accepted." \
-		0 "$covered_status"
-	assertEquals "A response without a record for a requested tool should be rejected as truncated." \
-		1 "$missing_status"
-}
-
-test_zxfer_parse_remote_capability_response_stores_normalized_helper_paths() {
-	zxfer_parse_remote_capability_response "ZXFER_REMOTE_CAPS_V2
-os	SunOS
-tool	zfs	0	'/usr/sbin/zfs'
-end"
-	status=$?
-	zxfer_get_parsed_remote_capability_tool_record zfs
-
-	assertEquals "A quoted command -v path (OmniOS sh) should be accepted." 0 "$status"
-	assertEquals "The stored path should be the validated, unquoted path." \
-		"/usr/sbin/zfs" "$g_zxfer_remote_capability_tool_path_result"
-}
-
-test_zxfer_get_parsed_remote_capability_tool_record_rejects_missing_and_partial_records() {
-	g_zxfer_remote_capability_tool_records=$(printf 'zfs\t0')
-	zxfer_get_parsed_remote_capability_tool_record zfs
-	partial_status=$?
-	g_zxfer_remote_capability_tool_records=$(printf 'zfs\t0\t/sbin/zfs')
-	zxfer_get_parsed_remote_capability_tool_record parallel
-	missing_status=$?
-	zxfer_get_parsed_remote_capability_tool_record ""
-	empty_status=$?
-
-	assertEquals "A record without its path field should not be returned." 1 "$partial_status"
-	assertEquals "A tool without a record should not be returned." 1 "$missing_status"
-	assertEquals "An empty tool name should not match any record." 1 "$empty_status"
+	assertEquals "Every malformed answer should fail as a whole." "" "$failures"
 }
 
 ################################################################################
-# Probe script
+# Probe script and tool scope
 ################################################################################
 
-test_zxfer_remote_capability_probe_script_matches_framed_protocol_golden() {
+test_remote_capability_probe_script_matches_the_golden_and_refuses_a_multiline_secure_path() {
 	actual_script="$TEST_TMPDIR/remote-capability-probe-script.actual"
 	golden_script="$ZXFER_ROOT/tests/golden/remote_capability_probe_script.golden"
 	g_zxfer_secure_path='/secure/bin:/usr/bin'
@@ -391,11 +227,8 @@ test_zxfer_remote_capability_probe_script_matches_framed_protocol_golden() {
 		"$(cat "$golden_script")" "$(cat "$actual_script")"
 	assertEquals "The transport form should be the nonblank lines joined by single spaces." \
 		"$expected_transport" "$g_zxfer_remote_capability_probe_script_result"
-}
 
-test_zxfer_remote_capability_probe_rejects_multiline_secure_path_before_rendering() {
 	g_zxfer_secure_path=$(printf "/opt/trusted/bin\n/opt/translated/bin")
-	set +e
 	probe_script=$(zxfer_build_remote_capability_probe_script "zfs")
 	probe_status=$?
 	zxfer_build_remote_capability_probe_script "zfs" >/dev/null
@@ -408,131 +241,58 @@ test_zxfer_remote_capability_probe_rejects_multiline_secure_path_before_renderin
 		"" "$g_zxfer_remote_capability_probe_script_result"
 }
 
-################################################################################
-# Tool scope
-################################################################################
-
-test_zxfer_get_remote_capability_requested_tools_for_host_covers_each_role() {
-	g_option_O_origin_host="origin.example"
-	g_option_T_target_host="target.example"
-	g_option_j_jobs=4
-	g_option_e_restore_property_mode=1
-	g_option_k_backup_property_mode=1
-	g_option_z_compress=1
-	g_cmd_compress="zstd -T0 -9"
-	g_cmd_decompress="xz -d"
-
-	zxfer_get_remote_capability_requested_tools_for_host origin.example
-	origin_tools=$g_zxfer_remote_capability_requested_tools_result
-	zxfer_get_remote_capability_requested_tools_for_host target.example
-	target_tools=$g_zxfer_remote_capability_requested_tools_result
-	zxfer_get_remote_capability_requested_tools_for_host other.example
-	other_tools=$g_zxfer_remote_capability_requested_tools_result
-
-	assertEquals "The origin scope should hold zfs, parallel for -j, cat for -e and the compression head." \
-		"zfs parallel cat zstd" "$origin_tools"
-	assertEquals "The target scope should hold zfs, cat for -k and the decompression head." \
-		"zfs cat xz" "$target_tools"
-	assertEquals "A host that is neither -O nor -T should only need zfs." \
-		"zfs" "$other_tools"
-}
-
-test_zxfer_get_remote_capability_requested_tools_for_host_takes_the_union_for_a_shared_host() {
-	g_option_O_origin_host="shared.example"
-	g_option_T_target_host="shared.example"
-	g_option_j_jobs=4
-	g_option_e_restore_property_mode=0
-	g_option_k_backup_property_mode=1
-	g_option_z_compress=1
-	g_cmd_compress="zstd -3"
-	g_cmd_decompress="zstd -d"
-
-	zxfer_get_remote_capability_requested_tools_for_host shared.example
-
-	assertEquals "A host that is both -O and -T should get each helper once." \
-		"zfs parallel zstd cat" "$g_zxfer_remote_capability_requested_tools_result"
-}
-
-test_zxfer_get_remote_capability_requested_tools_for_host_defers_parallel_for_fast_noop_scope() {
-	g_option_O_origin_host="origin.example"
-	g_option_T_target_host=""
-	g_option_R_recursive="tank/src"
-	g_option_j_jobs=4
-	g_option_U_skip_unsupported_properties=1
-	g_option_g_grandfather_protection="enabled"
-
-	zxfer_get_remote_capability_requested_tools_for_host origin.example
-	host_tools=$g_zxfer_remote_capability_requested_tools_result
-	zxfer_get_remote_capability_requested_tools_for_host origin.example parallel
-	parallel_tools=$g_zxfer_remote_capability_requested_tools_result
-
-	assertEquals "Fast recursive no-op startup scopes should defer parallel until the proof finds work." \
-		"zfs" "$host_tools"
-	assertEquals "An on-demand parallel lookup should still ask for parallel." \
-		"zfs parallel" "$parallel_tools"
-}
-
-test_zxfer_get_remote_capability_requested_tools_for_host_narrows_to_a_tool_outside_the_scope() {
-	g_option_O_origin_host="origin.example"
-	g_option_e_restore_property_mode=1
-
-	zxfer_get_remote_capability_requested_tools_for_host origin.example cat
-	inside_tools=$g_zxfer_remote_capability_requested_tools_result
-	zxfer_get_remote_capability_requested_tools_for_host origin.example zfs
-	zfs_tools=$g_zxfer_remote_capability_requested_tools_result
-	zxfer_get_remote_capability_requested_tools_for_host origin.example xz
-	outside_tools=$g_zxfer_remote_capability_requested_tools_result
-
-	assertEquals "A tool inside the host scope should keep the whole scope, so the cache is shared." \
-		"zfs cat" "$inside_tools"
-	assertEquals "zfs is always inside the scope." \
-		"zfs cat" "$zfs_tools"
-	assertEquals "A tool outside the host scope should narrow the probe to zfs and that tool." \
-		"zfs xz" "$outside_tools"
-}
-
-test_zxfer_get_remote_capability_requested_tools_for_host_keeps_ifs_and_globbing() {
+test_remote_capability_requested_tools_follow_each_host_role() {
+	output=$(
+		# -O asks parallel (-j), cat (-e) and the compression head; -T asks
+		# cat (-k) and the decompression head; any other host only zfs.
+		zxfer_test_print_capability_scopes origin.example target.example "" 4 1 1 1 \
+			"zstd -T0 -9" "xz -d" origin.example: target.example: other.example:
+		# A host that is both -O and -T gets the union, each helper once.
+		zxfer_test_print_capability_scopes shared.example shared.example "" 4 0 1 1 \
+			"zstd -3" "zstd -d" shared.example:
+		# The fast no-op proof defers parallel until an on-demand lookup.
+		zxfer_test_print_capability_scopes origin.example "" tank/src 4 0 0 0 "" "" \
+			origin.example: origin.example:parallel
+		# A tool inside the scope keeps it (so the cache is shared); one
+		# outside narrows the probe to zfs and that tool.
+		zxfer_test_print_capability_scopes origin.example "" "" 1 1 0 0 "" "" \
+			origin.example:cat origin.example:zfs origin.example:xz
+		# Heads split as the resolver splits them; a command it rejects adds
+		# nothing.
+		zxfer_test_print_capability_scopes origin.example target.example "" 1 0 0 1 \
+			"zstd|x -3" "'zstd' -d" origin.example: target.example:
+	)
 	(
 		unset IFS
 		set +f
-		g_option_O_origin_host="origin.example"
-		g_option_z_compress=1
-		g_cmd_compress="zst* -3"
-		zxfer_get_remote_capability_requested_tools_for_host origin.example
-		[ "$g_zxfer_remote_capability_requested_tools_result" = "zfs zst*" ] || exit 8
-		[ "${IFS+set}" != "set" ] || exit 9
-		case $- in
-		*f*) exit 10 ;;
-		esac
+		zxfer_test_print_capability_scopes origin.example "" "" 1 0 0 1 "zst* -3" "" \
+			origin.example: >"$TEST_TMPDIR/literal_scope.out"
+		[ "${IFS+set}" != set ] || exit 9
+		[ "${-#*f}" = "$-" ] || exit 10
 	)
+	literal_status=$?
 
-	assertEquals "The tool scope must take heads literally and restore IFS and globbing." \
-		0 "$?"
-}
-
-test_zxfer_get_remote_capability_requested_tools_for_host_splits_heads_like_the_resolver() {
-	g_option_O_origin_host="origin.example"
-	g_option_T_target_host="target.example"
-	g_option_z_compress=1
-	g_cmd_compress="zstd|x -3"
-	g_cmd_decompress="'zstd' -d"
-
-	zxfer_get_remote_capability_requested_tools_for_host origin.example
-	origin_tools=$g_zxfer_remote_capability_requested_tools_result
-	zxfer_get_remote_capability_requested_tools_for_host target.example
-	target_tools=$g_zxfer_remote_capability_requested_tools_result
-
-	assertEquals "A separator should end the compression head, as it does for the resolver." \
-		"zfs zstd|" "$origin_tools"
-	assertEquals "A quoted command the resolver rejects should add no helper." \
-		"zfs" "$target_tools"
+	assertEquals "Each host should ask for exactly the helpers its roles need." \
+		"zfs parallel cat zstd
+zfs cat xz
+zfs
+zfs parallel zstd cat
+zfs
+zfs parallel
+zfs cat
+zfs cat
+zfs xz
+zfs zstd|
+zfs" "$output"
+	assertEquals "A head must be taken literally, and IFS and globbing restored." \
+		"0|zfs zst*" "$literal_status|$(cat "$TEST_TMPDIR/literal_scope.out")"
 }
 
 ################################################################################
 # Per-role cache
 ################################################################################
 
-test_zxfer_ensure_remote_host_capabilities_probes_once_per_role_host_and_scope() {
+test_remote_host_capabilities_are_cached_per_host_and_tool_scope() {
 	zxfer_test_reset_remote_probe_counters
 	output=$(
 		(
@@ -541,205 +301,71 @@ test_zxfer_ensure_remote_host_capabilities_probes_once_per_role_host_and_scope()
 			g_option_V_very_verbose=1
 			g_zxfer_profile_remote_capability_bootstrap_live=0
 			g_zxfer_profile_remote_capability_bootstrap_memory=0
-			g_option_O_origin_host="origin.example"
-
-			zxfer_ensure_remote_host_capabilities origin.example source >/dev/null || exit 11
-			zxfer_ensure_remote_host_capabilities origin.example source >/dev/null || exit 12
-			zxfer_ensure_remote_host_capabilities origin.example source zfs >/dev/null || exit 13
-			printf 'after_reuse=%s\n' "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
+			g_zxfer_profile_remote_cli_tool_direct_probes=0
+			g_option_O_origin_host=origin.example
+			g_option_T_target_host=target.example
+			g_option_e_restore_property_mode=1
+			# A miss probes and prints the answer; the same host and scope
+			# answer from memory with the same output, and a helper inside the
+			# scope resolves from its record without a direct probe.
+			zxfer_ensure_remote_host_capabilities origin.example source >"$TEST_TMPDIR/miss.out" || exit 11
+			zxfer_ensure_remote_host_capabilities origin.example source >"$TEST_TMPDIR/hit.out" || exit 12
+			zxfer_resolve_remote_required_tool origin.example cat cat source || exit 13
+			printf 'resolved_cat=%s direct_probes=%s\n' "$g_zxfer_required_tool_result" \
+				"$g_zxfer_profile_remote_cli_tool_direct_probes"
+			# A tool outside the scope probes zfs and that tool only.
 			zxfer_ensure_remote_host_capabilities origin.example source parallel >/dev/null || exit 14
-			zxfer_ensure_remote_host_capabilities origin.example source >/dev/null || exit 15
-			zxfer_ensure_remote_host_capabilities other.example source >/dev/null || exit 16
-			zxfer_ensure_remote_host_capabilities origin.example destination >/dev/null || exit 17
-			printf 'live=%s\n' "$g_zxfer_profile_remote_capability_bootstrap_live"
-			printf 'memory=%s\n' "$g_zxfer_profile_remote_capability_bootstrap_memory"
-			printf 'origin_slot=%s|%s\n' "$g_origin_remote_capabilities_host" "$g_origin_remote_capabilities_tools"
-			printf 'target_slot=%s|%s\n' "$g_target_remote_capabilities_host" "$g_target_remote_capabilities_tools"
-		) 2>/dev/null
-	)
-
-	assertContains "Repeat lookups for the same role, host and scope should come from memory." \
-		"$output" "after_reuse=1"
-	assertEquals "A new scope, a new host and the other role should each probe once more." \
-		5 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
-	assertContains "-V should count every live probe." "$output" "live=5"
-	assertContains "-V should count every memory hit." "$output" "memory=2"
-	assertContains "The origin slot should hold the last origin host and scope." \
-		"$output" "origin_slot=other.example|zfs"
-	assertContains "The target slot should be filled only by destination lookups." \
-		"$output" "target_slot=origin.example|zfs"
-}
-
-test_zxfer_ensure_remote_host_capabilities_probes_a_shared_host_once_for_both_roles() {
-	zxfer_test_reset_remote_probe_counters
-	ZXFER_TEST_PROBE_RESPONSE='ZXFER_REMOTE_CAPS_V2
-os	SharedOS
-tool	zfs	0	/shared/bin/zfs
-end'
-	# A second probe from the target side would answer with this response.
-	ZXFER_TEST_TARGET_PROBE_RESPONSE='ZXFER_REMOTE_CAPS_V2
-os	SecondProbeOS
-tool	zfs	0	/second/bin/zfs
-tool	xz	0	/second/bin/xz
-end'
-	output=$(
-		(
-			set +e
-			zxfer_test_stub_remote_probe_capture
-			g_zxfer_profile_remote_capability_bootstrap_live=0
-			g_zxfer_profile_remote_capability_bootstrap_memory=0
-			g_option_V_very_verbose=1
-			g_option_O_origin_host="shared.example"
-			g_option_T_target_host="shared.example"
-
-			zxfer_ensure_remote_host_capabilities shared.example source >/dev/null || exit 31
-			printf 'origin_os=%s\n' "$g_zxfer_remote_capability_os"
-			zxfer_ensure_remote_host_capabilities shared.example destination >/dev/null || exit 32
-			printf 'target_os=%s\n' "$g_zxfer_remote_capability_os"
-			zxfer_get_parsed_remote_capability_tool_record zfs || exit 33
-			printf 'target_zfs=%s\n' "$g_zxfer_remote_capability_tool_path_result"
-			zxfer_ensure_remote_host_capabilities shared.example >/dev/null || exit 34
-			printf 'no_side_os=%s\n' "$g_zxfer_remote_capability_os"
-			printf 'probes_before_new_scope=%s\n' "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
-			zxfer_ensure_remote_host_capabilities shared.example destination xz >/dev/null || exit 35
-			printf 'new_scope_os=%s\n' "$g_zxfer_remote_capability_os"
+			# Without a side the -T host fills the target slot, which then
+			# answers destination lookups; any other host uses the origin's.
+			zxfer_ensure_remote_host_capabilities target.example >/dev/null || exit 15
+			zxfer_ensure_remote_host_capabilities target.example destination >/dev/null || exit 16
+			zxfer_ensure_remote_host_capabilities unlisted.example >/dev/null || exit 17
+			# Bad lookups and roles fail without probing.
+			zxfer_ensure_remote_host_capabilities origin.example other >/dev/null && exit 18
+			zxfer_ensure_remote_host_capabilities "" source >/dev/null && exit 19
+			# A failed lookup leaves nothing of the last host in the channel.
+			printf 'channel=<%s|%s|%s|%s>\n' "$g_zxfer_remote_capability_os" \
+				"$g_zxfer_remote_capability_zfs_status" \
+				"$g_zxfer_remote_capability_tool_records" \
+				"$g_zxfer_remote_capability_response_result"
+			zxfer_publish_endpoint_runtime_context invalid Linux /sbin/zfs
+			printf 'publish_invalid=%s\n' "$?"
+			# A failed probe keeps its status and fills no slot.
+			zxfer_fetch_remote_host_capabilities_live() {
+				return 37
+			}
+			zxfer_ensure_remote_host_capabilities failing.example destination >/dev/null
+			printf 'failed_probe=%s target_slot=%s\n' "$?" "$g_target_remote_capabilities_host"
 			printf 'live=%s memory=%s\n' "$g_zxfer_profile_remote_capability_bootstrap_live" \
 				"$g_zxfer_profile_remote_capability_bootstrap_memory"
+			printf 'origin_slot=%s|%s target_slot=%s|%s\n' \
+				"$g_origin_remote_capabilities_host" "$g_origin_remote_capabilities_tools" \
+				"$g_target_remote_capabilities_host" "$g_target_remote_capabilities_tools"
 		) 2>/dev/null
 	)
 	status=$?
 
-	assertEquals "Both roles of a shared host should load their capabilities." 0 "$status"
-	assertEquals "Equal -O and -T specs should share one validated probe; a scope outside it probes again." \
-		"origin_os=SharedOS
-target_os=SharedOS
-target_zfs=/shared/bin/zfs
-no_side_os=SharedOS
-probes_before_new_scope=1
-new_scope_os=SecondProbeOS
-live=2 memory=2" "$output"
-	assertEquals "The shared host should be probed once for its scope and once for the narrowed one." \
-		2 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
-}
-
-test_zxfer_ensure_remote_host_capabilities_prints_the_response_on_a_miss_and_a_hit() {
-	zxfer_test_reset_remote_probe_counters
-	output=$(
-		(
-			zxfer_test_stub_remote_probe_capture
-			zxfer_ensure_remote_host_capabilities origin.example source
-			printf '%s\n' ---
-			zxfer_ensure_remote_host_capabilities origin.example source
-		)
-	)
-
-	assertEquals "Both the live probe and the memory hit should print the accepted response." \
+	assertEquals "Every lookup should behave as expected." 0 "$status"
+	assertEquals "Four scopes should cost four probes and three memory hits." \
+		"resolved_cat=/remote/bin/cat direct_probes=0
+channel=<|||>
+publish_invalid=2
+failed_probe=37 target_slot=target.example
+live=4 memory=3
+origin_slot=unlisted.example|zfs target_slot=target.example|zfs" "$output"
+	assertEquals "The probe count should match." 4 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
+	assertEquals "A miss and a hit should both print the accepted answer." \
 		"$(fake_remote_capability_response)
----
-$(fake_remote_capability_response)" "$output"
-}
-
-test_zxfer_ensure_remote_host_capabilities_stores_nothing_after_a_failed_validation() {
-	zxfer_test_reset_remote_probe_counters
-	ZXFER_TEST_PROBE_RESPONSE='ZXFER_REMOTE_CAPS_V2
-os	RemoteOS
-tool	zfs	0	/remote/bin/zfs'
-	output=$(
-		(
-			set +e
-			zxfer_test_stub_remote_probe_capture
-			zxfer_ensure_remote_host_capabilities origin.example source >/dev/null
-			printf 'first=%s\n' "$?"
-			zxfer_ensure_remote_host_capabilities origin.example source >/dev/null
-			printf 'second=%s\n' "$?"
-			printf 'slot=<%s|%s>\n' "$g_origin_remote_capabilities_host" "$g_origin_remote_capabilities_os"
-			printf 'response=<%s>\n' "$g_zxfer_remote_capability_response_result"
-		)
-	)
-
-	assertContains "A truncated response should fail the lookup." "$output" "first=1"
-	assertContains "A later lookup should fail again rather than reuse anything." "$output" "second=1"
-	assertContains "A rejected response must not fill the role slot." "$output" "slot=<|>"
-	assertContains "A rejected response must not be published." "$output" "response=<>"
-	assertEquals "Each lookup after a rejected response should probe again." \
-		2 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
-}
-
-test_zxfer_ensure_remote_host_capabilities_clears_the_channel_when_a_probe_fails() {
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() {
-				[ "$1" = good.example ] || return 255
-				fake_remote_capability_response
-			}
-			zxfer_ensure_remote_host_capabilities good.example source >/dev/null || exit 1
-			zxfer_ensure_remote_host_capabilities bad.example source >/dev/null 2>&1 && exit 2
-			printf 'os=<%s> zfs=<%s> records=<%s> response=<%s>\n' \
-				"$g_zxfer_remote_capability_os" "$g_zxfer_remote_capability_zfs_status" \
-				"$g_zxfer_remote_capability_tool_records" "$g_zxfer_remote_capability_response_result"
-		)
-	)
-
-	assertEquals "A failed probe must not leave the previous host's capabilities in the channel." \
-		"os=<> zfs=<> records=<> response=<>" "$output"
-}
-
-test_zxfer_ensure_remote_host_capabilities_rejects_unknown_sides_and_empty_hosts() {
-	zxfer_test_reset_remote_probe_counters
-	(
-		zxfer_test_stub_remote_probe_capture
-		zxfer_ensure_remote_host_capabilities origin.example other >/dev/null && exit 1
-		zxfer_ensure_remote_host_capabilities "" source >/dev/null && exit 2
-		exit 0
-	)
-
-	assertEquals "Lookups need a host and, when given, a source or destination side." 0 "$?"
-	assertEquals "Rejected lookups must not probe." 0 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
-}
-
-test_zxfer_ensure_remote_host_capabilities_picks_the_slot_from_the_host_role_without_a_side() {
-	zxfer_test_reset_remote_probe_counters
-	output=$(
-		(
-			zxfer_test_stub_remote_probe_capture
-			g_option_O_origin_host="origin.example"
-			g_option_T_target_host="target.example"
-			zxfer_ensure_remote_host_capabilities target.example >/dev/null || exit 1
-			zxfer_ensure_remote_host_capabilities unlisted.example >/dev/null || exit 2
-			printf 'origin=%s target=%s\n' "$g_origin_remote_capabilities_host" \
-				"$g_target_remote_capabilities_host"
-		)
-	)
-
-	assertEquals "The -T host should use the target slot and any other host the origin slot." \
-		"origin=unlisted.example target=target.example" "$output"
+$(fake_remote_capability_response)" "$(cat "$TEST_TMPDIR/miss.out" "$TEST_TMPDIR/hit.out")"
+	assertContains "The first probe should ask for the whole scope." \
+		"$(sed -n '1p' "$ZXFER_TEST_PROBE_LOG")" "for l_tool in '\\''zfs'\\'' '\\''cat'\\''; do"
+	assertContains "A tool outside the scope should be probed with zfs and that tool only." \
+		"$(sed -n '2p' "$ZXFER_TEST_PROBE_LOG")" "for l_tool in '\\''zfs'\\'' '\\''parallel'\\''; do"
 }
 
 ################################################################################
-# Live probe
+# Live probe, remote OS and probe capture
 ################################################################################
-
-test_zxfer_fetch_remote_host_capabilities_live_pins_the_secure_path_and_requested_tools() {
-	log_file="$TEST_TMPDIR/remote_caps_live_env.log"
-	output=$(
-		(
-			g_zxfer_secure_path="/fresh/secure/path:/usr/bin"
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' "$2" >"$log_file"
-				fake_remote_capability_response
-			}
-			zxfer_fetch_remote_host_capabilities_live "origin.example" source "zfs cat" || exit 1
-			printf '%s\n' "$g_zxfer_remote_capability_response_result"
-		)
-	)
-
-	assertContains "Live probes should publish the accepted capability payload." \
-		"$output" "tool	cat	0	/remote/bin/cat"
-	assertContains "Live probes should pin the secure PATH." \
-		"$(cat "$log_file")" "PATH='\\''/fresh/secure/path:/usr/bin'\\''"
-	assertContains "Live probes should ask for exactly the requested tools." \
-		"$(cat "$log_file")" "for l_tool in '\\''zfs'\\'' '\\''cat'\\''; do"
-}
 
 test_zxfer_fetch_remote_host_capabilities_live_handles_csh_remote_shell() {
 	l_csh_shell=$(find_csh_shell_for_tests)
@@ -792,129 +418,8 @@ EOF
 		2 "$(sed -n '$=' "$realistic_ssh_log")"
 }
 
-test_zxfer_fetch_remote_host_capabilities_live_preserves_transport_diagnostic() {
-	set +e
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' "Host key verification failed." >&2
-				return 255
-			}
-			zxfer_fetch_remote_host_capabilities_live "origin.example" source zfs
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Remote capability handshakes should fail when ssh transport setup fails." 1 "$status"
-	assertContains "Remote capability handshakes should preserve the underlying transport diagnostic." \
-		"$output" "Host key verification failed."
-}
-
-test_zxfer_preload_remote_host_capabilities_delegates_to_ensure() {
-	log="$TEST_TMPDIR/preload_remote_caps.log"
-	: >"$log"
-
-	(
-		zxfer_ensure_remote_host_capabilities() {
-			printf 'ensure host=%s side=%s args=%s\n' "$1" "${2:-}" "$#" >>"$log"
-		}
-		zxfer_preload_remote_host_capabilities "origin.example" source
-	)
-
-	assertEquals "Capability preloading should ask ensure for the whole host scope." \
-		"ensure host=origin.example side=source args=2" "$(cat "$log")"
-}
-
-test_zxfer_preload_remote_host_capabilities_suppresses_failures_without_verbose() {
-	set +e
-	output=$(
-		(
-			g_option_v_verbose=0
-			g_option_V_very_verbose=0
-			zxfer_ensure_remote_host_capabilities() {
-				printf '%s\n' "Host key verification failed." >&2
-				return 1
-			}
-			zxfer_preload_remote_host_capabilities "origin.example" source
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Quiet capability preloads should still return the shared ensure failure status." \
-		1 "$status"
-	assertEquals "Quiet capability preloads should suppress opportunistic preload diagnostics." \
-		"" "$output"
-}
-
-test_zxfer_preload_remote_host_capabilities_surfaces_failures_in_verbose_mode() {
-	set +e
-	output=$(
-		(
-			g_option_v_verbose=1
-			g_option_V_very_verbose=0
-			zxfer_ensure_remote_host_capabilities() {
-				printf '%s\n' "Host key verification failed." >&2
-				return 1
-			}
-			zxfer_preload_remote_host_capabilities "origin.example" source
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Verbose capability preloads should still return the shared ensure failure status." \
-		1 "$status"
-	assertContains "Verbose capability preloads should surface opportunistic preload diagnostics." \
-		"$output" "Host key verification failed."
-}
-
-################################################################################
-# Remote OS
-################################################################################
-
-test_zxfer_get_os_answers_from_the_host_capabilities() {
-	zxfer_test_reset_remote_probe_counters
-	output=$(
-		(
-			zxfer_test_stub_remote_probe_capture
-			g_option_O_origin_host="origin.example"
-			zxfer_get_os "origin.example" source
-		)
-	)
-	status=$?
-
-	assertEquals "Remote OS lookups should succeed through the capability probe." 0 "$status"
-	assertEquals "Remote OS lookups should return the capability OS." "RemoteOS" "$output"
-	assertEquals "Remote OS lookups should need only the capability probe." \
-		1 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
-}
-
-test_zxfer_get_os_falls_back_to_a_direct_uname_probe() {
-	log="$TEST_TMPDIR/remote_os_direct.log"
-	for case_name in unavailable malformed; do
-		: >"$log"
-		output=$(
-			(
-				CASE_NAME=$case_name
-				g_zxfer_secure_path="/fresh/secure/path:/usr/bin"
-				zxfer_test_stub_os_fallback_invoke
-				zxfer_get_os "origin.example" source
-			)
-		)
-
-		assertEquals "A $case_name capability probe should fall back to the first line of a direct uname probe." \
-			"FallbackOS" "$output"
-		assertContains "The direct OS probe should target the requested host." \
-			"$(cat "$log")" "origin.example|"
-		assertContains "The direct OS probe should pin the secure PATH." \
-			"$(cat "$log")" "PATH='\\''/fresh/secure/path:/usr/bin'\\''; export PATH; uname 2>/dev/null"
-		assertContains "The direct OS probe should keep the profile side." \
-			"$(cat "$log")" "|source"
-	done
-}
-
-test_zxfer_get_os_preserves_the_direct_probe_failure() {
-	set +e
-	output=$(
+test_get_os_fails_closed_when_the_direct_probe_fails_or_prints_nothing() {
+	failed_output=$(
 		(
 			zxfer_ensure_remote_host_capabilities() {
 				return 1
@@ -923,19 +428,11 @@ test_zxfer_get_os_preserves_the_direct_probe_failure() {
 				printf '%s\n' "Permission denied (publickey)." >&2
 				return 255
 			}
-			zxfer_get_os "origin.example" source
+			zxfer_get_os origin.example source
 		)
 	)
-	status=$?
-
-	assertEquals "Remote OS lookups should fail when both probes fail." 1 "$status"
-	assertEquals "Remote OS lookups should print the direct probe's stderr." \
-		"Permission denied (publickey)." "$output"
-}
-
-test_zxfer_get_os_rejects_empty_direct_probe_output() {
-	set +e
-	output=$(
+	failed_status=$?
+	empty_output=$(
 		(
 			zxfer_ensure_remote_host_capabilities() {
 				return 1
@@ -943,74 +440,66 @@ test_zxfer_get_os_rejects_empty_direct_probe_output() {
 			zxfer_invoke_ssh_shell_command_for_host() {
 				return 0
 			}
-			zxfer_get_os "origin.example" source
+			zxfer_get_os origin.example source
 		)
 	)
-	status=$?
+	empty_status=$?
 
-	assertEquals "Direct remote OS lookups should fail when uname returns no output." 1 "$status"
-	assertEquals "Failed direct remote OS lookups should not print a payload." "" "$output"
+	assertEquals "A failed direct probe should fail and print the probe's stderr." \
+		"1|Permission denied (publickey)." "$failed_status|$failed_output"
+	assertEquals "A direct probe that prints nothing should fail silently." \
+		"1|" "$empty_status|$empty_output"
 }
 
-################################################################################
-# Probe capture
-################################################################################
+test_get_os_treats_local_ssh_path_as_literal() {
+	marker="$TEST_TMPDIR/get_os_ssh_marker"
+	old_cmd_ssh=${g_cmd_ssh:-}
+	g_cmd_ssh="/bin/echo; touch $marker #"
 
-test_zxfer_capture_remote_probe_output_throws_transport_setup_failures_before_staging() {
-	l_probe_marker="$TEST_TMPDIR/remote_probe_capture_marker"
-	rm -f "$l_probe_marker"
+	if zxfer_get_os "backup@example.com" >/dev/null 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	g_cmd_ssh=$old_cmd_ssh
 
-	set +e
-	output=$(
-		(
-			g_option_V_very_verbose=1
-			g_zxfer_profile_source_ssh_shell_invocations=0
-			zxfer_prepare_ssh_transport() {
-				g_zxfer_ssh_transport_error="Managed ssh policy invalid."
-				return 1
-			}
-			zxfer_get_temp_file() {
-				: >"$l_probe_marker"
-			}
-			zxfer_throw_error() {
-				printf 'message=%s\n' "$1"
-				printf 'source=%s\n' "${g_zxfer_profile_source_ssh_shell_invocations:-0}"
-				exit 7
-			}
-			zxfer_capture_remote_probe_output "origin.example" "'sh' '-c' 'printf ok'" source
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Transport setup failures should throw." 7 "$status"
-	assertContains "The throw should carry the transport diagnostic." \
-		"$output" "message=Managed ssh policy invalid."
-	assertContains "A transport setup failure should still count one ssh invocation, on the requested side." \
-		"$output" "source=1"
-	assertFalse "No staging file should exist once transport setup has failed." \
-		"[ -e '$l_probe_marker' ]"
+	: "$status"
+	assertFalse "Local ssh helper paths should not execute shell metacharacters during OS detection." \
+		"[ -e '$marker' ]"
 }
 
-test_zxfer_capture_remote_probe_output_throws_host_spec_failures_before_ssh_runs() {
-	set +e
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf 'unexpected ssh\n'
-			}
-			zxfer_throw_error() {
-				printf 'message=%s\n' "$1"
-				exit 7
-			}
-			zxfer_capture_remote_probe_output 'origin.example "pfexec"' "'true'" source
-		) 2>&1
-	)
-	status=$?
+test_zxfer_capture_remote_probe_output_throws_before_staging_or_running_ssh() {
+	# ssh runs in a command substitution with stderr staged, so a bad policy
+	# or host spec must throw here first, where the report reaches the
+	# operator.
+	for l_capture_case in policy host_spec; do
+		l_capture_spec=origin.example
+		[ "$l_capture_case" = policy ] || l_capture_spec='origin.example "pfexec"'
+		output=$(
+			(
+				[ "$l_capture_case" != policy ] ||
+					ZXFER_SSH_USER_KNOWN_HOSTS_FILE=relative/known_hosts
+				zxfer_get_temp_file() {
+					printf 'staged\n'
+				}
+				zxfer_invoke_ssh_shell_command_for_host() {
+					printf 'ssh ran\n'
+				}
+				zxfer_throw_error() {
+					printf 'throw: %s\n' "$1"
+					exit 7
+				}
+				zxfer_capture_remote_probe_output "$l_capture_spec" "'true'" source
+			) 2>&1
+		)
+		status=$?
+		l_capture_message="Host spec (-O/-T) must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+		[ "$l_capture_case" != policy ] ||
+			l_capture_message="ZXFER_SSH_USER_KNOWN_HOSTS_FILE must be an absolute path."
 
-	assertEquals "A host spec that needs shell quoting should throw in this shell." 7 "$status"
-	assertContains "The throw should carry the host-spec diagnostic." \
-		"$output" "message=Host spec (-O/-T) must use literal whitespace-delimited tokens only"
-	assertNotContains "ssh must not run for a rejected host spec." "$output" "unexpected ssh"
+		assertEquals "[$l_capture_case] should throw before staging stderr or running ssh." \
+			"7|throw: $l_capture_message" "$status|$output"
+	done
 }
 
 test_zxfer_capture_remote_probe_output_rethrows_tempfile_allocation_failures() {
@@ -1033,35 +522,6 @@ test_zxfer_capture_remote_probe_output_rethrows_tempfile_allocation_failures() {
 		1 "$status"
 	assertContains "Remote probe capture should keep the temp-file diagnostic." \
 		"$output" "message=Error creating temporary file."
-}
-
-test_zxfer_capture_remote_probe_output_captures_stdout_stderr_and_status_in_this_shell() {
-	output=$(
-		(
-			set +e
-			g_option_V_very_verbose=1
-			g_zxfer_profile_destination_ssh_shell_invocations=0
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf 'probe line\n\n'
-				printf 'remote warning\n' >&2
-				return 3
-			}
-			zxfer_capture_remote_probe_output "target.example" "'true'" destination 2>/dev/null
-			printf 'status=%s\n' "$?"
-			printf 'stdout=<%s>\n' "$g_zxfer_remote_probe_stdout"
-			printf 'stderr=<%s>\n' "$g_zxfer_remote_probe_stderr"
-			printf 'capture_failed=%s\n' "$g_zxfer_remote_probe_capture_failed"
-			printf 'destination=%s\n' "$g_zxfer_profile_destination_ssh_shell_invocations"
-		)
-	)
-
-	assertContains "The remote status should be returned." "$output" "status=3"
-	assertContains "Stdout should be captured without trailing newlines." "$output" "stdout=<probe line>"
-	assertContains "Stderr should be captured as written." "$output" "stderr=<remote warning
->"
-	assertContains "A readable capture is not a capture failure." "$output" "capture_failed=0"
-	assertContains "The ssh run inside the substitution should be counted once in this shell." \
-		"$output" "destination=1"
 }
 
 test_zxfer_capture_remote_probe_output_reports_stderr_capture_failures() {
@@ -1094,70 +554,6 @@ test_zxfer_capture_remote_probe_output_reports_stderr_capture_failures() {
 		"$output" "stderr=<Failed to read remote probe stderr capture from local staging.>"
 }
 
-test_zxfer_capture_remote_probe_output_skips_the_read_for_an_empty_stderr() {
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' "quiet"
-			}
-			zxfer_read_runtime_artifact_file() {
-				printf 'unexpected read\n'
-				return 9
-			}
-			zxfer_capture_remote_probe_output "origin.example" "'true'" source
-			printf 'status=%s stdout=%s stderr=<%s>\n' "$?" \
-				"$g_zxfer_remote_probe_stdout" "$g_zxfer_remote_probe_stderr"
-		)
-	)
-
-	assertEquals "An empty stderr capture should not be read back." \
-		"status=0 stdout=quiet stderr=<>" "$output"
-}
-
-test_zxfer_capture_remote_probe_output_keeps_stdin_for_the_remote_command() {
-	output=$(
-		(
-			zxfer_invoke_ssh_shell_command_for_host() {
-				cat
-			}
-			zxfer_capture_remote_probe_output "target.example" "'cat'" destination <<EOF
-payload line
-EOF
-			printf 'stdout=%s\n' "$g_zxfer_remote_probe_stdout"
-		)
-	)
-
-	assertEquals "Probe capture should pass the caller's stdin to the remote command." \
-		"stdout=payload line" "$output"
-}
-
-test_zxfer_capture_remote_probe_output_records_the_failed_ssh_argv_as_the_last_command() {
-	output=$(
-		(
-			FAKE_SSH_EXIT_STATUS=255
-			export FAKE_SSH_EXIT_STATUS
-			unset ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
-			g_zxfer_failure_last_command="'zfs' 'receive' 'backup/stale'"
-			zxfer_capture_remote_probe_output "origin.example" "'false'" source
-			printf 'status=%s\n' "$?"
-			printf 'safe=<%s>\n' "$g_zxfer_failure_last_command"
-
-			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
-			g_zxfer_failure_last_command="'zfs' 'receive' 'backup/stale'"
-			zxfer_capture_remote_probe_output "origin.example" "'false'" source
-			printf 'unsafe=<%s>\n' "$g_zxfer_failure_last_command"
-		)
-	)
-
-	assertContains "The failing ssh status should be returned." "$output" "status=255"
-	assertContains "Safe report mode should record the probe as a redacted last command." \
-		"$output" "safe=<[redacted]>"
-	assertContains "Unsafe report mode should record the probe's ssh argv and host." \
-		"$output" "unsafe=<'$FAKE_SSH_BIN' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' 'origin.example' "
-	assertNotContains "A failed probe must not leave the stale command in the report." \
-		"$output" "backup/stale"
-}
-
 test_zxfer_emit_remote_probe_failure_message_prefers_staged_stderr() {
 	default_output=$(zxfer_emit_remote_probe_failure_message "default probe failure.")
 	default_status=$?
@@ -1173,28 +569,6 @@ test_zxfer_emit_remote_probe_failure_message_prefers_staged_stderr() {
 		"staged probe failure" "$staged_output"
 	assertEquals "Remote probe failure message emission should succeed when printing staged stderr." \
 		0 "$staged_status"
-}
-
-test_zxfer_capture_remote_probe_output_emits_very_verbose_probe_prefix_before_capture_redirection() {
-	set +e
-	output=$(
-		(
-			g_option_V_very_verbose=1
-			g_cmd_ssh="$FAKE_SSH_BIN"
-			g_option_O_origin_host="origin.example"
-			zxfer_invoke_ssh_shell_command_for_host() {
-				printf '%s\n' "probe-stdout"
-			}
-
-			zxfer_capture_remote_probe_output "origin.example" "'sh' '-c' 'printf ok'" source >/dev/null
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Very-verbose remote probe capture should still succeed when the mocked ssh probe returns stdout." \
-		0 "$status"
-	assertContains "Very-verbose remote probe capture should print the in-flight probe command before stdout/stderr redirection begins." \
-		"$output" "Running remote probe [origin: origin.example]: 'sh' '-c' 'printf ok'"
 }
 
 ################################################################################
@@ -1219,9 +593,11 @@ end'
 				printf 'unexpected direct probe\n'
 				return 1
 			}
-			for l_test_tool in zfs parallel cat; do
+			# The caller's label names the tool in its messages.
+			for l_test_case in zfs:zfs "parallel:GNU parallel" cat:cat; do
+				l_test_tool=${l_test_case%%:*}
 				zxfer_resolve_remote_required_tool origin.example \
-					"$l_test_tool" "$l_test_tool" source
+					"$l_test_tool" "${l_test_case#*:}" source
 				printf '%s_status=%s\n' "$l_test_tool" "$?"
 				printf '%s=%s\n' "$l_test_tool" "$g_zxfer_required_tool_result"
 			done
@@ -1232,42 +608,13 @@ end'
 	assertContains "Status 0 should print the stored helper path." \
 		"$output" "zfs=/remote/bin/zfs"
 	assertContains "Status 1 should report the missing dependency on the secure PATH." \
-		"$output" "parallel=Required dependency \"parallel\" not found on host origin.example in secure PATH (/secure/bin). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary."
+		"$output" "parallel=Required dependency \"GNU parallel\" not found on host origin.example in secure PATH (/secure/bin). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary."
 	assertContains "A missing dependency should fail." "$output" "parallel_status=1"
 	assertContains "Any other status should report a failed query." \
 		"$output" "cat=Failed to query dependency \"cat\" on host origin.example."
 	assertContains "A failed query should fail." "$output" "cat_status=1"
 	assertNotContains "Recorded tools must not need a direct probe." \
 		"$output" "unexpected direct probe"
-}
-
-test_resolve_remote_required_tool_probes_directly_without_a_record() {
-	for case_name in unavailable malformed absent; do
-		output=$(
-			(
-				set +e
-				CASE_NAME=$case_name
-				g_option_V_very_verbose=1
-				g_zxfer_profile_remote_cli_tool_direct_probes=0
-				zxfer_test_stub_fetch_without_tool_record
-				zxfer_run_remote_probe_script() {
-					printf 'direct %s|%s|%s\n' "$1" "$2" "$3" >&2
-					g_zxfer_remote_probe_stdout=/direct/bin/parallel
-					g_zxfer_remote_probe_stderr=""
-					return 0
-				}
-				zxfer_resolve_remote_required_tool origin.example parallel parallel source 2>&1
-				printf 'status=%s resolved=%s\n' "$?" "$g_zxfer_required_tool_result"
-				printf 'direct_probes=%s\n' "$g_zxfer_profile_remote_cli_tool_direct_probes"
-			)
-		)
-
-		assertContains "A $case_name capability record should fall back to the direct probe." \
-			"$output" "status=0 resolved=/direct/bin/parallel"
-		assertContains "The direct probe should run command -v for the tool on the requested side." \
-			"$output" "direct origin.example|source|l_path=\$(command -v 'parallel' 2>/dev/null);"
-		assertContains "-V should count the direct probe." "$output" "direct_probes=1"
-	done
 }
 
 test_resolve_remote_required_tool_maps_each_direct_probe_outcome() {
@@ -1280,304 +627,19 @@ test_resolve_remote_required_tool_maps_each_direct_probe_outcome() {
 			}
 			zxfer_test_stub_direct_tool_probe_invoke
 			for DIRECT_CASE in missing stderr noise relative; do
-				zxfer_resolve_remote_required_tool origin.example zfs zfs source
+				zxfer_resolve_remote_required_tool origin.example zstd \
+					"compression command" source
 				printf '%s=%s|%s\n' "$DIRECT_CASE" "$?" "$g_zxfer_required_tool_result"
 			done
 		)
 	)
 
 	assertContains "Exit 10 should report the missing dependency." \
-		"$output" "missing=1|Required dependency \"zfs\" not found on host origin.example in secure PATH (/secure/bin)."
+		"$output" "missing=1|Required dependency \"compression command\" not found on host origin.example in secure PATH (/secure/bin)."
 	assertContains "Other failures should print the probe's stderr." \
 		"$output" "stderr=1|Host key verification failed."
 	assertContains "Stdout-only noise should not replace the generic query failure." \
-		"$output" "noise=1|Failed to query dependency \"zfs\" on host origin.example."
+		"$output" "noise=1|Failed to query dependency \"compression command\" on host origin.example."
 	assertContains "A relative path should be rejected by path validation." \
-		"$output" "relative=1|Required dependency \"zfs\" on host origin.example resolved to \"bin/zfs\""
-}
-
-test_zxfer_truncated_remote_capability_probe_falls_back_to_direct_tool_resolution() {
-	probe_count_file="$TEST_TMPDIR/truncated-capability-probe-count"
-	printf '0\n' >"$probe_count_file"
-	output=$(
-		(
-			set +e
-			zxfer_capture_remote_probe_output() {
-				l_probe_count=$(($(cat "$probe_count_file") + 1))
-				printf '%s\n' "$l_probe_count" >"$probe_count_file"
-				if [ "$l_probe_count" -eq 1 ]; then
-					g_zxfer_remote_probe_stdout='ZXFER_REMOTE_CAPS_V2
-os	RemoteOS
-tool	zfs	0	/remote/bin/zfs'
-				else
-					g_zxfer_remote_probe_stdout='/fallback/bin/parallel'
-				fi
-				g_zxfer_remote_probe_stderr=""
-				return 0
-			}
-			zxfer_resolve_remote_required_tool "origin.example" parallel parallel source
-			printf 'status=%s\n' "$?"
-			printf 'resolved=%s\n' "$g_zxfer_required_tool_result"
-		)
-	)
-	probe_count=$(cat "$probe_count_file")
-
-	assertContains "A truncated multi-tool handshake should fail closed and use the direct secure probe." \
-		"$output" "status=0"
-	assertContains "Direct fallback after a truncated handshake should publish only the validated helper path." \
-		"$output" "resolved=/fallback/bin/parallel"
-	assertEquals "Truncation fallback should perform one capability handshake and one direct helper probe." \
-		2 "$probe_count"
-}
-
-test_resolve_remote_required_tool_reuses_the_host_scope_when_it_holds_the_tool() {
-	zxfer_test_reset_remote_probe_counters
-	output=$(
-		(
-			zxfer_test_stub_remote_probe_capture
-			g_option_O_origin_host="origin.example"
-			g_option_j_jobs=4
-			g_option_e_restore_property_mode=1
-			zxfer_ensure_remote_host_capabilities origin.example source >/dev/null || exit 1
-			zxfer_resolve_remote_required_tool origin.example parallel parallel source || exit 2
-			printf '%s\n' "$g_zxfer_required_tool_result"
-			zxfer_resolve_remote_required_tool origin.example cat cat source || exit 3
-			printf '%s\n' "$g_zxfer_required_tool_result"
-		)
-	)
-	status=$?
-
-	assertEquals "Helpers inside the host scope should resolve." 0 "$status"
-	assertEquals "Both helpers should come from the preloaded capabilities." \
-		"/opt/bin/parallel
-/remote/bin/cat" "$output"
-	assertEquals "Helpers inside the host scope should not probe again." \
-		1 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
-	assertContains "The one probe should cover the whole host scope." \
-		"$(cat "$ZXFER_TEST_PROBE_LOG")" "'\\''zfs'\\'' '\\''parallel'\\'' '\\''cat'\\''"
-}
-
-test_resolve_remote_required_tool_probes_a_narrow_scope_for_a_tool_outside_the_host_scope() {
-	zxfer_test_reset_remote_probe_counters
-	output=$(
-		(
-			zxfer_test_stub_remote_probe_capture
-			g_option_O_origin_host="origin.example"
-			g_option_e_restore_property_mode=1
-			zxfer_resolve_remote_required_tool origin.example parallel parallel source
-			printf '%s\n' "$g_zxfer_required_tool_result"
-		)
-	)
-
-	assertEquals "A tool outside the host scope should still resolve from its own probe." \
-		"/opt/bin/parallel" "$output"
-	assertContains "That probe should ask for zfs and the tool only." \
-		"$(cat "$ZXFER_TEST_PROBE_LOG")" "for l_tool in '\\''zfs'\\'' '\\''parallel'\\''; do"
-	assertNotContains "That probe should not ask for the rest of the host scope." \
-		"$(cat "$ZXFER_TEST_PROBE_LOG")" "'\\''cat'\\''"
-}
-
-test_zxfer_ensure_remote_host_capabilities_fills_memory_from_one_live_probe() {
-	probe_count_file="$TEST_TMPDIR/ensure-live-probe-count"
-	printf '0\n' >"$probe_count_file"
-	g_option_O_origin_host="origin.example"
-	zxfer_fetch_remote_host_capabilities_live() {
-		l_count=$(($(cat "$probe_count_file") + 1))
-		printf '%s\n' "$l_count" >"$probe_count_file"
-		g_zxfer_remote_capability_response_result=$(fake_remote_capability_response)
-		zxfer_parse_remote_capability_response "$g_zxfer_remote_capability_response_result"
-	}
-
-	first=$(zxfer_ensure_remote_host_capabilities "origin.example" source)
-	first_status=$?
-	# Plain (non-command-substitution) call so the in-memory store persists in
-	# this shell, mirroring the preload flow.
-	zxfer_ensure_remote_host_capabilities "origin.example" source >/dev/null
-	second=$(zxfer_ensure_remote_host_capabilities "origin.example" source)
-	second_status=$?
-	probe_count=$(cat "$probe_count_file")
-
-	unset -f zxfer_fetch_remote_host_capabilities_live
-	zxfer_source_runtime_modules_through "zxfer_replication.sh"
-
-	assertEquals "The first capability bootstrap should succeed from the live probe." 0 "$first_status"
-	assertContains "The first capability bootstrap should publish the live payload." \
-		"$first" "tool	parallel	0	/opt/bin/parallel"
-	assertEquals "Memory-backed lookups should succeed after the warm-up call." 0 "$second_status"
-	assertContains "Memory-backed lookups should replay the stored payload." \
-		"$second" "tool	parallel	0	/opt/bin/parallel"
-	assertEquals "One warmed host should cost exactly two live probes before the memory tier fills (one per command-substituted call) and zero after." \
-		2 "$probe_count"
-}
-
-test_zxfer_ensure_remote_host_capabilities_preserves_live_probe_diagnostic() {
-	set +e
-	output=$(
-		(
-			zxfer_fetch_remote_host_capabilities_live() {
-				printf '%s\n' "Host key verification failed." >&2
-				return 1
-			}
-			zxfer_ensure_remote_host_capabilities "origin.example" source
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Remote capability ensure should fail when the live capability probe fails." 1 "$status"
-	assertContains "Remote capability ensure should preserve the underlying live-probe transport diagnostic." \
-		"$output" "Host key verification failed."
-}
-
-test_zxfer_ensure_remote_host_capabilities_never_treats_failed_probe_as_empty() {
-	set +e
-	output=$(
-		(
-			zxfer_fetch_remote_host_capabilities_live() {
-				return 37
-			}
-			zxfer_ensure_remote_host_capabilities "origin.example" source
-			printf 'status=%s\n' "$?"
-			printf 'stored=<%s|%s>\n' "${g_origin_remote_capabilities_host:-}" \
-				"${g_origin_remote_capabilities_response:-}"
-		)
-	)
-
-	assertContains "Remote capability ensure should propagate the live probe failure status." \
-		"$output" "status=37"
-	assertContains "A failed probe must never populate the in-memory capability state." \
-		"$output" "stored=<|>"
-}
-
-test_zxfer_reset_remote_host_state_resets_capability_and_resolved_tool_state() {
-	result=$(
-		(
-			g_cmd_zfs="/stub/zfs"
-			g_origin_remote_capabilities_host="origin.example"
-			g_origin_remote_capabilities_response="dirty-origin"
-			g_origin_remote_capabilities_os="DirtyOriginOS"
-			g_target_remote_capabilities_tools="zfs cat"
-			g_target_remote_capabilities_response="dirty-target"
-			g_target_remote_capabilities_tool_records="dirty-target-tools"
-			g_zxfer_remote_probe_capture_failed=1
-			g_origin_cmd_zfs="/dirty/origin-zfs"
-
-			zxfer_reset_remote_host_state
-			printf 'origin=<%s|%s|%s>\n' "$g_origin_remote_capabilities_host" \
-				"$g_origin_remote_capabilities_response" "$g_origin_remote_capabilities_os"
-			printf 'target=<%s|%s|%s>\n' "$g_target_remote_capabilities_tools" \
-				"$g_target_remote_capabilities_response" "$g_target_remote_capabilities_tool_records"
-			printf 'capture_failed=%s\n' "$g_zxfer_remote_probe_capture_failed"
-			printf 'origin_zfs=%s\n' "$g_origin_cmd_zfs"
-		)
-	)
-
-	assertContains "Remote-host reset should empty the origin capability slot." \
-		"$result" "origin=<||>"
-	assertContains "Remote-host reset should empty the target capability slot." \
-		"$result" "target=<||>"
-	assertContains "Remote-host reset should clear remote capture failure state." \
-		"$result" "capture_failed=0"
-	assertContains "Remote-host reset should restore origin zfs to the local default." \
-		"$result" "origin_zfs=/stub/zfs"
-}
-
-test_zxfer_remote_tool_resolution_branches_cover_current_shell_paths() {
-	output=$(
-		(
-			set +e
-			zxfer_ensure_remote_host_capabilities() {
-				return 1
-			}
-			zxfer_run_remote_probe_script() {
-				g_zxfer_remote_probe_stdout=/sbin/zfs
-				return 0
-			}
-			zxfer_resolve_remote_required_tool "user@example" zfs ZFS source
-			printf 'resolve_ensure_fallback_status=%s\n' "$?"
-			printf 'resolve_ensure_fallback=%s\n' "$g_zxfer_required_tool_result"
-		)
-		(
-			set +e
-			zxfer_ensure_remote_host_capabilities() {
-				zxfer_parse_remote_capability_response 'ZXFER_REMOTE_CAPS_V2
-os	Linux
-tool	zfs	0	/sbin/zfs
-end'
-			}
-			zxfer_run_remote_probe_script() {
-				printf 'probe=%s\n' "$3" >&2
-				g_zxfer_remote_probe_stdout=/usr/bin/tar
-				return 0
-			}
-			zxfer_resolve_remote_required_tool "user@example" tar TAR source 2>&1
-			printf 'resolve_missing_tool_status=%s\n' "$?"
-			printf 'resolve_missing_tool=%s\n' "$g_zxfer_required_tool_result"
-		)
-		(
-			set +e
-			zxfer_resolve_remote_required_tool "" zfs ZFS source
-			printf 'resolve_empty_host_status=%s output=<%s>\n' "$?" "$g_zxfer_required_tool_result"
-		)
-	)
-
-	assertContains "Remote tool resolution should fall back to the direct probe when capability bootstrap fails." \
-		"$output" "resolve_ensure_fallback_status=0"
-	assertContains "Remote tool resolution should keep the direct probe path after a failed bootstrap." \
-		"$output" "resolve_ensure_fallback=/sbin/zfs"
-	assertContains "A tool without a capability record should be probed directly." \
-		"$output" "resolve_missing_tool_status=0"
-	assertContains "The direct probe should look the tool up by name." \
-		"$output" "probe=l_path=\$(command -v 'tar' 2>/dev/null);"
-	assertContains "The direct probe result should be printed." \
-		"$output" "/usr/bin/tar"
-	assertContains "An empty host should fail without output." \
-		"$output" "resolve_empty_host_status=1 output=<>"
-}
-
-test_zxfer_remote_capability_owner_branches_fail_closed() {
-	output=$(
-		(
-			set +e
-			zxfer_publish_endpoint_runtime_context invalid Linux /sbin/zfs
-			printf 'publish_endpoint_status=%s\n' "$?"
-
-			g_zxfer_remote_capability_tool_records=$(printf 'zfs\t0')
-			zxfer_get_parsed_remote_capability_tool_record zfs >/dev/null
-			printf 'malformed_record_status=%s\n' "$?"
-
-			zxfer_fetch_remote_host_capabilities_live() {
-				printf 'unexpected probe\n'
-			}
-			zxfer_ensure_remote_host_capabilities host.example invalid >/dev/null
-			printf 'ensure_invalid_side_status=%s\n' "$?"
-		)
-		(
-			set +e
-			g_target_remote_capabilities_host=target.example
-			g_target_remote_capabilities_tools=zfs
-			g_target_remote_capabilities_response=cached-response
-			g_target_remote_capabilities_os=FreeBSD
-			g_target_remote_capabilities_zfs_status=0
-			g_target_remote_capabilities_tool_records=$(printf 'zfs\t0\t/sbin/zfs')
-			zxfer_ensure_remote_host_capabilities target.example destination >/dev/null
-			printf 'load_target_status=%s\n' "$?"
-			printf 'load_target_os=%s\n' "$g_zxfer_remote_capability_os"
-			printf 'load_target_response=%s\n' "$g_zxfer_remote_capability_response_result"
-		)
-	)
-
-	assertContains "Endpoint context publication should reject unknown roles." \
-		"$output" "publish_endpoint_status=2"
-	assertContains "Malformed parsed tool records should fail closed." \
-		"$output" "malformed_record_status=1"
-	assertContains "Capability lookups should reject an unknown side." \
-		"$output" "ensure_invalid_side_status=1"
-	assertNotContains "An unknown side must not probe." \
-		"$output" "unexpected probe"
-	assertContains "A filled target slot should load without a probe." \
-		"$output" "load_target_status=0"
-	assertContains "A filled target slot should publish its operating system." \
-		"$output" "load_target_os=FreeBSD"
-	assertContains "A filled target slot should publish its response." \
-		"$output" "load_target_response=cached-response"
+		"$output" "relative=1|Required dependency \"compression command\" on host origin.example resolved to \"bin/zstd\""
 }

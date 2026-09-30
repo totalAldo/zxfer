@@ -118,16 +118,6 @@ test_running_test_is_in_sees_the_current_test() {
 		1 "$l_running_test_status"
 }
 
-test_get_temp_file_creates_unique_paths() {
-	file_one=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
-	file_two=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
-
-	assertNotEquals "Each temp-file request should return a unique path." \
-		"$file_one" "$file_two"
-	assertTrue "The first temp file should exist." '[ -f "$file_one" ]'
-	assertTrue "The second temp file should exist." '[ -f "$file_two" ]'
-}
-
 test_zxfer_create_temp_file_group_publishes_requested_paths() {
 	group_output_file="$TEST_TMPDIR/runtime-temp-group.out"
 
@@ -219,140 +209,6 @@ test_zxfer_create_temp_file_group_rejects_invalid_counts() {
 		"" "$g_zxfer_temp_file_group_result"
 }
 
-test_zxfer_create_temp_file_group_collects_current_shell_scratch_results() {
-	output=$(
-		(
-			counter=0
-			zxfer_get_temp_file() {
-				counter=$((counter + 1))
-				g_zxfer_temp_file_result="$TEST_TMPDIR/group.$counter"
-				: >"$g_zxfer_temp_file_result"
-			}
-
-			zxfer_create_temp_file_group 3 >/dev/null
-			printf 'status=%s\n' "$?"
-			printf 'count=%s\n' "$counter"
-			printf '%s\n' "$g_zxfer_temp_file_group_result"
-		)
-	)
-
-	assertEquals "Temp-file group allocation should collect each current-shell scratch result and allocate exactly once per requested path." \
-		"status=0
-count=3
-$TEST_TMPDIR/group.1
-$TEST_TMPDIR/group.2
-$TEST_TMPDIR/group.3" "$output"
-}
-
-test_zxfer_create_temp_file_group_preserves_first_allocation_failure() {
-	output=$(
-		(
-			g_zxfer_temp_file_group_result="stale-group"
-			zxfer_get_temp_file() {
-				return 71
-			}
-
-			set +e
-			zxfer_create_temp_file_group 3 >/dev/null
-			status=$?
-
-			printf 'status=%s\n' "$status"
-			printf 'group=<%s>\n' "$g_zxfer_temp_file_group_result"
-		)
-	)
-
-	assertContains "Temp-file group allocation should preserve the first allocation failure status." \
-		"$output" "status=71"
-	assertContains "Temp-file group allocation should not publish a group when the first allocation fails." \
-		"$output" "group=<>"
-}
-
-test_zxfer_create_temp_file_group_cleans_up_after_second_allocation_failure_in_current_shell() {
-	cleanup_log="$TEST_TMPDIR/temp_group_cleanup_second.log"
-	call_count=0
-
-	zxfer_get_temp_file() {
-		call_count=$((call_count + 1))
-		case "$call_count" in
-		1)
-			g_zxfer_temp_file_result="$TEST_TMPDIR/group-second-first"
-			: >"$g_zxfer_temp_file_result"
-			return 0
-			;;
-		2)
-			return 71
-			;;
-		esac
-		return 72
-	}
-	zxfer_cleanup_runtime_artifact_path_list() {
-		printf '%s\n' "$1" >"$cleanup_log"
-		return 0
-	}
-
-	set +e
-	zxfer_create_temp_file_group 3 >/dev/null 2>&1
-	status=$?
-	cleanup_paths=$(cat "$cleanup_log" 2>/dev/null || :)
-	group_result=$g_zxfer_temp_file_group_result
-
-	zxfer_source_runtime_modules_through "zxfer_replication.sh"
-	setUp
-
-	assertEquals "Current-shell temp-file group allocation should preserve the second allocation failure status." \
-		71 "$status"
-	assertEquals "Current-shell temp-file group allocation should clean up the already allocated file when the second allocation fails." \
-		"$TEST_TMPDIR/group-second-first" "$cleanup_paths"
-	assertEquals "Current-shell temp-file group allocation should not publish a group after the second allocation fails." \
-		"" "$group_result"
-}
-
-test_zxfer_cleanup_pid_helpers_cover_current_shell_paths() {
-	zxfer_runtime_spawn_live_child first ||
-		fail "Unable to start the first live child."
-	first_pid=$g_zxfer_runtime_live_child_pid
-	zxfer_runtime_spawn_live_child second ||
-		fail "Unable to start the second live child."
-	second_pid=$g_zxfer_runtime_live_child_pid
-
-	output=$(
-		(
-			zxfer_register_cleanup_pid ""
-			zxfer_register_cleanup_pid "$first_pid" "unit cleanup helper"
-			zxfer_register_cleanup_pid "$second_pid" "unit cleanup helper"
-			zxfer_register_cleanup_pid "$second_pid" "unit cleanup helper"
-			printf 'registered=<%s>\n' "$g_zxfer_cleanup_pid_records"
-
-			zxfer_unregister_cleanup_pid "$first_pid"
-			printf 'after_unregister=<%s>\n' "$g_zxfer_cleanup_pid_records"
-
-			zxfer_register_cleanup_pid "$$" "current shell"
-			zxfer_abort_cleanup_pid() {
-				printf 'abort:%s\n' "$1" >&3
-				zxfer_unregister_cleanup_pid "$1"
-				return 0
-			}
-			zxfer_kill_registered_cleanup_pids 3>&1
-			printf 'after_kill=<%s>\n' "$g_zxfer_cleanup_pid_records"
-		)
-	)
-
-	kill -s TERM "$first_pid" >/dev/null 2>&1 || true
-	kill -s TERM "$second_pid" >/dev/null 2>&1 || true
-	wait "$first_pid" 2>/dev/null || true
-	wait "$second_pid" 2>/dev/null || true
-
-	assertContains "Cleanup PID registration should keep one row per live helper PID." \
-		"$output" "registered=<$first_pid	unit cleanup helper	pid
-$second_pid	unit cleanup helper	pid>"
-	assertContains "Cleanup PID unregistration should remove only the requested helper row." \
-		"$output" "after_unregister=<$second_pid	unit cleanup helper	pid>"
-	assertContains "Cleanup PID teardown should delegate teardown for the remaining helper PID." \
-		"$output" "abort:$second_pid"
-	assertContains "Cleanup PID teardown should clear the registered helper PID list after delegated teardown." \
-		"$output" "after_kill=<>"
-}
-
 test_zxfer_register_cleanup_pid_tracks_direct_children_without_identity_captures() {
 	# This shell signals the child right after registering it, so the child
 	# must already run its own program (see zxfer_runtime_spawn_live_child).
@@ -362,6 +218,9 @@ test_zxfer_register_cleanup_pid_tracks_direct_children_without_identity_captures
 
 	zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
 	register_status=$?
+	# A repeated registration must neither add nor rewrite the row.
+	zxfer_register_cleanup_pid "$tracked_pid" "repeated cleanup helper"
+	repeat_status=$?
 	zxfer_find_cleanup_pid_record "$tracked_pid"
 	find_status=$?
 
@@ -369,38 +228,12 @@ test_zxfer_register_cleanup_pid_tracks_direct_children_without_identity_captures
 	wait "$tracked_pid" 2>/dev/null || true
 
 	assertEquals "Registering a live direct child should succeed." 0 "$register_status"
+	assertEquals "Registering a tracked child again should succeed." 0 "$repeat_status"
 	assertEquals "Registered helpers should be findable by PID." 0 "$find_status"
-	assertEquals "Registered rows should carry PID, purpose, and signal scope." \
+	assertEquals "A tracked child should keep one row carrying its first PID, purpose, and signal scope." \
 		"$tracked_pid	unit cleanup helper	pid" "$g_zxfer_cleanup_pid_records"
 	assertEquals "Record lookups should publish the stored purpose." \
 		"unit cleanup helper" "$g_zxfer_cleanup_pid_record_purpose"
-}
-
-test_zxfer_register_cleanup_pid_does_not_capture_process_identity() {
-	zxfer_test_capture_subshell '
-		zxfer_runtime_spawn_live_child tracked || exit 1
-		tracked_pid=$g_zxfer_runtime_live_child_pid
-		ps() {
-			printf "unexpected-token-capture\n"
-			return 1
-		}
-		zxfer_register_cleanup_pid "$tracked_pid" "identity unavailable helper"
-		printf "status=%s\n" "$?"
-		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
-		zxfer_abort_cleanup_pid "$tracked_pid" TERM
-		printf "abort_status=%s\n" "$?"
-		printf "after_signal=<%s>\n" "$g_zxfer_cleanup_pid_records"
-		wait "$tracked_pid" 2>/dev/null || true
-		zxfer_unregister_cleanup_pid "$tracked_pid"
-		printf "after_wait=<%s>\n" "$g_zxfer_cleanup_pid_records"
-	'
-	output=$ZXFER_TEST_CAPTURE_OUTPUT
-	assertContains "Live direct children should register without a process snapshot." "$output" "status=0"
-	assertNotContains "Registration and signalling must not capture a start token." "$output" "unexpected-token-capture"
-	assertContains "The direct-child record should retain its purpose." "$output" "identity unavailable helper	pid>"
-	assertContains "The registered direct child should be signalled." "$output" "abort_status=0"
-	assertNotContains "Signalling must retain ownership until wait." "$output" "after_signal=<>"
-	assertContains "Explicit wait/unregister should release ownership." "$output" "after_wait=<>"
 }
 
 test_cleanup_registration_retains_a_live_group_or_its_starting_leader() {
@@ -470,6 +303,10 @@ test_zxfer_abort_cleanup_pid_signals_live_tracked_children_until_waited() {
 	zxfer_abort_cleanup_pid "$tracked_pid" TERM
 	abort_status=$?
 	records_after_signal=$g_zxfer_cleanup_pid_records
+	# An abort that never reached the helper would block wait forever. KILL
+	# it once its TERM trap has had time to run, so the assertions fail.
+	zxfer_runtime_wait_for_path "$marker_file" ||
+		kill -s KILL "$tracked_pid" 2>/dev/null
 	wait "$tracked_pid" 2>/dev/null
 	reaped_status=$?
 	zxfer_unregister_cleanup_pid "$tracked_pid"
@@ -605,28 +442,6 @@ test_zxfer_cleanup_pid_abort_grace_wait_uses_bounded_default_for_invalid_interna
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
-test_zxfer_abort_direct_child_pid_signals_unreaped_direct_children() {
-	ready_file="$TEST_TMPDIR/abort_direct.ready"
-	marker_file="$TEST_TMPDIR/abort_direct.marker"
-	zxfer_runtime_spawn_term_trap_helper "$ready_file" "$marker_file" ||
-		fail "Unable to start TERM-aware direct child helper."
-	child_pid=$g_zxfer_runtime_term_helper_pid
-
-	zxfer_abort_direct_child_pid \
-		"$child_pid" TERM "unit direct helper"
-	abort_status=$?
-	wait "$child_pid" 2>/dev/null
-	reaped_status=$?
-
-	assertEquals "Signalling a live direct child should succeed." 0 "$abort_status"
-	assertEquals "Signalling should leave no failure message." \
-		"" "$g_zxfer_cleanup_pid_abort_failure_message"
-	assertEquals "The signalled child should have handled the TERM signal." \
-		143 "$reaped_status"
-	assertEquals "The signalled child should have recorded its TERM trap." \
-		"term" "$(tr -d '[:space:]' <"$marker_file")"
-}
-
 test_zxfer_abort_direct_child_pid_tracks_live_child_when_immediate_signal_fails() {
 	zxfer_test_capture_subshell '
 		zxfer_runtime_spawn_live_child child || exit 1
@@ -748,6 +563,8 @@ test_zxfer_kill_registered_cleanup_pids_escalates_term_resistant_children() {
 		"kill -s 0 '$child_pid' 2>/dev/null"
 	assertEquals "Aggregate cleanup should unregister the reaped child." \
 		"" "$g_zxfer_cleanup_pid_records"
+	# Keep a failed assertion from leaving this fixture alive.
+	kill -s KILL "$child_pid" 2>/dev/null || :
 }
 
 test_cleanup_kills_group_descendants_after_the_leader_exits_on_term() {
@@ -1091,28 +908,41 @@ test_runtime_artifact_allocators_skip_pre_seeded_counter_names_in_current_shell(
 
 test_runtime_artifact_allocators_fail_closed_when_the_target_path_rejects_writes() {
 	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
-	# A regular-file path component rejects child creation even for root in the
-	# FreeBSD shunit2 guest; chmod-only fixtures are bypassable there.
-	: >"$g_zxfer_run_tmp_root/file-blocker"
-	: >"$g_zxfer_run_tmp_root/dir-blocker"
-	zxfer_create_runtime_artifact_file "file-blocker/unwritable-file" >/dev/null 2>&1
+	# A valid prefix longer than NAME_MAX (255 bytes on every supported file
+	# system) cannot be created, even by root in the FreeBSD shunit2 guest,
+	# where chmod-only fixtures are bypassable. A prefix holding a slash
+	# would stop at the prefix check instead.
+	long_prefix=z
+	while [ "${#long_prefix}" -lt 300 ]; do
+		long_prefix=$long_prefix$long_prefix
+	done
+	zxfer_create_runtime_artifact_file "$long_prefix" >/dev/null 2>&1
 	file_status=$?
-	zxfer_create_private_temp_dir "dir-blocker/unwritable-dir" >/dev/null 2>&1
+	file_result=$g_zxfer_runtime_artifact_path_result
+	zxfer_create_private_temp_dir "$long_prefix" >/dev/null 2>&1
 	dir_status=$?
+	dir_result=$g_zxfer_runtime_artifact_path_result
 
 	assertEquals "File allocation should fail closed when the target path rejects writes." \
 		1 "$file_status"
+	assertEquals "A failed file allocation should publish no path." "" "$file_result"
 	assertEquals "Directory allocation should fail closed when the target path rejects writes." \
 		1 "$dir_status"
+	assertEquals "A failed directory allocation should publish no path." "" "$dir_result"
 }
 
 test_runtime_artifact_allocators_skip_taken_names_after_subshell_allocations() {
 	# Allocate through command substitutions so the counter bumps never reach
 	# this shell; the allocator must still hand out unique, existing paths.
+	# The root exists first, as the eager session root does, so both
+	# substitutions allocate in it rather than each in a root of its own.
+	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
 	first_path=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
 	printf 'first payload\n' >"$first_path"
 	second_path=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
 
+	assertEquals "Both subshell allocations should use the shared run root." \
+		"$g_zxfer_run_tmp_root $g_zxfer_run_tmp_root" "${first_path%/*} ${second_path%/*}"
 	assertNotEquals "Subshell allocations should never reuse a taken temp path." \
 		"$first_path" "$second_path"
 	assertEquals "Subshell allocations should never truncate earlier allocations." \

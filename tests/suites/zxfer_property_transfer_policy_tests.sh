@@ -1,100 +1,71 @@
 #!/bin/sh
-# Property transfer fragment: the readonly list, source create metadata, the
-# -U unsupported-property scan, and the child create-time override filter.
-# Run by tests/test_zxfer_property_transfer.sh.
+# Property transfer fragment: the readonly list, the create-metadata probes,
+# the -U scan paths the black-box suites cannot shape (the pool-root probe
+# fallback, a type-mismatched answer, batches of 128 names, a remote that
+# drains stdin, a failed probe-dataset lookup), and the child create-time
+# override filter. Run by tests/test_zxfer_property_transfer.sh.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 ################################################################################
 # READONLY LIST
 ################################################################################
 
-test_resolve_readonly_properties_appends_freebsd_list() {
+test_resolve_readonly_properties_follows_the_platform_and_migration_on_every_call() {
+	zxfer_resolve_readonly_properties
+	assertEquals "readonly,mountpoint" "$g_zxfer_readonly_properties_result"
 	g_destination_operating_system="FreeBSD"
 	zxfer_resolve_readonly_properties
-	assertEquals "readonly,mountpoint,aclmode" "$g_zxfer_readonly_properties_result"
-}
-
-test_resolve_readonly_properties_follows_the_current_platform_on_every_call() {
-	g_destination_operating_system="FreeBSD"
-	zxfer_resolve_readonly_properties
+	assertEquals "FreeBSD appends its list." "readonly,mountpoint,aclmode" \
+		"$g_zxfer_readonly_properties_result"
 	g_destination_operating_system="SunOS"
 	zxfer_resolve_readonly_properties
 	assertEquals "The list is resolved per call, not memoized." \
 		"readonly,mountpoint" "$g_zxfer_readonly_properties_result"
-}
-
-test_resolve_readonly_properties_removes_mountpoint_during_migration() {
 	g_option_m_migrate=1
 	zxfer_resolve_readonly_properties
 	g_option_m_migrate=0
-	assertEquals "readonly" "$g_zxfer_readonly_properties_result"
+	assertEquals "-m leaves mountpoint out, so it moves." "readonly" \
+		"$g_zxfer_readonly_properties_result"
 }
 
 ################################################################################
 # CREATE METADATA
 ################################################################################
 
-test_get_validated_source_dataset_create_metadata_reads_type_from_the_property_list() {
-	(
-		zxfer_run_source_zfs_cmd() {
-			printf 'unexpected zfs call\n' >&2
-			exit 99
-		}
-		zxfer_get_validated_source_dataset_create_metadata "tank/src" "compression=lz4=local,type=filesystem=-"
-		printf 'status=%s type=%s volsize=<%s>\n' "$?" "$g_zxfer_source_dataset_type_result" "$g_zxfer_source_volume_size_result"
-	) >"$TEST_TMPDIR/metadata_fs.out"
-	assertEquals "status=0 type=filesystem volsize=<>" "$(cat "$TEST_TMPDIR/metadata_fs.out")"
-}
-
-test_get_validated_source_dataset_create_metadata_reads_volume_size_from_the_property_list() {
-	(
-		zxfer_run_source_zfs_cmd() {
-			printf 'unexpected zfs call\n' >&2
-			exit 99
-		}
-		zxfer_get_validated_source_dataset_create_metadata "tank/vol" "type=volume=-,volsize=1073741824=local"
-		printf 'status=%s type=%s volsize=%s\n' "$?" "$g_zxfer_source_dataset_type_result" "$g_zxfer_source_volume_size_result"
-	) >"$TEST_TMPDIR/metadata_vol.out"
-	assertEquals "status=0 type=volume volsize=1073741824" "$(cat "$TEST_TMPDIR/metadata_vol.out")"
-}
-
-test_get_validated_source_dataset_create_metadata_probes_live_when_the_list_lacks_values() {
+# The type and zvol size come from the property list, and each is probed
+# alone only when the list lacks it; a failed probe fails closed with the zfs
+# diagnostic. zfs get all always lists both, so the contract suite pins the
+# list values, a bad type and an empty size.
+test_get_validated_source_dataset_create_metadata_probes_only_what_the_list_lacks() {
+	: >"$TEST_TMPDIR/metadata_probe.log"
 	(
 		zxfer_run_source_zfs_cmd() {
 			printf '%s\n' "$*" >>"$TEST_TMPDIR/metadata_probe.log"
 			case "$*" in
 			"get -Hpo value type tank/vol") printf 'volume\n' ;;
 			"get -Hpo value volsize tank/vol") printf '2147483648\n' ;;
+			*)
+				printf 'permission denied\n'
+				return 5
+				;;
 			esac
 		}
 		zxfer_get_validated_source_dataset_create_metadata "tank/vol" "compression=lz4=local"
-		printf 'type=%s volsize=%s\n' "$g_zxfer_source_dataset_type_result" "$g_zxfer_source_volume_size_result"
-	) >"$TEST_TMPDIR/metadata_probe.out"
-	assertEquals "type=volume volsize=2147483648" "$(cat "$TEST_TMPDIR/metadata_probe.out")"
-	assertEquals "get -Hpo value type tank/vol
-get -Hpo value volsize tank/vol" "$(cat "$TEST_TMPDIR/metadata_probe.log")"
-}
-
-test_get_validated_source_dataset_create_metadata_reports_probe_failures_and_invalid_types() {
-	(
-		zxfer_run_source_zfs_cmd() {
-			printf 'permission denied\n'
-			return 5
-		}
+		printf 'status=%s type=%s volsize=%s\n' "$?" "$g_zxfer_source_dataset_type_result" \
+			"$g_zxfer_source_volume_size_result"
 		zxfer_get_validated_source_dataset_create_metadata "tank/src" ""
 		printf 'status=%s error=%s\n' "$?" "$g_zxfer_property_error_result"
-		zxfer_get_validated_source_dataset_create_metadata "tank/src" "type=snapshot=-"
+		zxfer_get_validated_source_dataset_create_metadata "tank/other" "type=volume=-"
 		printf 'status=%s error=%s\n' "$?" "$g_zxfer_property_error_result"
-		zxfer_get_validated_source_dataset_create_metadata "tank/vol" "type=volume=-,volsize=-=-"
-		printf 'status=%s error=%s\n' "$?" "$g_zxfer_property_error_result"
-		zxfer_get_validated_source_dataset_create_metadata "tank/vol" "type=volume=-"
-		printf 'status=%s error=%s\n' "$?" "$g_zxfer_property_error_result"
-	) >"$TEST_TMPDIR/metadata_failures.out"
-	assertEquals "status=5 error=Failed to retrieve source dataset type for [tank/src]: permission denied
-status=1 error=Invalid source dataset type for [tank/src]: snapshot
-status=1 error=Failed to retrieve source zvol size for [tank/vol]: empty volsize
-status=5 error=Failed to retrieve source zvol size for [tank/vol]: permission denied" \
-		"$(cat "$TEST_TMPDIR/metadata_failures.out")"
+	) >"$TEST_TMPDIR/metadata_probe.out"
+	assertEquals "status=0 type=volume volsize=2147483648
+status=5 error=Failed to retrieve source dataset type for [tank/src]: permission denied
+status=5 error=Failed to retrieve source zvol size for [tank/other]: permission denied" \
+		"$(cat "$TEST_TMPDIR/metadata_probe.out")"
+	assertEquals "get -Hpo value type tank/vol
+get -Hpo value volsize tank/vol
+get -Hpo value type tank/src
+get -Hpo value volsize tank/other" "$(cat "$TEST_TMPDIR/metadata_probe.log")"
 }
 
 ################################################################################
@@ -152,25 +123,6 @@ zxfer_property_test_fake_unsupported_scan() {
 	esac
 }
 
-# Destination fakes with one overlay probe answer overridden. Defined at top
-# level: a case statement inside "$(...)" is not portable across shells.
-zxfer_property_test_fake_overlay_probe_error() {
-	case "$*" in
-	"get -Hpo property,value,source overlay backup/dst")
-		printf 'connection reset\n'
-		return 4
-		;;
-	esac
-	zxfer_property_test_fake_unsupported_scan destination "$@"
-}
-
-zxfer_property_test_fake_overlay_probe_blank() {
-	case "$*" in
-	"get -Hpo property,value,source overlay backup/dst") return 1 ;;
-	esac
-	zxfer_property_test_fake_unsupported_scan destination "$@"
-}
-
 # Purpose: Run the -U scan against the fakes in a subshell, with every mapped
 # destination reported as existing (1) or missing (0), and write the
 # resulting lists to unsupported_scan.out.
@@ -189,40 +141,6 @@ zxfer_property_test_run_unsupported_scan() {
 		printf 'fs=<%s> vol=<%s>\n' "$g_zxfer_unsupported_filesystem_properties" \
 			"$g_zxfer_unsupported_volume_properties"
 	) >"$TEST_TMPDIR/unsupported_scan.out"
-}
-
-test_calculate_unsupported_properties_confirms_only_inventory_differences_with_direct_probes() {
-	g_initial_source="tank/src"
-	g_initial_source_had_trailing_slash=1
-	g_recursive_source_list="tank/src"
-	g_destination="backup/dst"
-
-	zxfer_property_test_run_unsupported_scan 1
-
-	assertEquals "Only overlay is unknown; volmode does not apply to a same-type probe and user:note is never probed." \
-		"fs=<overlay,volmode> vol=<>" "$(cat "$TEST_TMPDIR/unsupported_scan.out")"
-	assertEquals "get -Hpo name,value type tank/src
-get -Hpo property all tank/src
-get -Hpo value type backup/dst
-get -Hpo property all backup/dst
-get -Hpo property,value,source overlay backup/dst
-get -Hpo property,value,source volmode backup/dst" "$(cat "$PROBE_LOG")"
-}
-
-test_calculate_unsupported_properties_scans_each_dataset_type_against_a_matching_destination() {
-	g_initial_source="tank/src"
-	g_initial_source_had_trailing_slash=1
-	g_recursive_source_list="tank/src
-tank/src/vol"
-	g_destination="backup/dst"
-
-	zxfer_property_test_run_unsupported_scan 1
-
-	assertEquals "fs=<overlay,volmode> vol=<overlay>" "$(cat "$TEST_TMPDIR/unsupported_scan.out")"
-	assertContains "The volume inventory is compared against the existing destination volume." \
-		"$(cat "$PROBE_LOG")" "get -Hpo property all backup/dst/vol"
-	assertEquals "Volume-only properties present on the destination volume are never probed." \
-		0 "$(grep -c 'volmode backup/dst/vol' "$PROBE_LOG")"
 }
 
 test_calculate_unsupported_properties_falls_back_to_destination_pool_when_mapped_destination_is_missing() {
@@ -262,75 +180,7 @@ test_calculate_unsupported_properties_leaves_type_mismatched_inconclusive_probes
 		"vol=<overlay>" "$(cat "$TEST_TMPDIR/unsupported_mismatch.out")"
 }
 
-test_calculate_unsupported_properties_fails_closed_on_source_type_probe_error() {
-	g_initial_source="tank/src"
-	g_initial_source_had_trailing_slash=1
-	g_recursive_source_list="tank/src"
-	set +e
-	output=$(
-		(
-			zxfer_run_source_zfs_cmd() {
-				printf 'permission denied\n'
-				return 3
-			}
-			zxfer_throw_error() {
-				printf '%s|%s\n' "$1" "${2:-1}"
-				exit "${2:-1}"
-			}
-			zxfer_calculate_unsupported_properties
-		)
-	)
-	status=$?
-	assertEquals 3 "$status"
-	assertEquals "Failed to retrieve source dataset types for unsupported-property scan: permission denied|3" "$output"
-}
-
-test_calculate_unsupported_properties_fails_closed_on_destination_probe_error() {
-	g_initial_source="tank/src"
-	g_initial_source_had_trailing_slash=1
-	g_recursive_source_list="tank/src"
-	g_destination="backup/dst"
-	set +e
-	output=$(
-		(
-			zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=1; }
-			zxfer_run_source_zfs_cmd() { zxfer_property_test_fake_unsupported_scan source "$@"; }
-			zxfer_run_destination_zfs_cmd() { zxfer_property_test_fake_overlay_probe_error "$@"; }
-			zxfer_throw_error() {
-				printf '%s|%s\n' "$1" "${2:-1}"
-				exit "${2:-1}"
-			}
-			PROBE_LOG=/dev/null
-			zxfer_calculate_unsupported_properties
-		)
-	)
-	status=$?
-	assertEquals 4 "$status"
-	assertEquals "Failed to probe destination support for property [overlay] on [backup/dst]: connection reset|4" "$output"
-}
-
-test_calculate_unsupported_properties_reports_blank_destination_probe_failures() {
-	g_initial_source="tank/src"
-	g_initial_source_had_trailing_slash=1
-	g_recursive_source_list="tank/src"
-	g_destination="backup/dst"
-	set +e
-	output=$(
-		(
-			zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=1; }
-			zxfer_run_source_zfs_cmd() { zxfer_property_test_fake_unsupported_scan source "$@"; }
-			zxfer_run_destination_zfs_cmd() { zxfer_property_test_fake_overlay_probe_blank "$@"; }
-			zxfer_test_stub_throw_error_to_stdout status
-			PROBE_LOG=/dev/null
-			zxfer_calculate_unsupported_properties
-		)
-	)
-	status=$?
-	assertEquals 1 "$status"
-	assertEquals "Failed to probe destination support for property [overlay] on [backup/dst]: probe exited nonzero without stdout/stderr" "$output"
-}
-
-test_calculate_unsupported_properties_fails_closed_when_probe_dataset_lookups_fail() {
+test_calculate_unsupported_properties_fails_closed_when_the_probe_dataset_lookup_fails() {
 	g_initial_source="tank/src"
 	g_initial_source_had_trailing_slash=1
 	g_recursive_source_list="tank/src"
@@ -351,51 +201,6 @@ test_calculate_unsupported_properties_fails_closed_when_probe_dataset_lookups_fa
 	status=$?
 	assertEquals 1 "$status"
 	assertEquals "Failed to determine whether destination dataset [backup/dst] exists: timeout" "$output"
-
-	output=$(
-		(
-			zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=1; }
-			zxfer_run_source_zfs_cmd() { zxfer_property_test_fake_unsupported_scan source "$@"; }
-			zxfer_run_destination_zfs_cmd() {
-				printf 'no such dataset\n'
-				return 2
-			}
-			zxfer_throw_error() {
-				printf '%s|%s\n' "$1" "${2:-1}"
-				exit "${2:-1}"
-			}
-			PROBE_LOG=/dev/null
-			zxfer_calculate_unsupported_properties
-		)
-	)
-	status=$?
-	assertEquals 2 "$status"
-	assertEquals "Failed to determine the destination property-support probe dataset type for [backup/dst]: no such dataset|2" "$output"
-}
-
-test_calculate_unsupported_properties_preserves_caller_ifs_and_globbing() {
-	g_initial_source="tank/src"
-	g_initial_source_had_trailing_slash=1
-	g_recursive_source_list="tank/src"
-	g_destination="backup/dst"
-	l_saved_ifs=$IFS
-	IFS=","
-	set -f
-	PROBE_LOG=/dev/null
-	(
-		zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=1; }
-		zxfer_run_source_zfs_cmd() { zxfer_property_test_fake_unsupported_scan source "$@"; }
-		zxfer_run_destination_zfs_cmd() { zxfer_property_test_fake_unsupported_scan destination "$@"; }
-		zxfer_calculate_unsupported_properties
-		printf '%s\n' "$g_zxfer_unsupported_filesystem_properties"
-	) >"$TEST_TMPDIR/unsupported_ifs.out"
-	l_globbing=$(zxfer_property_test_report_globbing_state after)
-	l_ifs_after=$IFS
-	set +f
-	IFS=$l_saved_ifs
-	assertEquals "overlay,volmode" "$(cat "$TEST_TMPDIR/unsupported_ifs.out")"
-	assertEquals "after_globbing=disabled" "$l_globbing"
-	assertEquals "," "$l_ifs_after"
 }
 
 # Fake zfs for a wide -U scan: every source is a filesystem except
@@ -505,14 +310,12 @@ test_append_unsupported_property_appends_without_duplicates_per_type() {
 # CREATE-TIME POLICY
 ################################################################################
 
-test_filter_child_creation_overrides_for_parent_drops_inheritable_overrides_the_parent_supplies() {
-	assertEquals "quota=1G=override,compression=lz4=local,atime=on=override" \
+test_filter_child_creation_overrides_for_parent_drops_only_inheritable_overrides_the_parent_supplies() {
+	assertEquals "A matching inheritable override goes; a noninheritable one (quota), a non-override and a differing one stay." \
+		"quota=1G=override,compression=lz4=local,atime=on=override" \
 		"$(zxfer_filter_child_creation_overrides_for_parent \
 			"checksum=sha256=override,quota=1G=override,compression=lz4=local,atime=on=override" \
 			"checksum=sha256=local,quota=1G=local,atime=off=local" "")"
-}
-
-test_filter_child_creation_overrides_for_parent_ignores_readonly_and_ignored_parent_entries() {
 	assertEquals "A parent value on the readonly or -I list does not supply an override." \
 		"checksum=sha256=override,copies=2=override" \
 		"$(
@@ -521,13 +324,4 @@ test_filter_child_creation_overrides_for_parent_ignores_readonly_and_ignored_par
 				"checksum=sha256=override,copies=2=override,atime=off=override" \
 				"checksum=sha256=local,copies=2=local,atime=off=local" "checksum"
 		)"
-}
-
-test_filter_child_creation_overrides_for_parent_reports_awk_failures() {
-	(
-		g_cmd_awk="$TEST_TMPDIR/missing-awk"
-		zxfer_filter_child_creation_overrides_for_parent "atime=off=override" \
-			"atime=off=local" "" 2>/dev/null
-	)
-	assertNotEquals "A missing awk fails the filter." 0 "$?"
 }

@@ -2,14 +2,20 @@
 #
 # shunit2 tests for the send/receive job supervision in src/zxfer_send_jobs.sh.
 # The background-shell helpers it runs jobs in (src/zxfer_exec.sh) are tested
-# in tests/suites/zxfer_exec_background_shell_tests.sh.
+# in tests/suites/zxfer_exec_background_shell_tests.sh. Job success, a failed
+# job's status and report, the teardown of its running siblings, -j limits
+# and ancestry order through the replication queue, and the finish of a job's
+# receive are pinned black-box in tests/test_contract_send_receive.sh and
+# tests/test_contract_planning.sh.
 #
-# Pins: per-job status propagation (success, failure, a job shell that dies
-# before recording its status), the -j job limit, destination-ancestry
-# serialization, foreground receives finishing in the scheduler, abort
-# teardown of the whole job pipeline (TERM before KILL, first failure kept),
-# and that a job whose status is written never has its recycled PID
-# signalled.
+# Pinned here: what the black-box runs cannot reach. The scheduler's own job
+# limit and ancestry waits (the replication queue defers first), a job shell
+# that dies before recording its status, a status recorded under ksh93,
+# foreground receives finishing in the scheduler, reaping every finished job
+# in one scan without letting a hook read the job list, and abort teardown:
+# every pipeline stage in each spawn mode, TERM before KILL, the first
+# failure kept, a recycled PID never signalled, and the grace knob never
+# evaluated.
 #
 # shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -105,29 +111,6 @@ test_send_job_conflicts_with_destination_matches_equal_and_nested_paths() {
 		"zxfer_send_job_conflicts_with_destination backup/a"
 }
 
-test_spawn_send_job_records_status_and_finalizes_on_success() {
-	hook_log="$TEST_TMPDIR/bgjob_success.hooks"
-	: >"$hook_log"
-	output=$(
-		(
-			BGJOB_HOOK_LOG=$hook_log
-			bgjob_test_stub_finalize_hooks
-			zxfer_spawn_send_job "printf ok >/dev/null" "tank/a@snap2" "backup/a"
-			printf 'count=%s\n' "$g_count_zfs_send_jobs"
-			zxfer_wait_for_zfs_send_jobs "unit"
-			printf 'count=%s jobs=<%s>\n' "$g_count_zfs_send_jobs" "$g_zxfer_send_jobs"
-		)
-	)
-
-	assertEquals "A spawned job counts while active and the list is empty after reaping." \
-		"count=1
-count=0 jobs=<>" "$output"
-	assertEquals "A successful receive should run the three post-receive hooks for its destination." \
-		"completed backup/a
-invalidate backup/a exact
-verify backup/a" "$(cat "$hook_log")"
-}
-
 # ksh93 (illumos /bin/sh) reports a signal death as 256+N; the job shell
 # records the usual 128+N, so the reaper reports the signal instead of a job
 # shell that died before recording its status.
@@ -151,43 +134,6 @@ test_spawn_send_job_records_signal_deaths_as_128_plus_n_under_ksh93() {
 	ksh -c "$job_shell" zxfer-job "$status_file" 2>/dev/null
 
 	assertEquals "A pipeline killed by KILL records status 137." 137 "$(cat "$status_file")"
-}
-
-test_reap_send_job_failure_aborts_remaining_jobs_and_throws_structured_error() {
-	hook_log="$TEST_TMPDIR/bgjob_failure.hooks"
-	pid_file="$TEST_TMPDIR/bgjob_failure.sleeper"
-	: >"$hook_log"
-	rm -f "$pid_file"
-	set +e
-	output=$(
-		(
-			BGJOB_HOOK_LOG=$hook_log
-			bgjob_test_stub_finalize_hooks
-			g_option_T_target_host="operator@target"
-			zxfer_throw_error() {
-				printf 'message=%s\nstatus=%s\nstage=%s\n' "$1" "${2:-1}" "$g_zxfer_failure_stage"
-				printf 'jobs=<%s> count=%s\n' "$g_zxfer_send_jobs" "$g_count_zfs_send_jobs"
-				exit "${2:-1}"
-			}
-			zxfer_spawn_send_job "sh -c 'echo \$\$ >'\"$pid_file\"'; exec sleep 30'" "tank/b@snap2" "backup/b"
-			zxfer_spawn_send_job "exit 3" "tank/a@snap2" "backup/a"
-			zxfer_wait_for_zfs_send_jobs "unit"
-		)
-	)
-	status=$?
-	set +e
-
-	assertEquals "The job's exit status becomes the thrown status." 3 "$status"
-	assertContains "The failure names the snapshot, destination, target, pid, and exit status." \
-		"$output" "message=zfs send/receive job failed for [tank/a@snap2 -> backup/a] on target [operator@target] (PID "
-	assertContains "The failure carries the job's exit status." "$output" ", exit 3)."
-	assertContains "The failure is reported at the send/receive stage." "$output" "stage=send/receive"
-	assertContains "Every other job is torn down before the throw." "$output" "jobs=<> count=0"
-	assertEquals "A failed job runs no post-receive hook." "" "$(cat "$hook_log")"
-	sleeper_pid=$(cat "$pid_file" 2>/dev/null || :)
-	assertNotNull "The sleeping pipeline must have started before the abort." "$sleeper_pid"
-	assertTrue "The sleeping pipeline of the other job must be torn down." \
-		"bgjob_test_wait_for_pid_exit '$sleeper_pid'"
 }
 
 test_reap_send_job_reports_a_job_shell_that_died_before_recording_status() {
@@ -214,37 +160,6 @@ test_reap_send_job_reports_a_job_shell_that_died_before_recording_status() {
 	assertContains "The abnormal death is reported as a send/receive job failure." \
 		"$output" "message=zfs send/receive job failed for [tank/a@snap2 -> backup/a] (PID "
 	assertContains "The abnormal death carries the fail-closed status." "$output" ", exit 125)."
-}
-
-test_wait_for_any_send_job_reaps_the_finished_job_and_keeps_the_rest() {
-	hook_log="$TEST_TMPDIR/bgjob_any.hooks"
-	: >"$hook_log"
-	output=$(
-		(
-			BGJOB_HOOK_LOG=$hook_log
-			bgjob_test_stub_finalize_hooks
-			zxfer_spawn_send_job "sleep 30" "tank/slow@snap2" "backup/slow"
-			zxfer_spawn_send_job "exit 0" "tank/fast@snap2" "backup/fast"
-			zxfer_wait_for_any_send_job "job limit"
-			printf 'count=%s\n' "$g_count_zfs_send_jobs"
-			if zxfer_send_job_conflicts_with_destination backup/slow; then
-				printf 'slow=active\n'
-			else
-				printf 'slow=missing\n'
-			fi
-			zxfer_abort_all_send_jobs
-			printf 'after_abort=%s\n' "$g_count_zfs_send_jobs"
-		)
-	)
-
-	assertEquals "Waiting for any job reaps only the finished one and abort clears the rest." \
-		"count=1
-slow=active
-after_abort=0" "$output"
-	assertEquals "Only the finished job runs its post-receive hooks." \
-		"completed backup/fast
-invalidate backup/fast exact
-verify backup/fast" "$(cat "$hook_log")"
 }
 
 test_schedule_send_receive_pipeline_runs_and_finishes_foreground_receives() {
@@ -578,43 +493,6 @@ test_abort_all_send_jobs_never_evaluates_a_non_numeric_grace_knob() {
 	) 2>/dev/null
 
 	assertFalse "The grace knob never reaches arithmetic as an expression." "[ -e '$marker' ]"
-}
-
-test_wait_for_zfs_send_jobs_clears_job_list_on_success() {
-	output=$(
-		(
-			zxfer_reset_send_job_state
-			zxfer_reset_send_receive_state
-			zxfer_note_destination_receive_completed() { :; }
-			zxfer_invalidate_destination_property_mutation_cache() { :; }
-			zxfer_verify_converged_destination_after_receive() { :; }
-			zxfer_spawn_send_job "sleep 1" "tank/a@snap" "backup/a"
-			zxfer_spawn_send_job "sleep 1" "tank/b@snap" "backup/b"
-			zxfer_wait_for_zfs_send_jobs "unit"
-			printf 'jobs=<%s> count=%s\n' "$g_zxfer_send_jobs" "$g_count_zfs_send_jobs"
-		)
-	)
-	assertEquals "Waiting for every send job should leave the job list empty." \
-		"jobs=<> count=0" "$output"
-}
-
-test_wait_for_zfs_send_jobs_reports_failure() {
-	(
-		zxfer_reset_send_job_state
-		zxfer_reset_send_receive_state
-		g_zxfer_send_job_abort_grace_seconds=0
-		zxfer_note_destination_receive_completed() { :; }
-		zxfer_invalidate_destination_property_mutation_cache() { :; }
-		zxfer_verify_converged_destination_after_receive() { :; }
-		zxfer_throw_error() {
-			echo "send failure"
-			exit 1
-		}
-		zxfer_spawn_send_job "exit 0" "tank/a@snap" "backup/a"
-		zxfer_spawn_send_job "exit 3" "tank/b@snap" "backup/b"
-		zxfer_wait_for_zfs_send_jobs "failure"
-	) >/dev/null 2>&1
-	assertEquals "Job failures should surface via zxfer_throw_error." 1 "$?"
 }
 
 # shellcheck source=tests/shunit2/shunit2

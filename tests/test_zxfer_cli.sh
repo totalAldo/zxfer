@@ -1,44 +1,20 @@
 #!/bin/sh
 #
-# shunit2 tests for src/zxfer_cli.sh: option defaults, switch parsing, the
-# consistency check, and the -z/-Z compression refresh it runs.
-#
-# The cases in this file run with the resolver and remote zfs refresh stubbed.
-# The remote fragment keeps the remote-host fixture and the real functions.
+# shunit2 tests for src/zxfer_cli.sh: option defaults, switch parsing, and
+# the -z/-Z compression refresh it runs, with the resolver and the remote zfs
+# refresh stubbed. The usage errors of the consistency check and the parser
+# are pinned by the golden transcripts in tests/test_contract_cli_golden.sh.
 #
 # shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
-TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
-# shellcheck source=tests/helpers/remote_host_fixtures.sh
-. "$TESTS_DIR/helpers/remote_host_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_cli.sh"
 
-zxfer_usage() {
-	printf '%s\n' "usage output"
-}
-
-oneTimeSetUp() {
-	zxfer_test_create_tmpdir "zxfer_cli"
-	zxfer_test_remote_host_fixture_one_time_setup
-}
-
-oneTimeTearDown() {
-	zxfer_test_remote_host_fixture_one_time_teardown
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
-	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_cli_remote_tests.sh"; then
-		# Drop the stubs the cases in this file install below.
-		zxfer_source_modules_for_tests "$ZXFER_ROOT"
-		zxfer_test_remote_host_fixture_setup
-		return
-	fi
 	OPTIND=1
 	zxfer_init_cli_option_defaults
 	g_cmd_compress="zstd -3"
@@ -49,10 +25,6 @@ setUp() {
 	zxfer_refresh_remote_zfs_commands() {
 		:
 	}
-}
-
-tearDown() {
-	zxfer_test_remote_host_fixture_teardown
 }
 
 # Purpose: Parse one switch set from the option defaults and print every
@@ -149,50 +121,6 @@ test_read_command_line_switches_sets_each_flag_on_its_own() {
 EOF
 }
 
-test_read_command_line_switches_preserves_override_escape_sequences() {
-	zxfer_read_command_line_switches -o 'user:note=value\,with\,commas=and;semi'
-
-	assertEquals "Quoted -o values should keep literal-comma escape sequences for the downstream override parser." \
-		'user:note=value\,with\,commas=and;semi' "$g_option_o_override_property"
-}
-
-test_consistency_check_rejects_zero_jobs() {
-	zxfer_test_capture_subshell '
-		zxfer_throw_usage_error() {
-			printf "%s\n" "$1"
-			exit "${2:-2}"
-		}
-		g_option_j_jobs=0
-		zxfer_consistency_check
-	'
-
-	assertEquals "A zero job count should fail validation." 2 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Zero-job validation should explain the lower bound." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "job count of at least 1"
-}
-
-test_consistency_check_reads_the_override_list() {
-	zxfer_test_capture_subshell '
-		zxfer_throw_usage_error() {
-			printf "%s\n" "$1"
-			exit "${2:-2}"
-		}
-		g_option_o_override_property="compression=lz4,compression=gzip"
-		zxfer_consistency_check
-	'
-
-	assertEquals "A property named twice in -o should fail validation." 2 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Duplicate property for -o override: compression." "$ZXFER_TEST_CAPTURE_OUTPUT"
-
-	zxfer_test_capture_subshell '
-		g_option_o_override_property="compression=lz4,atime=off"
-		zxfer_consistency_check
-		printf "%s\n" "$g_zxfer_override_properties_result"
-	'
-	assertEquals "A valid -o list passes validation." 0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "compression=lz4=override,atime=off=override" "$ZXFER_TEST_CAPTURE_OUTPUT"
-}
-
 test_refresh_compression_commands_clears_stale_safe_commands_without_z() {
 	g_option_z_compress=0
 	g_cmd_compress_safe="evil"
@@ -202,65 +130,6 @@ test_refresh_compression_commands_clears_stale_safe_commands_without_z() {
 
 	assertEquals "Without -z no safe compression command should survive a refresh." \
 		"<>|<>" "<$g_cmd_compress_safe>|<$g_cmd_decompress_safe>"
-}
-
-test_refresh_compression_commands_rejects_empty_command() {
-	zxfer_test_capture_subshell '
-		zxfer_throw_usage_error() {
-			printf "%s\n" "$1"
-			exit "${2:-2}"
-		}
-		g_option_z_compress=1
-		g_cmd_compress=""
-		zxfer_refresh_compression_commands
-	'
-
-	assertEquals "An empty compression command should fail validation." 2 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Compression validation should explain the empty command." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "Compression command (-Z) cannot be empty."
-}
-
-test_refresh_compression_commands_rejects_shell_quoted_compression_command() {
-	zxfer_test_capture_subshell '
-		zxfer_throw_usage_error() {
-			printf "%s\n" "$1"
-			exit "${2:-2}"
-		}
-		g_option_z_compress=1
-		g_cmd_compress="\"/opt/zstd dir/zstd\" -3"
-		g_cmd_decompress="zstd -d"
-		zxfer_refresh_compression_commands
-	'
-
-	assertEquals "Quoted compression commands should fail validation instead of being silently re-tokenized." \
-		2 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Quoted compression command failures should explain the literal-token requirement." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "Compression command (-Z) must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
-}
-
-test_refresh_compression_commands_marks_dependency_failure_for_compression_lookup() {
-	zxfer_test_capture_subshell '
-		zxfer_throw_error() {
-			printf "class=%s\n" "${g_zxfer_failure_class:-}"
-			printf "msg=%s\n" "$1"
-			exit "${2:-1}"
-		}
-		zxfer_resolve_cli_command_safe() {
-			g_zxfer_resolved_cli_command_result="compression lookup failed"
-			return 1
-		}
-		g_option_z_compress=1
-		g_cmd_compress="zstd -3"
-		g_cmd_decompress="zstd -d"
-		zxfer_refresh_compression_commands
-	'
-
-	assertEquals "Compression-helper lookup failures should abort command refresh." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Compression-helper lookup failures should be classified as dependency errors." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "class=dependency"
-	assertContains "Compression-helper lookup failures should preserve the lookup error." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "msg=compression lookup failed"
 }
 
 test_refresh_compression_commands_marks_dependency_failure_for_decompression_lookup() {
@@ -307,16 +176,6 @@ test_refresh_compression_commands_rejects_shell_quoted_decompression_command() {
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Quoted decompression command failures should explain the literal-token requirement." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Decompression command must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
-}
-
-# zxfer-test-fragment: suites/zxfer_cli_remote_tests.sh
-# shellcheck source=tests/suites/zxfer_cli_remote_tests.sh
-. "$TESTS_DIR/suites/zxfer_cli_remote_tests.sh"
-
-suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_cli.sh" \
-		"$TESTS_DIR/suites/zxfer_cli_remote_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

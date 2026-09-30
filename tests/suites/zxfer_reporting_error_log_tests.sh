@@ -110,75 +110,6 @@ test_zxfer_append_failure_report_to_log_warns_when_nonwritable_parent_needs_crea
 		"$(cat "$stderr_file")" "unable to create ZXFER_ERROR_LOG file"
 }
 
-test_zxfer_append_failure_report_to_log_returns_failure_when_created_file_fails_validation() {
-	log_path="$TEST_TMPDIR/create-validation-failure.log"
-	stdout_file="$TEST_TMPDIR/create_validation_failure.stdout"
-	stderr_file="$TEST_TMPDIR/create_validation_failure.stderr"
-
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
-		ZXFER_ERROR_LOG=\"$log_path\"
-		zxfer_validate_existing_error_log_file() {
-			printf '%s\n' \"zxfer: warning: refusing ZXFER_ERROR_LOG file \\\"\$1\\\" because its permissions could not be determined.\" >&2
-			return 1
-		}
-		zxfer_append_failure_report_to_log \"report\"
-	"
-
-	assertEquals "Validation failures after secure file creation should return a non-zero status." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Validation failures after secure file creation should preserve the validation warning." \
-		"$(cat "$stderr_file")" "permissions could not be determined"
-}
-
-test_zxfer_append_failure_report_to_log_creates_secure_file() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	log_dir="$physical_tmpdir/created_log_parent"
-	log_path="$log_dir/failure.log"
-	mkdir -p "$log_dir"
-	ZXFER_ERROR_LOG="$log_path"
-	report_contents=$(printf 'zxfer: failure report begin\nmessage: failed\nzxfer: failure report end\n')
-
-	set +e
-	zxfer_append_failure_report_to_log "$report_contents"
-	status=$?
-	if [ -f "$log_path" ]; then
-		file_exists=1
-	else
-		file_exists=0
-	fi
-	perms=$(stat -c '%a' "$log_path" 2>/dev/null || stat -f '%Lp' "$log_path" 2>/dev/null)
-	perms_status=$?
-
-	assertEquals "ZXFER_ERROR_LOG appends should succeed for valid absolute paths." 0 "$status"
-	assertEquals "Failure log should be created when ZXFER_ERROR_LOG is valid." 1 "$file_exists"
-	assertEquals "Log file mode should be readable for assertions." 0 "$perms_status"
-	assertEquals "ZXFER_ERROR_LOG files should be created with mode 600." "600" "$perms"
-	assertEquals "A new log should hold exactly the report and its newline." \
-		"$report_contents" "$(cat "$log_path")"
-	assertEquals "Creating and appending should leave no lock or staging entry beside the log." \
-		"failure.log" "$(ls -A "$log_dir")"
-}
-
-test_zxfer_append_failure_report_to_log_preserves_existing_contents() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	log_path="$physical_tmpdir/failure_append.log"
-	ZXFER_ERROR_LOG="$log_path"
-	printf '%s\n' "existing: keep-me" >"$log_path"
-	chmod 600 "$log_path"
-
-	set +e
-	zxfer_append_failure_report_to_log "message: appended-report"
-	status=$?
-	grep -F "existing: keep-me" "$log_path" >/dev/null 2>&1
-	existing_status=$?
-	grep -F "message: appended-report" "$log_path" >/dev/null 2>&1
-	append_status=$?
-
-	assertEquals "Existing ZXFER_ERROR_LOG files should still accept appended reports." 0 "$status"
-	assertEquals "ZXFER_ERROR_LOG appends should preserve prior log contents." 0 "$existing_status"
-	assertEquals "ZXFER_ERROR_LOG appends should add the new report payload." 0 "$append_status"
-}
-
 test_zxfer_append_failure_report_to_log_rejects_relative_path() {
 	stderr_file="$TEST_TMPDIR/error_log.stderr"
 	ZXFER_ERROR_LOG="relative.log"
@@ -296,110 +227,50 @@ test_zxfer_append_failure_report_to_log_rejects_non_regular_target() {
 	assertEquals "Non-regular target rejection should emit a warning." 0 "$grep_status"
 }
 
-test_zxfer_append_failure_report_to_log_rejects_existing_insecure_mode() {
+# Each row: a fault in a 0600 log owned by this user in a trusted parent, and
+# the warning its refusal must give. A log whose mode or owner is wrong, or
+# whose owner, mode or link count cannot be read, is refused unwritten.
+test_zxfer_append_failure_report_to_log_refuses_a_log_it_cannot_prove_private() {
 	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	log_path="$physical_tmpdir/insecure_mode.log"
-	stderr_file="$TEST_TMPDIR/error_log_mode.stderr"
-	: >"$log_path"
-	chmod 644 "$log_path"
-	ZXFER_ERROR_LOG="$log_path"
 
-	set +e
-	zxfer_append_failure_report_to_log "message: should-not-append" >"$TEST_TMPDIR/error_log_mode.stdout" 2>"$stderr_file"
-	status=$?
-	grep -F "permissions (644) are not 0600" "$stderr_file" >/dev/null 2>&1
-	grep_status=$?
-	grep -F "should-not-append" "$log_path" >/dev/null 2>&1
-	append_status=$?
+	while IFS='|' read -r l_fault l_warning; do
+		log_path="$physical_tmpdir/refused_$l_fault.log"
+		stderr_file="$TEST_TMPDIR/refused_$l_fault.stderr"
+		: >"$log_path"
+		chmod 600 "$log_path"
 
-	assertEquals "Existing insecure ZXFER_ERROR_LOG files should be rejected." 1 "$status"
-	assertEquals "Insecure mode rejection should emit a warning." 0 "$grep_status"
-	assertNotEquals "Rejected insecure log files must not receive appended report data." 0 "$append_status"
-}
+		set +e
+		(
+			case $l_fault in
+			wider_mode) chmod 644 "$log_path" ;;
+			foreign_owner) zxfer_get_path_owner_uid() { printf '%s\n' 1234; } ;;
+			unknown_owner) zxfer_get_path_owner_uid() { return 1; } ;;
+			unknown_mode) zxfer_get_path_mode_octal() { return 1; } ;;
+			unknown_links)
+				# Only the link-count read runs a plain ls; the rest use exec ls.
+				ls() {
+					[ "$2" != "$log_path" ] || return 1
+					command ls "$@"
+				}
+				;;
+			esac
+			ZXFER_ERROR_LOG=$log_path
+			zxfer_append_failure_report_to_log "message: should-not-append"
+		) </dev/null >/dev/null 2>"$stderr_file"
+		status=$?
 
-test_zxfer_append_failure_report_to_log_rejects_existing_insecure_owner() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	log_path="$physical_tmpdir/insecure_owner.log"
-	stderr_file="$TEST_TMPDIR/error_log_owner.stderr"
-	: >"$log_path"
-	chmod 600 "$log_path"
-	ZXFER_ERROR_LOG="$log_path"
-
-	set +e
-	(
-		zxfer_validate_temp_root_candidate() {
-			printf '%s\n' "$1"
-		}
-		zxfer_get_path_owner_uid() { printf '%s\n' "1234"; }
-		zxfer_append_failure_report_to_log "message: should-not-append"
-	) >"$TEST_TMPDIR/error_log_owner.stdout" 2>"$stderr_file"
-	status=$?
-	grep -F "owned by UID 1234 instead of" "$stderr_file" >/dev/null 2>&1
-	grep_status=$?
-	grep -F "should-not-append" "$log_path" >/dev/null 2>&1
-	append_status=$?
-
-	assertEquals "Existing ZXFER_ERROR_LOG files with insecure owners should be rejected." 1 "$status"
-	assertEquals "Insecure owner rejection should emit a warning." 0 "$grep_status"
-	assertNotEquals "Rejected insecure-owner log files must not receive appended report data." 0 "$append_status"
-}
-
-test_zxfer_append_failure_report_to_log_rejects_unknown_owner() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	log_path="$physical_tmpdir/unknown_owner.log"
-	stderr_file="$TEST_TMPDIR/error_log_unknown_owner.stderr"
-	: >"$log_path"
-	chmod 600 "$log_path"
-	ZXFER_ERROR_LOG="$log_path"
-
-	set +e
-	(
-		zxfer_validate_temp_root_candidate() {
-			printf '%s\n' "$1"
-		}
-		zxfer_get_path_owner_uid() {
-			return 1
-		}
-		zxfer_append_failure_report_to_log "message: should-not-append"
-	) >"$TEST_TMPDIR/error_log_unknown_owner.stdout" 2>"$stderr_file"
-	status=$?
-	grep -F "owner could not be determined" "$stderr_file" >/dev/null 2>&1
-	grep_status=$?
-	grep -F "should-not-append" "$log_path" >/dev/null 2>&1
-	append_status=$?
-
-	assertEquals "Existing ZXFER_ERROR_LOG files with unknown owners should be rejected." 1 "$status"
-	assertEquals "Unknown-owner rejection should emit a warning." 0 "$grep_status"
-	assertNotEquals "Rejected unknown-owner log files must not receive appended report data." 0 "$append_status"
-}
-
-test_zxfer_append_failure_report_to_log_rejects_unknown_mode() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	log_path="$physical_tmpdir/unknown_mode.log"
-	stderr_file="$TEST_TMPDIR/error_log_unknown_mode.stderr"
-	: >"$log_path"
-	chmod 600 "$log_path"
-	ZXFER_ERROR_LOG="$log_path"
-
-	set +e
-	(
-		zxfer_get_path_owner_uid() {
-			printf '%s\n' "0"
-		}
-		zxfer_get_path_mode_octal() {
-			return 1
-		}
-		zxfer_append_failure_report_to_log "message: should-not-append"
-	) >"$TEST_TMPDIR/error_log_unknown_mode.stdout" 2>"$stderr_file"
-	status=$?
-	grep -F "permissions could not be determined" "$stderr_file" >/dev/null 2>&1
-	grep_status=$?
-	grep -F "should-not-append" "$log_path" >/dev/null 2>&1
-	append_status=$?
-
-	assertEquals "Existing ZXFER_ERROR_LOG files with unknown modes should be rejected." 1 "$status"
-	assertEquals "Unknown-mode rejection should emit a warning." 0 "$grep_status"
-	assertNotEquals "Rejected unknown-mode log files must not receive appended report data." 0 "$append_status"
+		assertEquals "A log with a $l_fault should be refused." 1 "$status"
+		assertContains "The $l_fault refusal should explain it." \
+			"$(cat "$stderr_file")" "$l_warning"
+		assertEquals "A log refused for a $l_fault must not receive the report." \
+			"" "$(cat "$log_path")"
+	done <<'ROWS'
+wider_mode|because its permissions (644) are not 0600
+foreign_owner|because it is owned by UID 1234 instead of
+unknown_owner|because its owner could not be determined
+unknown_mode|because its permissions could not be determined
+unknown_links|because its link count could not be determined
+ROWS
 }
 
 test_zxfer_append_failure_report_to_log_rejects_a_log_with_another_hard_link() {
@@ -422,30 +293,6 @@ test_zxfer_append_failure_report_to_log_rejects_a_log_with_another_hard_link() {
 		"$(cat "$stderr_file")" "because it has 2 hard links"
 	assertEquals "The file's other name must not receive the report." \
 		"other: keep-me" "$(cat "$other_path")"
-}
-
-test_zxfer_append_failure_report_to_log_rejects_unknown_link_count() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	log_path="$physical_tmpdir/unknown_links.log"
-	stderr_file="$TEST_TMPDIR/error_log_unknown_links.stderr"
-	: >"$log_path"
-	chmod 600 "$log_path"
-	ZXFER_ERROR_LOG="$log_path"
-
-	set +e
-	(
-		ls() {
-			[ "$2" != "$log_path" ] || return 1
-			command ls "$@"
-		}
-		zxfer_append_failure_report_to_log "message: should-not-append"
-	) >"$TEST_TMPDIR/error_log_unknown_links.stdout" 2>"$stderr_file"
-	status=$?
-
-	assertEquals "A log whose link count cannot be read should be rejected." 1 "$status"
-	assertContains "The unknown link-count rejection should explain the refusal." \
-		"$(cat "$stderr_file")" "because its link count could not be determined"
-	assertEquals "A rejected log must not receive the report." "" "$(cat "$log_path")"
 }
 
 test_zxfer_append_failure_report_to_log_warns_when_the_log_cannot_be_created() {

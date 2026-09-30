@@ -2,10 +2,10 @@
 #
 # Golden-output CLI contract suite for the zxfer launcher.
 #
-# Drives ./zxfer black-box through a mock secure PATH (fail-loud zfs/zstd
-# stand-ins resolve first, so any unexpected helper execution breaks the
-# pinned transcript) and compares exit status, stdout, and stderr byte for
-# byte against the fixtures in tests/golden/cli_*.golden.
+# Drives ./zxfer black-box through a mock secure PATH (fail-loud zfs, zstd
+# and ssh stand-ins resolve first, so any unexpected helper execution or
+# connection breaks the pinned transcript) and compares exit status, stdout,
+# and stderr byte for byte against the fixtures in tests/golden/cli_*.golden.
 #
 # Volatile fields are masked by zxfer_golden_normalize_stream() before the
 # comparison: failure-report timestamp/hostname/version values, the launcher
@@ -29,7 +29,7 @@ ZXFER_TEST_GOLDEN_DIR="$TESTS_DIR/golden"
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_cli_golden"
 
-	g_golden_zxfer_bin="$ZXFER_ROOT/zxfer"
+	g_golden_zxfer_bin=$ZXFER_TEST_ZXFER_BIN
 	g_golden_mock_bin_dir="$TEST_TMPDIR/mock_bin"
 	g_golden_mock_tool_log="$TEST_TMPDIR/mock_tool_invocations.log"
 	g_golden_scratch_tmpdir="$TEST_TMPDIR/scratch_tmp"
@@ -38,12 +38,13 @@ oneTimeSetUp() {
 	g_golden_actual_file="$TEST_TMPDIR/case.actual"
 
 	# Mirror the launcher's built-in default secure PATH with the mock dir
-	# first so zfs/zstd resolve to the fail-loud stand-ins while awk/sed/etc
-	# still resolve to the real host tools.
+	# first so zfs/zstd/ssh resolve to the fail-loud stand-ins while
+	# awk/sed/etc still resolve to the real host tools.
 	g_golden_secure_path="$g_golden_mock_bin_dir:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 
 	zxfer_golden_write_mock_tool "$g_golden_mock_bin_dir/zfs"
 	zxfer_golden_write_mock_tool "$g_golden_mock_bin_dir/zstd"
+	zxfer_golden_write_mock_tool "$g_golden_mock_bin_dir/ssh"
 }
 
 oneTimeTearDown() {
@@ -62,11 +63,12 @@ setUp() {
 	g_golden_case_error_log=""
 	g_golden_case_unsafe_commands=""
 	g_golden_case_tmpdir=""
+	g_golden_case_secure_path=""
 }
 
 # Purpose: Write one fail-loud helper stand-in into the mock secure PATH dir.
-# Usage: Called from oneTimeSetUp for zfs and zstd. Golden CLI cases must
-# abort before executing either helper; if one runs anyway it records the
+# Usage: Called from oneTimeSetUp for zfs, zstd and ssh. Golden CLI cases
+# must abort before executing any of them; if one runs anyway it records the
 # invocation and pollutes stderr so both the log assert and the pinned
 # transcript fail.
 zxfer_golden_write_mock_tool() {
@@ -87,8 +89,8 @@ EOF
 # Purpose: Run the real ./zxfer launcher with a fully pinned environment.
 # Usage: Called by every golden case. Captures stdout/stderr to the shared
 # case files and publishes the exit status in g_golden_exit_status. Per-case
-# knobs (error log path, unsafe report mode, private TMPDIR) come from the
-# g_golden_case_* globals reset in setUp.
+# knobs (error log path, unsafe report mode, private TMPDIR, secure PATH) come
+# from the g_golden_case_* globals reset in setUp.
 zxfer_golden_invoke_zxfer() {
 	l_restore_errexit=0
 	case $- in
@@ -98,7 +100,7 @@ zxfer_golden_invoke_zxfer() {
 	esac
 
 	set +e
-	ZXFER_SECURE_PATH="$g_golden_secure_path" \
+	ZXFER_SECURE_PATH="${g_golden_case_secure_path:-$g_golden_secure_path}" \
 		ZXFER_SECURE_PATH_APPEND='' \
 		ZXFER_ERROR_LOG="$g_golden_case_error_log" \
 		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS="$g_golden_case_unsafe_commands" \
@@ -388,6 +390,178 @@ test_golden_update_mode_rewrites_the_fixture_from_the_actual_transcript() {
 
 	assertEquals "ZXFER_UPDATE_GOLDEN=1 should rewrite the golden fixture from the actual transcript." \
 		"status=0 golden=fresh" "status=$l_update_status golden=$(cat "$l_update_dir/update_case.golden")"
+}
+
+# Purpose: Like zxfer_golden_assert_case_matches_golden, for a transcript that
+# names a per-run directory: each occurrence of PATH becomes TOKEN first.
+# Usage: zxfer_golden_assert_masked_case_matches_golden <case_name> <path>
+# <token> [zxfer args...]
+zxfer_golden_assert_masked_case_matches_golden() {
+	l_masked_case_name=$1
+	l_masked_path=$2
+	l_masked_token=$3
+	shift 3
+
+	zxfer_golden_invoke_zxfer "$@"
+	# index() matches the path literally, whatever characters it holds.
+	zxfer_golden_render_transcript |
+		awk -v path="$l_masked_path" -v token="$l_masked_token" '{
+			line = ""
+			while ((i = index($0, path)) > 0) {
+				line = line substr($0, 1, i - 1) token
+				$0 = substr($0, i + length(path))
+			}
+			print line $0
+		}' >"$g_golden_actual_file"
+
+	zxfer_golden_assert_file_matches_golden "$l_masked_case_name" "$g_golden_actual_file" || return 1
+	zxfer_golden_assert_mock_tools_not_executed "$l_masked_case_name"
+}
+
+test_invalid_secure_path_is_a_dependency_failure_before_parsing() {
+	g_golden_case_secure_path=$(printf '/bin\t/untrusted')
+	zxfer_golden_assert_case_matches_golden cli_dependency_invalid_secure_path \
+		-R tank/src backup/dest
+
+	assertEquals "A secure PATH with a tab must exit with status 1." 1 "$g_golden_exit_status"
+}
+
+test_missing_zfs_on_the_secure_path_is_a_dependency_failure() {
+	l_awk_only_dir="$TEST_TMPDIR/awk_only_bin"
+	mkdir -p "$l_awk_only_dir"
+	[ -e "$l_awk_only_dir/awk" ] || ln -s "$(command -v awk)" "$l_awk_only_dir/awk" ||
+		fail "Unable to stage awk alone on a secure PATH."
+	g_golden_case_secure_path=$l_awk_only_dir
+	zxfer_golden_assert_masked_case_matches_golden cli_dependency_missing_zfs \
+		"$l_awk_only_dir" "[secure-path]" -R tank/src backup/dest
+
+	assertEquals "A secure PATH without zfs must exit with status 1." 1 "$g_golden_exit_status"
+}
+
+test_blank_compression_command_is_a_usage_error() {
+	zxfer_golden_assert_case_matches_golden cli_usage_blank_compression_command \
+		-Z '   ' -R tank/src backup/dest
+
+	assertEquals "A blank -Z command must exit with status 2." 2 "$g_golden_exit_status"
+}
+
+test_unresolvable_compression_command_is_a_dependency_failure() {
+	zxfer_golden_assert_masked_case_matches_golden cli_dependency_missing_compression_command \
+		"$g_golden_mock_bin_dir" "[mock-bin]" \
+		-Z 'zxfer-golden-missing-codec -3' -R tank/src backup/dest
+
+	assertEquals "A -Z command whose head is not on the secure PATH must exit with status 1." \
+		1 "$g_golden_exit_status"
+}
+
+test_usage_error_zero_grandfather_days() {
+	zxfer_golden_assert_case_matches_golden cli_usage_zero_grandfather_days \
+		-g 0 -R tank/src backup/dest
+
+	assertEquals "-g 0 must exit with status 2." 2 "$g_golden_exit_status"
+}
+
+test_usage_error_migration_with_a_remote_host() {
+	zxfer_golden_assert_case_matches_golden cli_usage_migrate_with_remote_host \
+		-m -O origin.example -R tank/src backup/dest
+
+	assertEquals "Combining -m and -O must exit with status 2." 2 "$g_golden_exit_status"
+}
+
+test_usage_error_shell_quoted_compression_command() {
+	zxfer_golden_assert_case_matches_golden cli_usage_quoted_compression_command \
+		-Z '"/opt/zstd dir/zstd" -3' -O origin.example -R tank/src backup/dest
+
+	assertEquals "A shell-quoted -Z command must exit with status 2." 2 "$g_golden_exit_status"
+}
+
+# The prescan finds -h only before the first operand; after an option
+# argument the full parser prints the same usage.
+test_help_after_an_option_argument_prints_usage_and_exits_zero() {
+	zxfer_golden_assert_case_matches_golden cli_help -R tank/src -h backup/dest
+
+	assertEquals "zxfer -R SRC -h must exit with status 0." 0 "$g_golden_exit_status"
+}
+
+# -h prints the usage before any module loads: it needs no helper on the
+# secure PATH and runs no awk or sed planted on the caller's PATH.
+test_help_needs_no_helper_and_runs_no_tool_planted_on_path() {
+	l_planted_dir="$TEST_TMPDIR/planted_path"
+	l_planted_log="$TEST_TMPDIR/planted_path.log"
+	l_empty_dir="$TEST_TMPDIR/empty_secure_path"
+	rm -rf "$l_planted_dir" "$l_planted_log" "$l_empty_dir"
+	mkdir -p "$l_planted_dir" "$l_empty_dir"
+	for l_tool in awk sed; do
+		printf '#!/bin/sh\nprintf "%%s\\n" %s >>"%s"\nexec "%s" "$@"\n' \
+			"$l_tool" "$l_planted_log" "$(command -v "$l_tool")" \
+			>"$l_planted_dir/$l_tool"
+		chmod +x "$l_planted_dir/$l_tool"
+	done
+
+	g_golden_exit_status=0
+	PATH="$l_planted_dir:$PATH" ZXFER_SECURE_PATH=$l_empty_dir \
+		ZXFER_SECURE_PATH_APPEND='' MOCK_TOOL_LOG="$g_golden_mock_tool_log" \
+		TMPDIR="$g_golden_scratch_tmpdir" "$g_golden_zxfer_bin" -h \
+		>"$g_golden_stdout_file" 2>"$g_golden_stderr_file" ||
+		g_golden_exit_status=$?
+	zxfer_golden_render_transcript >"$g_golden_actual_file"
+
+	zxfer_golden_assert_file_matches_golden cli_help "$g_golden_actual_file"
+	assertFalse "No tool planted on the caller's PATH may run: $(cat "$l_planted_log" 2>/dev/null)" \
+		"[ -e '$l_planted_log' ]"
+}
+
+# -z resolves the local codec while the options are parsed, so with a remote
+# origin a missing codec stops the run before any connection: the ssh
+# stand-in would log one.
+test_missing_compression_command_with_a_remote_origin_fails_before_any_connection() {
+	zxfer_golden_invoke_zxfer -Z zxfer-missing-codec -O origin.example \
+		-R tank/src backup/dest
+
+	assertEquals "A missing -Z command must exit with status 1." 1 "$g_golden_exit_status"
+	assertTrue "The run must stop while its options are parsed." \
+		"grep -Fqx 'failure_stage: cli parse' '$g_golden_stderr_file'"
+	zxfer_golden_assert_mock_tools_not_executed cli_missing_compression_command
+}
+
+# A relative ZXFER_ERROR_LOG is refused with a warning after the report; the
+# failure keeps its exit status and nothing lands in the working directory.
+test_relative_error_log_is_refused_without_changing_the_exit_status() {
+	l_cwd="$TEST_TMPDIR/relative_log_cwd"
+	rm -rf "$l_cwd"
+	mkdir -p "$l_cwd"
+	case $g_golden_zxfer_bin in
+	/*) l_bin=$g_golden_zxfer_bin ;;
+	*) l_bin=$PWD/$g_golden_zxfer_bin ;;
+	esac
+	g_golden_case_error_log=relative.log
+
+	g_golden_exit_status=0
+	(
+		cd "$l_cwd" || exit 97
+		g_golden_zxfer_bin=$l_bin
+		zxfer_golden_invoke_zxfer -R tank/src
+		exit "$g_golden_exit_status"
+	) || g_golden_exit_status=$?
+	zxfer_golden_render_transcript >"$g_golden_actual_file"
+
+	zxfer_golden_assert_file_matches_golden cli_error_log_relative_path \
+		"$g_golden_actual_file"
+	assertEquals "Nothing may be written to the working directory." \
+		"" "$(ls -A "$l_cwd")"
+	zxfer_golden_assert_mock_tools_not_executed cli_error_log_relative_path
+}
+
+# The version a failure report names is the release the package declares.
+test_failure_report_names_the_packaged_release_version() {
+	l_spec_version=$(sed -n 's/^Version:[[:space:]]*//p' "$ZXFER_ROOT/packaging/zxfer.spec")
+
+	zxfer_golden_invoke_zxfer -R tank/src
+
+	assertNotNull "packaging/zxfer.spec must declare a Version." "$l_spec_version"
+	assertEquals "The failure report must name the packaged release." \
+		"zxfer_version: $l_spec_version" \
+		"$(grep '^zxfer_version: ' "$g_golden_stderr_file")"
 }
 
 # shellcheck source=tests/shunit2/shunit2

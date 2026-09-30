@@ -1,0 +1,16 @@
+exit_status: 1
+=== stdout ===
+=== stderr ===
+Required dependency "zfs" not found in secure PATH ([secure-path]). Set ZXFER_SECURE_PATH or install the binary.
+zxfer: failure report begin
+timestamp: [normalized]
+hostname: [normalized]
+zxfer_version: [normalized]
+exit_status: 1
+failure_class: dependency
+failure_stage: startup
+message: Required dependency "zfs" not found in secure PATH ([secure-path]). Set ZXFER_SECURE_PATH or install the binary.
+dry_run: 0
+yield_iterations: 1
+invocation: [redacted]
+zxfer: failure report end

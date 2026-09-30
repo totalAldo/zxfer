@@ -3,9 +3,8 @@
 # shunit2 entry point for src/zxfer_backup_metadata.sh: -k metadata records,
 # -e restore, local and remote storage, backup directories and paths.
 #
-# The paths fragment keeps the remote-host fixture and the file fragment the
-# exec fixture they were written for; the other fragments use the fixture
-# below.
+# The paths fragment keeps the remote-host fixture it was written for; the
+# other fragments use the fixture below.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
@@ -25,18 +24,8 @@ TEST_ORIGINAL_PATH=$PATH
 # shellcheck source=tests/helpers/remote_host_fixtures.sh
 . "$TESTS_DIR/helpers/remote_host_fixtures.sh"
 
-zxfer_test_ensure_parent_dir() {
-	l_path=$1
-	l_parent=${l_path%/*}
-	if [ "$l_parent" = "$l_path" ] || [ "$l_parent" = "" ]; then
-		l_parent=.
-	fi
-	mkdir -p "$l_parent"
-}
-
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_backup_metadata"
-	zxfer_test_exec_fixture_one_time_setup
 	zxfer_test_remote_host_fixture_one_time_setup
 	TEST_TMPDIR_PHYSICAL=$(cd -P "$TEST_TMPDIR" && pwd)
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
@@ -52,10 +41,6 @@ oneTimeTearDown() {
 setUp() {
 	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh"; then
 		zxfer_test_remote_host_fixture_setup
-		return
-	fi
-	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_backup_metadata_file_tests.sh"; then
-		zxfer_test_exec_fixture_setup
 		return
 	fi
 	set +e
@@ -80,8 +65,6 @@ setUp() {
 tearDown() {
 	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh"; then
 		zxfer_test_remote_host_fixture_teardown
-	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_backup_metadata_file_tests.sh"; then
-		relax_test_tmpdir_permissions
 	fi
 }
 
@@ -99,9 +82,6 @@ tearDown() {
 # zxfer-test-fragment: suites/zxfer_backup_metadata_paths_tests.sh
 # shellcheck source=tests/suites/zxfer_backup_metadata_paths_tests.sh
 . "$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh"
-# zxfer-test-fragment: suites/zxfer_backup_metadata_file_tests.sh
-# shellcheck source=tests/suites/zxfer_backup_metadata_file_tests.sh
-. "$TESTS_DIR/suites/zxfer_backup_metadata_file_tests.sh"
 
 suite() {
 	zxfer_test_register_fragment_tests \
@@ -109,8 +89,7 @@ suite() {
 		"$TESTS_DIR/suites/zxfer_backup_metadata_records_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_backup_metadata_restore_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_backup_metadata_storage_io_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_backup_metadata_file_tests.sh"
+		"$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

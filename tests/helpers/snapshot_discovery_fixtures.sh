@@ -1,10 +1,10 @@
 #!/bin/sh
 # shellcheck shell=sh
 #
-# The unit fixture of tests/test_zxfer_snapshot_discovery.sh, shared with
-# the mapping fragment of tests/test_zxfer_destination_state.sh: fake
-# parallel, ssh, zfs and awk executables, and reset helpers for discovery
-# options, remote capabilities, helper commands and discovery results.
+# The unit fixture of tests/test_zxfer_snapshot_discovery.sh: fake
+# parallel, ssh and awk executables, a canned no-op-proof destination
+# producer, and reset helpers for discovery options, remote capabilities,
+# helper commands and discovery results.
 #
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -21,74 +21,6 @@ if [ "\$1" = "--version" ]; then
 	exit 0
 fi
 exit 0
-EOF
-	chmod +x "$l_path"
-}
-
-create_functional_parallel_bin() {
-	l_path=$1
-	cat >"$l_path" <<'EOF'
-#!/bin/sh
-# Minimal GNU-parallel stand-in: runs the command after -- once per input
-# line (replacing {} with the single-quoted line, as GNU parallel quotes it),
-# serially, and exits nonzero when any job fails.
-while [ $# -gt 0 ]; do
-	case $1 in
-	--)
-		shift
-		break
-		;;
-	*)
-		shift
-		;;
-	esac
-done
-l_runner=$1
-l_worst=0
-while IFS= read -r l_line; do
-	[ -n "$l_line" ] || continue
-	l_expanded=$(printf '%s' "$l_runner" | sed "s|{}|'$l_line'|g")
-	sh -c "$l_expanded" || l_worst=1
-done
-exit $l_worst
-EOF
-	chmod +x "$l_path"
-}
-
-create_discovery_fake_zfs_bin() {
-	l_path=$1
-	cat >"$l_path" <<'EOF'
-#!/bin/sh
-# Enumeration: zfs list -Hr -t filesystem,volume -o name SRC
-if [ "$2" = "-Hr" ]; then
-	if [ -n "${FAKE_ZFS_FAIL_ENUMERATION:-}" ]; then
-		printf '%s\n' "cannot open source" >&2
-		exit 1
-	fi
-	printf 'tank/src\ntank/src/a\ntank/src/b\n'
-	exit 0
-fi
-# Per-dataset: zfs list -H -o name,guid -s creation -d 1 -t snapshot DS
-l_dataset=${11}
-case $l_dataset in
-tank/src)
-	printf 'tank/src@s1\t111\n'
-	exit 0
-	;;
-tank/src/a)
-	if [ -n "${FAKE_ZFS_FAIL_SUBLISTING:-}" ]; then
-		printf '%s\n' "cannot open tank/src/a" >&2
-		exit 1
-	fi
-	printf 'tank/src/a@s1\t222\n'
-	exit 0
-	;;
-tank/src/b)
-	printf 'tank/src/b@s1\t333\n'
-	exit 0
-	;;
-esac
-exit 1
 EOF
 	chmod +x "$l_path"
 }
@@ -117,23 +49,6 @@ if [ "$1" = "-M" ] && [ "$2" = "-V" ]; then
 fi
 printf '%s\n' "$@"
 exit 0
-EOF
-	chmod +x "$l_path"
-}
-
-create_fake_ssh_handshake_bin() {
-	l_path=$1
-	l_parallel_status=$2
-	cat >"$l_path" <<EOF
-#!/bin/sh
-cat <<'INNER_EOF'
-ZXFER_REMOTE_CAPS_V2
-os	RemoteOS
-tool	zfs	0	/remote/bin/zfs
-tool	parallel	$l_parallel_status	$([ "$l_parallel_status" = "0" ] && printf '%s' /opt/bin/parallel || printf '%s' -)
-tool	cat	0	/remote/bin/cat
-end
-INNER_EOF
 EOF
 	chmod +x "$l_path"
 }
@@ -179,10 +94,8 @@ zxfer_test_start_fast_noop_destination_fifo_producer() {
 # after zxfer_test_create_tmpdir.
 zxfer_test_snapshot_discovery_fixture_write_tools() {
 	PARALLEL_BIN="$TEST_TMPDIR/parallel"
-	ALT_PARALLEL_BIN="$TEST_TMPDIR/alt_parallel"
 	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
 	create_parallel_bin "$PARALLEL_BIN" "parallel (fake)"
-	create_parallel_bin "$ALT_PARALLEL_BIN" "parallel from elsewhere"
 	create_fake_ssh_bin "$FAKE_SSH_BIN"
 }
 

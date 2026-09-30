@@ -1,43 +1,8 @@
 #!/bin/sh
 # Effective TMPDIR, temp-file and cleanup-PID tests for src/zxfer_runtime.sh.
-# Run by tests/test_zxfer_runtime.sh under the exec fixture.
+# Run by tests/test_zxfer_runtime.sh under the exec fixture. The unsafe-TMPDIR
+# fallback of a whole run is pinned in tests/test_contract_failures.sh.
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
-
-test_get_temp_file_creates_unique_file() {
-	# zxfer_get_temp_file should provide unique temp files so concurrent options do
-	# not collide or overwrite each other.
-	file_one=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
-	file_two=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
-
-	assertTrue "First temp file should exist." "[ -f \"$file_one\" ]"
-	assertTrue "Second temp file should exist." "[ -f \"$file_two\" ]"
-	assertNotEquals "Two consecutive temp file names should be unique." "$file_one" "$file_two"
-
-	rm -f "$file_one" "$file_two"
-}
-
-test_get_temp_file_honors_tmpdir_variable() {
-	# Honor the TMPDIR override so tests or CLI invocations can direct
-	# scratch files to a specific filesystem, but use the validated
-	# physical directory path rather than a logical symlinked alias.
-	custom_tmp="$TEST_TMPDIR/custom"
-	mkdir -p "$custom_tmp"
-	physical_custom_tmp=$(cd -P "$custom_tmp" && pwd)
-	TMPDIR="$custom_tmp"
-
-	file=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
-
-	case "$file" in
-	"$physical_custom_tmp"/*) inside=0 ;;
-	*) inside=1 ;;
-	esac
-
-	assertEquals "Temp file should be created inside the validated TMPDIR root." 0 "$inside"
-	assertTrue "Temp file should exist." "[ -f \"$file\" ]"
-
-	rm -f "$file"
-	TMPDIR="$TEST_TMPDIR"
-}
 
 test_get_temp_file_uses_physical_tmpdir_for_symlinked_tmpdir_paths() {
 	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
@@ -68,81 +33,6 @@ test_get_temp_file_uses_physical_tmpdir_for_symlinked_tmpdir_paths() {
 	TMPDIR="$TEST_TMPDIR"
 }
 
-test_get_temp_file_rejects_non_sticky_world_writable_tmpdir_and_falls_back_to_system_tmp() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	insecure_tmp="$physical_tmpdir/insecure_tmp"
-	mkdir -p "$insecure_tmp"
-	chmod 0777 "$insecure_tmp"
-	TMPDIR="$insecure_tmp"
-	g_zxfer_effective_tmpdir=""
-	g_zxfer_effective_tmpdir_requested=""
-
-	file=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
-	status=$?
-
-	assertEquals "Non-sticky world-writable TMPDIR values should not prevent temporary file creation." 0 "$status"
-	case "$file" in
-	"$insecure_tmp"/*) inside_insecure=0 ;;
-	*) inside_insecure=1 ;;
-	esac
-	assertEquals "Non-sticky world-writable TMPDIR values should be rejected." 1 "$inside_insecure"
-	assertTrue "Fallback temp file should exist." "[ -f \"$file\" ]"
-
-	rm -f "$file"
-	chmod 0700 "$insecure_tmp"
-	TMPDIR="$TEST_TMPDIR"
-}
-
-test_get_temp_file_allows_sticky_world_writable_tmpdir() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	sticky_tmp="$physical_tmpdir/sticky_tmp"
-	mkdir -p "$sticky_tmp"
-	chmod 1777 "$sticky_tmp"
-	TMPDIR="$sticky_tmp"
-	g_zxfer_effective_tmpdir=""
-	g_zxfer_effective_tmpdir_requested=""
-
-	file=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
-
-	case "$file" in
-	"$sticky_tmp"/*) inside_sticky=0 ;;
-	*) inside_sticky=1 ;;
-	esac
-
-	assertEquals "Sticky world-writable TMPDIR values should remain usable." 0 "$inside_sticky"
-	assertTrue "Sticky TMPDIR temp file should exist." "[ -f \"$file\" ]"
-
-	rm -f "$file"
-	chmod 0700 "$sticky_tmp"
-	TMPDIR="$TEST_TMPDIR"
-}
-
-test_get_temp_file_ignores_relative_tmpdir_and_falls_back_to_system_tmp() {
-	old_pwd=$(pwd)
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	mkdir -p "$physical_tmpdir/relative_tmp_root"
-	cd "$physical_tmpdir" || fail "Unable to cd into physical tempdir."
-	TMPDIR="relative_tmp_root"
-	g_zxfer_effective_tmpdir=""
-	g_zxfer_effective_tmpdir_requested=""
-
-	file=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
-	status=$?
-
-	cd "$old_pwd" || fail "Unable to restore working directory."
-
-	assertEquals "Relative TMPDIR values should not prevent temporary file creation." 0 "$status"
-	case "$file" in
-	"$physical_tmpdir"/relative_tmp_root/*) inside_relative=0 ;;
-	*) inside_relative=1 ;;
-	esac
-	assertEquals "Relative TMPDIR values should be ignored instead of being used directly." 1 "$inside_relative"
-	assertTrue "Fallback temp file should exist." "[ -f \"$file\" ]"
-
-	rm -f "$file"
-	TMPDIR="$TEST_TMPDIR"
-}
-
 test_get_temp_file_throws_when_mktemp_fails() {
 	set +e
 	output=$(
@@ -162,31 +52,6 @@ test_get_temp_file_throws_when_mktemp_fails() {
 	assertEquals "Temporary-file allocation failures should abort." 1 "$status"
 	assertContains "Temporary-file allocation failures should use the documented error." \
 		"$output" "Error creating temporary file."
-}
-
-test_zxfer_kill_registered_cleanup_pids_only_terminates_registered_pids() {
-	output=$(
-		(
-			unrelated_pid=60101
-			g_zxfer_cleanup_pid_records="50101	registered cleanup helper"
-			g_test_cleanup_abort_calls=""
-			zxfer_abort_cleanup_pid() {
-				g_test_cleanup_abort_calls="${g_test_cleanup_abort_calls}${g_test_cleanup_abort_calls:+ }$1:$2"
-				return 0
-			}
-			zxfer_kill_registered_cleanup_pids
-			printf 'abort_calls=<%s>\n' "$g_test_cleanup_abort_calls"
-			printf 'remaining=<%s>\n' "$g_zxfer_cleanup_pid_records"
-			printf 'unrelated=<%s>\n' "$unrelated_pid"
-		)
-	)
-
-	assertContains "Cleanup should delegate validated teardown only for tracked helper PIDs." \
-		"$output" "abort_calls=<50101:TERM>"
-	assertNotContains "Cleanup should not delegate teardown for unrelated helper PIDs." \
-		"$output" "60101:"
-	assertContains "Cleanup PID tracking should be cleared after termination." \
-		"$output" "remaining=<>"
 }
 
 test_zxfer_cleanup_pid_helpers_ignore_invalid_inputs_in_current_shell() {
@@ -238,119 +103,43 @@ $$	self helper"
 $$	self helper>"
 }
 
-test_zxfer_try_get_effective_tmpdir_resolves_symlinked_tmpdir_to_physical_path() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	real_tmp="$physical_tmpdir/effective_tmp_real"
-	link_tmp="$physical_tmpdir/effective_tmp_link"
-	mkdir -p "$real_tmp"
-	ln -s "$real_tmp" "$link_tmp"
-	TMPDIR="$link_tmp"
-	g_zxfer_effective_tmpdir=""
-	g_zxfer_effective_tmpdir_requested=""
-
-	result=$(zxfer_try_get_effective_tmpdir && printf '%s' "$g_zxfer_effective_tmpdir")
-	status=$?
-
-	assertEquals "Symlinked TMPDIR values should still resolve successfully when their physical target is trusted." 0 "$status"
-	assertEquals "Effective TMPDIR resolution should return the physical directory path." "$real_tmp" "$result"
-	TMPDIR="$TEST_TMPDIR"
-}
-
-test_zxfer_try_get_effective_tmpdir_prefers_memory_backed_default_candidates_in_current_shell() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	ram_tmp="$physical_tmpdir/default_tmp_ram"
-	disk_tmp="$physical_tmpdir/default_tmp_disk"
-	mkdir -p "$ram_tmp" "$disk_tmp"
-	output=$(
-		(
-			unset TMPDIR
-			g_zxfer_effective_tmpdir=""
-			g_zxfer_effective_tmpdir_requested=""
-			output_file="$TEST_TMPDIR/effective_tmp_default_current_shell.out"
-
-			zxfer_list_default_tmpdir_candidates() {
-				printf '%s\n' "$ram_tmp"
-				printf '%s\n' "$disk_tmp"
-			}
-
-			zxfer_try_get_effective_tmpdir && printf '%s\n' "$g_zxfer_effective_tmpdir" >"$output_file" || exit $?
-			result=$(cat "$output_file")
-			printf 'result=%s\n' "$result"
-			printf 'request=%s\n' "$g_zxfer_effective_tmpdir_requested"
-		)
-	)
-	status=$?
-
-	assertEquals "Unset TMPDIR should prefer the first validated default temp-root candidate, which lets zxfer prefer memory-backed roots when available." \
-		0 "$status"
-	assertContains "Unset TMPDIR should resolve to the preferred memory-backed default candidate." \
-		"$output" "result=$ram_tmp"
-	assertContains "Default-tempdir selections should cache under the synthetic default request key." \
-		"$output" "request=__ZXFER_DEFAULT_TMPDIR__"
-}
-
-test_zxfer_try_get_effective_tmpdir_prefers_explicit_tmpdir_over_default_candidates_in_current_shell() {
+# The candidates stand in for a memory-backed default listed first and a
+# disk-backed one.
+test_zxfer_try_get_effective_tmpdir_prefers_a_safe_tmpdir_then_the_first_safe_default() {
 	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
 	explicit_tmp="$physical_tmpdir/effective_tmp_explicit"
-	ram_tmp="$physical_tmpdir/effective_tmp_default_ram"
-	mkdir -p "$explicit_tmp" "$ram_tmp"
-	output=$(
-		(
-			TMPDIR="$explicit_tmp"
-			g_zxfer_effective_tmpdir=""
-			g_zxfer_effective_tmpdir_requested=""
-			output_file="$TEST_TMPDIR/effective_tmp_explicit_current_shell.out"
-
-			zxfer_list_default_tmpdir_candidates() {
-				printf '%s\n' "$ram_tmp"
-				printf '%s\n' "/tmp"
-			}
-
-			zxfer_try_get_effective_tmpdir && printf '%s\n' "$g_zxfer_effective_tmpdir" >"$output_file" || exit $?
-			result=$(cat "$output_file")
-			printf 'result=%s\n' "$result"
-			printf 'request=%s\n' "$g_zxfer_effective_tmpdir_requested"
-		)
-	)
-	status=$?
-
-	assertEquals "A valid explicit TMPDIR should still win over the default memory-backed candidate list." \
-		0 "$status"
-	assertContains "A valid explicit TMPDIR should remain the effective temp root." \
-		"$output" "result=$explicit_tmp"
-	assertContains "The cache key should still reflect the explicit TMPDIR request." \
-		"$output" "request=$explicit_tmp"
-}
-
-test_zxfer_try_get_effective_tmpdir_falls_back_to_preferred_default_candidate_when_tmpdir_is_unsafe() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	insecure_tmp="$physical_tmpdir/effective_tmp_insecure_preferred"
-	ram_tmp="$physical_tmpdir/effective_tmp_fallback_ram"
-	disk_tmp="$physical_tmpdir/effective_tmp_fallback_disk"
-	mkdir -p "$insecure_tmp" "$ram_tmp" "$disk_tmp"
+	insecure_tmp="$physical_tmpdir/effective_tmp_insecure"
+	ram_tmp="$physical_tmpdir/effective_tmp_ram"
+	disk_tmp="$physical_tmpdir/effective_tmp_disk"
+	mkdir -p "$explicit_tmp" "$insecure_tmp" "$ram_tmp" "$disk_tmp"
 	chmod 0777 "$insecure_tmp"
 	output=$(
 		(
-			TMPDIR="$insecure_tmp"
-			g_zxfer_effective_tmpdir=""
-			g_zxfer_effective_tmpdir_requested=""
-
 			zxfer_list_default_tmpdir_candidates() {
-				printf '%s\n' "$ram_tmp"
-				printf '%s\n' "$disk_tmp"
+				printf '%s\n' "$ram_tmp" "$disk_tmp"
 			}
-
-			result=$(zxfer_try_get_effective_tmpdir && printf '%s' "$g_zxfer_effective_tmpdir") || exit $?
-			printf 'result=%s\n' "$result"
+			# Each row is LABEL:TMPDIR; an empty TMPDIR means unset.
+			for tmpdir_row in "unset:" "explicit:$explicit_tmp" \
+				"unsafe:$insecure_tmp"; do
+				if [ -n "${tmpdir_row#*:}" ]; then
+					TMPDIR=${tmpdir_row#*:}
+				else
+					unset TMPDIR
+				fi
+				g_zxfer_effective_tmpdir=""
+				g_zxfer_effective_tmpdir_requested=""
+				zxfer_try_get_effective_tmpdir
+				printf '%s=%s <%s> key=<%s>\n' "${tmpdir_row%%:*}" "$?" \
+					"$g_zxfer_effective_tmpdir" "$g_zxfer_effective_tmpdir_requested"
+			done
 		)
 	)
-	status=$?
 	chmod 0700 "$insecure_tmp"
 
-	assertEquals "Unsafe TMPDIR values should still resolve cleanly by falling back to the preferred validated default temp root." \
-		0 "$status"
-	assertContains "Unsafe TMPDIR values should fall back to the preferred validated default candidate before disk-backed fallbacks." \
-		"$output" "result=$ram_tmp"
+	assertEquals "An unset TMPDIR takes the first safe default under the default key, a safe TMPDIR wins over the defaults, and an unsafe one falls back to the first safe default." \
+		"unset=0 <$ram_tmp> key=<__ZXFER_DEFAULT_TMPDIR__>
+explicit=0 <$explicit_tmp> key=<$explicit_tmp>
+unsafe=0 <$ram_tmp> key=<$insecure_tmp>" "$output"
 }
 
 test_zxfer_unsafe_tmpdir_fallback_note_is_held_until_option_parsing_emits_it() {
@@ -407,25 +196,6 @@ test_zxfer_unsafe_tmpdir_fallback_note_is_held_until_option_parsing_emits_it() {
 	assertEquals "The advisory should print at decision time when -V is already live." \
 		"Ignoring unsafe TMPDIR $insecure_tmp; using $safe_tmp instead." \
 		"$(cat "$immediate_stderr")"
-}
-
-test_zxfer_try_get_effective_tmpdir_rejects_non_sticky_world_writable_tmpdir() {
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	insecure_tmp="$physical_tmpdir/effective_tmp_insecure"
-	mkdir -p "$insecure_tmp"
-	chmod 0777 "$insecure_tmp"
-	TMPDIR="$insecure_tmp"
-	g_zxfer_effective_tmpdir=""
-	g_zxfer_effective_tmpdir_requested=""
-
-	result=$(zxfer_try_get_effective_tmpdir && printf '%s' "$g_zxfer_effective_tmpdir")
-	status=$?
-
-	assertEquals "Unsafe world-writable TMPDIR values should still resolve by falling back to the system temp root." 0 "$status"
-	assertNotEquals "Unsafe world-writable TMPDIR values should not remain selected." "$insecure_tmp" "$result"
-
-	chmod 0700 "$insecure_tmp"
-	TMPDIR="$TEST_TMPDIR"
 }
 
 test_zxfer_try_get_effective_tmpdir_reuses_cached_value_in_current_shell() {

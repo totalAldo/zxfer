@@ -62,30 +62,6 @@ root (UID 0)
 root (UID 0)" "$result"
 }
 
-test_check_secure_backup_file_rejects_non_0600_permissions() {
-	tmp_file="$TEST_TMPDIR/insecure_backup"
-	: >"$tmp_file"
-	(
-		zxfer_get_path_owner_uid() { printf '%s\n' 0; }
-		zxfer_get_path_mode_octal() { printf '%s\n' 644; }
-		zxfer_check_secure_backup_file "$tmp_file"
-	) >/dev/null 2>&1
-	status=$?
-	assertEquals "Insecure permissions should trigger an error." 1 "$status"
-}
-
-test_check_secure_backup_file_accepts_secure_metadata() {
-	tmp_file="$TEST_TMPDIR/secure_backup"
-	: >"$tmp_file"
-	(
-		zxfer_get_path_owner_uid() { printf '%s\n' 0; }
-		zxfer_get_path_mode_octal() { printf '%s\n' 600; }
-		zxfer_check_secure_backup_file "$tmp_file"
-	)
-	status=$?
-	assertEquals "Secure metadata should pass validation." 0 "$status"
-}
-
 test_zxfer_get_path_parent_dir_handles_root_and_relative_inputs() {
 	assertEquals "Absolute paths should return their containing directory." \
 		"/var/log" "$(zxfer_get_path_parent_dir "/var/log/zxfer.log")"
@@ -93,62 +69,39 @@ test_zxfer_get_path_parent_dir_handles_root_and_relative_inputs() {
 		"/" "$(zxfer_get_path_parent_dir "zxfer.log")"
 }
 
-test_zxfer_find_symlink_path_component_detects_nested_symlink() {
+# The first untrusted symlink component is reported as given, for absolute
+# and relative paths. A root-owned top-level system symlink (such as /tmp ->
+# private/tmp on macOS) is skipped silently; a host without one skips that row.
+test_zxfer_find_symlink_path_component_reports_the_first_untrusted_symlink() {
 	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	real_dir="$physical_tmpdir/real_dir"
-	link_dir="$physical_tmpdir/link_dir"
-	mkdir -p "$real_dir/subdir"
-	ln -s "$real_dir" "$link_dir"
+	mkdir -p "$physical_tmpdir/find_real/subdir" "$physical_tmpdir/find_plain/subdir"
+	ln -s "$physical_tmpdir/find_real" "$physical_tmpdir/find_link"
+	trusted_root_symlink=$(find_trusted_root_symlink_for_tests) || trusted_root_symlink=""
 
-	result=$(zxfer_find_symlink_path_component "$link_dir/subdir/file")
-	status=$?
+	zxfer_test_capture_subshell '
+		cd "$physical_tmpdir" || exit 1
+		for l_path in "$physical_tmpdir/find_link/subdir/file" \
+			./find_link/subdir/file ./find_plain/subdir/file; do
+			l_component=$(zxfer_find_symlink_path_component "$l_path")
+			printf "%s=%s <%s>\n" "$l_path" "$?" "$l_component"
+		done
+		if [ -n "$trusted_root_symlink" ]; then
+			l_component=$(zxfer_find_symlink_path_component \
+				"$trusted_root_symlink/zxfer-trusted-root-symlink-probe/subdir/file")
+			printf "trusted=%s <%s>\n" "$?" "$l_component"
+		fi
+	'
+	expected="$physical_tmpdir/find_link/subdir/file=0 <$physical_tmpdir/find_link>
+./find_link/subdir/file=0 <./find_link>
+./find_plain/subdir/file=1 <>"
+	[ -z "$trusted_root_symlink" ] || expected="$expected
+trusted=1 <>"
 
-	assertEquals "Nested symlink detection should succeed when any path component is a symlink." 0 "$status"
-	assertEquals "Nested symlink detection should return the offending path component." "$link_dir" "$result"
-}
-
-test_zxfer_find_symlink_path_component_detects_relative_symlink() {
-	old_pwd=$(pwd)
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	real_dir="$physical_tmpdir/relative_real_dir"
-	link_dir="$physical_tmpdir/relative_link_dir"
-	mkdir -p "$real_dir/subdir"
-	ln -s "$real_dir" "$link_dir"
-	cd "$physical_tmpdir" || fail "Unable to cd into physical tempdir."
-
-	result=$(zxfer_find_symlink_path_component "./relative_link_dir/subdir/file")
-	status=$?
-
-	cd "$old_pwd" || fail "Unable to restore working directory."
-
-	assertEquals "Relative paths should be scanned for nested symlink components." 0 "$status"
-	assertEquals "Relative symlink checks should return the offending relative path component." "./relative_link_dir" "$result"
-}
-
-test_zxfer_find_symlink_path_component_ignores_trusted_absolute_root_symlink() {
-	if ! require_trusted_root_symlink_for_tests; then
-		return 0
-	fi
-
-	result=$(zxfer_find_symlink_path_component "$trusted_root_symlink/zxfer-trusted-root-symlink-probe/subdir/file")
-	status=$?
-
-	assertEquals "Trusted top-level system symlink components should be ignored regardless of platform-specific root layout." 1 "$status"
-	assertEquals "Trusted absolute symlink components should not be reported as unsafe." "" "$result"
-}
-
-test_zxfer_is_trusted_symlink_path_component_accepts_known_root_symlink() {
-	if ! require_trusted_root_symlink_for_tests; then
-		return 0
-	fi
-
-	zxfer_test_capture_subshell "
-		zxfer_is_trusted_symlink_path_component \"$trusted_root_symlink\"
-	"
-
-	assertEquals "Known trusted root-level symlinks should be accepted by the trust check when the current host exposes one." \
-		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Trusted root-symlink checks should stay silent on success." "" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "Only untrusted symlink components should be reported, and nothing else printed." \
+		"$expected" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	[ -n "$trusted_root_symlink" ] || startSkipping
+	assertNotEquals "The host should expose a trusted top-level symlink to skip." \
+		"" "$trusted_root_symlink"
 }
 
 test_zxfer_is_trusted_symlink_path_component_fails_closed_on_each_metadata_check() {
@@ -214,21 +167,6 @@ test_zxfer_is_trusted_symlink_path_component_rejects_nested_symlinks_without_rea
 relative=1
 root=1" "$ZXFER_TEST_CAPTURE_OUTPUT"
 	assertFalse "Rejecting by position must not read any metadata." "[ -s '$tool_log' ]"
-}
-
-test_zxfer_find_symlink_path_component_returns_empty_for_relative_non_symlink_path() {
-	old_pwd=$(pwd)
-	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
-	mkdir -p "$physical_tmpdir/relative_plain_dir/subdir"
-	cd "$physical_tmpdir" || fail "Unable to cd into physical tempdir."
-
-	result=$(zxfer_find_symlink_path_component "./relative_plain_dir/subdir/file")
-	status=$?
-
-	cd "$old_pwd" || fail "Unable to restore working directory."
-
-	assertEquals "Relative paths without symlink components should still return failure." 1 "$status"
-	assertEquals "Relative non-symlink checks should not report a component." "" "$result"
 }
 
 test_zxfer_require_backup_metadata_path_without_symlinks_rejects_symlink_target() {

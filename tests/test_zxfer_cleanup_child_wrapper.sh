@@ -248,6 +248,7 @@ test_cleanup_child_wrapper_signal_fails_closed_for_live_unverifiable_or_unsignal
 		zxfer_cleanup_child_wrapper_get_process_start_token() {
 			case "$1" in
 			702) printf "%s\n" "lstart:matching-token" ;;
+			704) printf "%s\n" "lstart:replacement-token" ;;
 			*) return 1 ;;
 			esac
 		}
@@ -262,24 +263,33 @@ test_cleanup_child_wrapper_signal_fails_closed_for_live_unverifiable_or_unsignal
 		# An unreadable token must not match a record whose token is empty.
 		empty_token_record=$(printf "%s\t" 703)
 
-		zxfer_cleanup_child_wrapper_signal_descendant_records \
-			"701	lstart:unavailable-token
-702	lstart:matching-token
-$empty_token_record" TERM
-		printf "signal_status=%s\n" "$?"
+		# Each live record alone must fail teardown: 701 has an unreadable
+		# token, 702 cannot be signalled, 703 recorded no token, and 704 is a
+		# recycled PID whose token changed.
+		for record in "701	lstart:unavailable-token" \
+			"702	lstart:matching-token" "$empty_token_record" \
+			"704	lstart:original-token"; do
+			zxfer_cleanup_child_wrapper_signal_descendant_records "$record" TERM
+			printf "%s=%s\n" "${record%%	*}" "$?"
+		done
 		roots=$(zxfer_cleanup_child_wrapper_build_validated_descendant_roots \
 			"$empty_token_record")
 		printf "roots=<%s> roots_status=%s\n" "$roots" "$?"
 	'
 
-	assertContains "Live descendants that cannot be verified or signalled should fail teardown closed." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "signal_status=1"
+	assertContains "Live descendants that cannot be verified or signalled should each fail teardown closed." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "701=1
+702=1
+703=1
+704=1"
 	assertContains "A live PID with an unreadable token never becomes a validated root." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "roots=<$$> roots_status=1"
 	assertNotContains "An unverifiable live PID must never receive the requested signal." \
 		"$(cat "$signal_log")" "TERM 701"
 	assertNotContains "A live PID with an empty recorded token must never be signalled." \
 		"$(cat "$signal_log")" "TERM 703"
+	assertNotContains "A recycled PID must never receive the requested signal." \
+		"$(cat "$signal_log")" "TERM 704"
 	assertContains "A verified live PID should still receive the requested signal attempt." \
 		"$(cat "$signal_log")" "TERM 702"
 }
@@ -321,45 +331,35 @@ test_cleanup_child_wrapper_extend_stopped_records_publishes_validated_work_after
 701	lstart:fresh-token>"
 }
 
-test_cleanup_child_wrapper_on_signal_returns_143() {
+test_cleanup_child_wrapper_on_signal_terms_kills_and_reaps_before_exiting_143() {
 	marker_file="$TEST_TMPDIR/cleanup_child_wrapper.on_signal"
 	zxfer_test_capture_subshell '
 		zxfer_cleanup_child_wrapper_list_descendants() {
 			return 0
 		}
+		# Record TERM and KILL; the STOP refreshes between them have their
+		# own test.
 		zxfer_cleanup_child_wrapper_signal_descendant_records() {
-			printf "%s\n" "signalled:$2" >>"'"$marker_file"'"
+			[ "$2" = STOP ] ||
+				printf "%s\n" "signalled:$2" >>"'"$marker_file"'"
 		}
 		zxfer_cleanup_child_wrapper_abort_grace_wait() { :; }
-		zxfer_cleanup_child_wrapper_on_signal
-	'
-
-	assertEquals "Cleanup child wrapper signal handling should use the documented 143 exit status." \
-		143 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "Cleanup child wrapper signal handling should TERM descendants before exiting." \
-		"$(cat "$marker_file")" "signalled:TERM"
-	assertContains "Cleanup child wrapper signal handling should KILL survivors before exiting." \
-		"$(cat "$marker_file")" "signalled:KILL"
-}
-
-test_cleanup_child_wrapper_on_signal_waits_for_wrapped_child() {
-	marker_file="$TEST_TMPDIR/cleanup_child_wrapper.on_signal_wait"
-	zxfer_test_capture_subshell '
-		zxfer_cleanup_child_wrapper_list_descendants() { return 0; }
-		zxfer_cleanup_child_wrapper_signal_descendant_records() { :; }
-		zxfer_cleanup_child_wrapper_abort_grace_wait() { :; }
+		# The stand-in direct child 4242 must never be a real process.
+		kill() { :; }
 		wait() {
-			printf "%s\n" "waited:$1" >"'"$marker_file"'"
+			printf "%s\n" "waited:$1" >>"'"$marker_file"'"
 			return 0
 		}
 		l_cleanup_wrapper_child_pid=4242
 		zxfer_cleanup_child_wrapper_on_signal
 	'
 
-	assertEquals "Cleanup child wrapper signal handling should keep the documented 143 exit status after waiting." \
+	assertEquals "Cleanup child wrapper signal handling should use the documented 143 exit status." \
 		143 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertEquals "Cleanup child wrapper signal handling should wait for the direct wrapped child before exiting." \
-		"waited:4242" "$(tr -d '[:space:]' <"$marker_file")"
+	assertEquals "Cleanup child wrapper signal handling should TERM descendants, KILL survivors, then reap the direct wrapped child." \
+		"signalled:TERM
+signalled:KILL
+waited:4242" "$(cat "$marker_file")"
 }
 
 test_cleanup_child_wrapper_list_descendants_preserves_awk_failures() {
@@ -377,29 +377,6 @@ test_cleanup_child_wrapper_list_descendants_preserves_awk_failures() {
 
 	assertContains "Cleanup child wrapper descendant discovery must not let sort mask an awk failure." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=41"
-}
-
-test_cleanup_child_wrapper_signal_refuses_recycled_pid() {
-	marker_file="$TEST_TMPDIR/cleanup_child_wrapper.recycled-descendant"
-	zxfer_test_capture_subshell '
-		zxfer_cleanup_child_wrapper_get_process_start_token() {
-			printf "%s\n" "lstart:replacement-token"
-		}
-		kill() {
-			[ "$2" = "0" ] && return 0
-			printf "kill:%s\n" "$*" >"'"$marker_file"'"
-			return 0
-		}
-		ps() { printf "%s\n" " S"; }
-		zxfer_cleanup_child_wrapper_signal_descendant_records \
-			"701	lstart:original-token" TERM
-		printf "status=%s\n" "$?"
-	'
-
-	assertContains "A recycled descendant PID should make wrapper teardown fail closed." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=1"
-	assertFalse "A recycled descendant PID must never receive TERM." \
-		"[ -e '$marker_file' ]"
 }
 
 # A descendant that exited while its parent was stopped is a zombie. illumos
@@ -575,26 +552,17 @@ test_cleanup_child_wrapper_main_reports_stdin_duplication_failures() {
 		"$expected_status" "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
+# The script-run tests pin the same entry, but coverage cannot trace a
+# separate script, so this one sources the wrapper.
 test_cleanup_child_wrapper_source_executes_main_when_not_source_only() {
 	zxfer_test_capture_subshell '
 		unset ZXFER_CLEANUP_CHILD_WRAPPER_SOURCE_ONLY
-		set -- "exit 0"
+		set -- "exit 7"
 		. "'"$ZXFER_ROOT"'/src/zxfer_cleanup_child_wrapper.sh"
 	'
 
-	assertEquals "Sourcing the cleanup child wrapper without the source-only guard should execute the main entrypoint." \
-		0 "$ZXFER_TEST_CAPTURE_STATUS"
-}
-
-test_cleanup_child_wrapper_source_requires_command_when_not_source_only() {
-	zxfer_test_capture_subshell '
-		unset ZXFER_CLEANUP_CHILD_WRAPPER_SOURCE_ONLY
-		set --
-		. "'"$ZXFER_ROOT"'/src/zxfer_cleanup_child_wrapper.sh"
-	'
-
-	assertEquals "Sourcing the cleanup child wrapper without arguments should fail closed through the main entrypoint." \
-		1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Sourcing the cleanup child wrapper without the source-only guard should run main and exit with the command's status." \
+		7 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
 test_cleanup_child_wrapper_main_preserves_worker_exit_status() {

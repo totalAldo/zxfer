@@ -941,10 +941,11 @@ zxfer_mockbin_make_bench_workdir() {
 # one canned-zfs fixture state directory.
 # Usage: zxfer_mockbin_run_zxfer <mockdir> <fixture-state-dir> <zfs-log>
 # [zxfer-arg...]. Resolves the launcher from $ZXFER_MOCKBIN_ZXFER_BIN, then
-# $ZXFER_ROOT/zxfer (set by tests/test_helper.sh). Refuses to run when the
-# canned zfs is missing from <mockdir> so a misbuilt mock dir can never let
-# zxfer resolve a real zfs. Stdout/stderr pass through; redirect at the call
-# site. Returns zxfer's exit status.
+# $ZXFER_TEST_ZXFER_BIN (set by tests/test_helper.sh), then
+# $ZXFER_ROOT/zxfer. Refuses to run when the canned zfs is missing from
+# <mockdir> so a misbuilt mock dir can never let zxfer resolve a real zfs.
+# Stdout/stderr pass through; redirect at the call site. Returns zxfer's exit
+# status.
 # Side effects: Runs the launcher with a fixture-scoped secure PATH and canned
 # ZFS state while leaving the caller's environment unchanged.
 zxfer_mockbin_run_zxfer() {
@@ -953,7 +954,7 @@ zxfer_mockbin_run_zxfer() {
 	l_mockbin_run_log=$3
 	shift 3
 
-	l_mockbin_run_bin=${ZXFER_MOCKBIN_ZXFER_BIN:-${ZXFER_ROOT:-.}/zxfer}
+	l_mockbin_run_bin=${ZXFER_MOCKBIN_ZXFER_BIN:-${ZXFER_TEST_ZXFER_BIN:-${ZXFER_ROOT:-.}/zxfer}}
 	if [ ! -x "$l_mockbin_run_bin" ]; then
 		printf 'zxfer_mockbin_run_zxfer: zxfer launcher not executable: %s\n' \
 			"$l_mockbin_run_bin" >&2

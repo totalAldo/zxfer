@@ -3,7 +3,7 @@
 # tests/test_zxfer_migration_services.sh: reset owner state, command stubs
 # that log to the STUB_* files, a mock zfs, and fixed destination, backup-root,
 # snapshot-name, readonly-property and yield settings. The source-record
-# staging helper also serves the live re-plan cases of
+# staging helper serves the live re-plan cases of
 # tests/test_zxfer_snapshot_plan.sh.
 # shellcheck disable=SC2034,SC2317,SC2329
 
@@ -52,7 +52,6 @@ zxfer_test_replication_fixture_setup() {
 	: >"$STUB_NEW_SNAP_LOG"
 	: >"$STUB_ZFS_CMD_LOG"
 	STUB_ZFS_LIST_CALLS=0
-	stub_dest_created_by_zxfer=0
 	zxfer_test_stub_replication_commands
 	g_cmd_zfs="mock_zfs_tool"
 	g_destination="backup/target"

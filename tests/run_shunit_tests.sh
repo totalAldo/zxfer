@@ -41,7 +41,7 @@ RUNNER_POSITIONAL_TEST_NAMES=
 RUNNER_HAS_NAMED_TESTS=0
 
 # The suites that take far longer than the rest, longest first (each took 10
-# to 80 s alone under macOS /bin/sh in 2026-09; the other suites take 8 s or
+# to 80 s alone under macOS /bin/sh in 2026-09; the other suites take 9 s or
 # less). With more than one job these start before the others, so that no
 # long suite starts last and sets the length of the whole run
 # (longest-processing-time-first scheduling); output is still replayed in
@@ -52,12 +52,12 @@ RUNNER_SLOW_SUITES="
 test_contract_failures.sh
 test_contract_planning.sh
 test_run_argv_fuzz.sh
-test_zxfer_backup_metadata.sh
-test_zxfer_runtime.sh
-test_zxfer_snapshot_discovery.sh
-test_run_shunit_tests.sh
-test_zxfer_ssh_transport.sh
 test_contract_properties.sh
+test_contract_send_receive.sh
+test_contract_backup.sh
+test_run_shunit_tests.sh
+test_contract_remote.sh
+test_run_perf_ab.sh
 "
 
 # Run state. RUNNER_WORKERS holds one ID:PID:START_TICK:PHASE:PHASE_TICK word

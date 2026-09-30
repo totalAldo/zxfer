@@ -1,9 +1,11 @@
 #!/bin/sh
 #
-# shunit2 entry point for src/zxfer_property_transfer.sh: the readonly list,
-# the -o reader, the -U scan, the property plan (derive and diff), source
-# collection, destination creation, set/inherit commands, child inheritance,
-# apply, and zxfer_transfer_properties end to end.
+# shunit2 entry point for src/zxfer_property_transfer.sh: its pure helpers
+# (the readonly list, the -o reader and check, the child filter and
+# inheritance awk) and the branches the black-box suites cannot reach (the
+# -U scan edge cases, create-metadata probes, create guards, dry runs, awk
+# failures). The plan, creates, sets, inherits and their failures are pinned
+# black-box in tests/test_contract_properties.sh.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2317,SC2329
 
@@ -11,9 +13,6 @@ TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
-# Cases that render backup metadata opt in to that fixture.
-# shellcheck source=tests/helpers/backup_fixtures.sh
-. "$TESTS_DIR/helpers/backup_fixtures.sh"
 # shellcheck source=tests/helpers/property_fixtures.sh
 . "$TESTS_DIR/helpers/property_fixtures.sh"
 
@@ -41,17 +40,13 @@ setUp() {
 # zxfer-test-fragment: suites/zxfer_property_transfer_apply_tests.sh
 # shellcheck source=tests/suites/zxfer_property_transfer_apply_tests.sh
 . "$TESTS_DIR/suites/zxfer_property_transfer_apply_tests.sh"
-# zxfer-test-fragment: suites/zxfer_property_transfer_pass_tests.sh
-# shellcheck source=tests/suites/zxfer_property_transfer_pass_tests.sh
-. "$TESTS_DIR/suites/zxfer_property_transfer_pass_tests.sh"
 
 suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_property_transfer.sh" \
 		"$TESTS_DIR/suites/zxfer_property_transfer_policy_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_property_transfer_plan_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_property_transfer_apply_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_property_transfer_pass_tests.sh"
+		"$TESTS_DIR/suites/zxfer_property_transfer_apply_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

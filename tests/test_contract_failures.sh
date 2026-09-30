@@ -61,6 +61,9 @@
 # scenario, verdict, exit status, and the failed call (tool, number, failure
 # shape and argv).
 #
+# Outside the sweep, one case holds an unsafe TMPDIR to the same fail-safe
+# rule: zxfer never uses it and falls back to a safe default.
+#
 # shellcheck disable=SC1090,SC2034,SC2154
 
 TESTS_DIR=$(dirname "$0")
@@ -84,7 +87,7 @@ CONTRACT_RUN_TIMEOUT=60
 # resets the launcher (CONTRACT_ZXFER_BIN) and the CONTRACT_* scenario knobs.
 contract_setup() {
 	planning_setup_env
-	CONTRACT_ZXFER_BIN="$ZXFER_ROOT/zxfer"
+	CONTRACT_ZXFER_BIN=$ZXFER_TEST_ZXFER_BIN
 	CONTRACT_RUNS=0
 	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write the socket-aware mock ssh."
@@ -878,8 +881,9 @@ test_grandfather_delete_fails_closed_at_every_zfs_call() {
 		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 }
 
-# -P: the root's differing compression is set and the children, whose
-# source inherits it, are inherited.
+# -P: the root's differing compression is set. The canned zfs never applies
+# a set, so the children, whose source inherits it, are set too (the
+# properties contract suite pins that promotion).
 test_property_transfer_fails_closed_at_every_zfs_call() {
 	contract_setup
 	planning_clone_state "$FIXTURE_DIR/noop" property_transfer
@@ -959,6 +963,532 @@ test_remote_target_fails_closed_at_every_ssh_call() {
 	planning_clone_state "$FIXTURE_DIR/incremental" remote_target_ssh
 	contract_sweep remote_target ssh -T localhost -R \
 		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+}
+
+# ---------------------------------------------------------------------------
+# Unsafe TMPDIR.
+
+# Purpose: Run the no-op fixture once from CASE_DIR with TMPDIR set to a
+# value, so a relative value names a directory there.
+# Usage: contract_run_noop_with_tmpdir <tmpdir> [zxfer-arg...]; returns
+# zxfer's status, with its output in CASE_DIR/zxfer.stdout and
+# CASE_DIR/zxfer.stderr.
+contract_run_noop_with_tmpdir() {
+	l_noop_tmpdir=$1
+	shift
+	(
+		# A suite run by relative path has a relative launcher path.
+		case $ZXFER_TEST_ZXFER_BIN in
+		/*) ;;
+		*) ZXFER_TEST_ZXFER_BIN=$PWD/$ZXFER_TEST_ZXFER_BIN ;;
+		esac
+		cd "$CASE_DIR" || exit 1
+		TMPDIR=$l_noop_tmpdir
+		export TMPDIR
+		planning_run_zxfer "$FIXTURE_DIR/noop" "$@" -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	)
+}
+
+# An unsafe TMPDIR, world-writable without the sticky bit or relative, is
+# never used: the run falls back to the first safe default (a sticky system
+# directory such as /dev/shm or /tmp), keeps its scratch files there, and
+# says so once under -V, after option parsing has made -V known. Without -V
+# the fallback is silent.
+test_unsafe_tmpdir_falls_back_to_a_safe_default_and_says_so_once_under_V() {
+	planning_setup_env
+	l_unsafe_dir="$CASE_DIR/unsafe_tmp"
+	if ! mkdir "$l_unsafe_dir" "$CASE_DIR/relative_tmp" ||
+		! chmod 777 "$l_unsafe_dir" || ! chmod 700 "$CASE_DIR/relative_tmp"; then
+		fail "Unable to create the TMPDIR fixtures."
+		return 0
+	fi
+
+	for l_unsafe_tmpdir in "$l_unsafe_dir" relative_tmp; do
+		contract_run_noop_with_tmpdir "$l_unsafe_tmpdir" -V
+		l_unsafe_status=$?
+		assertEquals "TMPDIR=$l_unsafe_tmpdir: the run must succeed; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+			0 "$l_unsafe_status"
+		l_unsafe_note=$(grep '^Ignoring unsafe TMPDIR ' "$CASE_DIR/zxfer.stderr")
+		l_unsafe_fallback=${l_unsafe_note##*"; using "}
+		l_unsafe_fallback=${l_unsafe_fallback%" instead."}
+		assertEquals "TMPDIR=$l_unsafe_tmpdir: -V must name it and its replacement once" \
+			"Ignoring unsafe TMPDIR $l_unsafe_tmpdir; using $l_unsafe_fallback instead." \
+			"$l_unsafe_note"
+		case $l_unsafe_fallback in
+		/*) l_unsafe_absolute=yes ;;
+		*) l_unsafe_absolute=no ;;
+		esac
+		assertEquals "TMPDIR=$l_unsafe_tmpdir: the replacement must be an absolute path" \
+			yes "$l_unsafe_absolute"
+		assertEquals "TMPDIR=$l_unsafe_tmpdir: every scratch file must live under the replacement" \
+			"" "$(awk -v prefix="New temporary file: $l_unsafe_fallback/" \
+				'index($0, "New temporary file: ") == 1 && index($0, prefix) != 1' \
+				"$CASE_DIR/zxfer.stderr")"
+		assertEquals "TMPDIR=$l_unsafe_tmpdir must be left empty" \
+			"" "$(cd "$CASE_DIR" && ls -A "$l_unsafe_tmpdir")"
+	done
+
+	contract_run_noop_with_tmpdir "$l_unsafe_dir"
+	l_unsafe_status=$?
+	assertEquals "without -V the run must succeed; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_unsafe_status"
+	assertFalse "without -V the fallback must be silent" \
+		"grep -q '^Ignoring unsafe TMPDIR ' '$CASE_DIR/zxfer.stderr'"
+}
+
+# Session lifecycle and migration services: single runs for what the sweeps
+# cannot tell apart. The EXIT trap's status and report when its own cleanup
+# fails, dry runs with remote hosts, and -m/-c service handling through the
+# mock svcadm (tests/helpers/blackbox.sh), whose calls land in the zfs log.
+# The service names are fake FMRIs.
+
+CONTRACT_SVC_ONE="svc:/zxfer-mock/one"
+CONTRACT_SVC_TWO="svc:/zxfer-mock/two"
+
+# Purpose: Run ./zxfer against one fixture state with the socket-aware mock
+# ssh first on PATH, logging ssh calls to SSH_LOG.
+# Usage: contract_run_remote <state-dir> [zxfer-arg...]; set SSH_LOG first,
+# and export any MOCK_FAIL_* or TMPDIR in a subshell around the call. Returns
+# zxfer's status.
+contract_run_remote() {
+	l_remote_state=$1
+	shift
+	if ! zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh"; then
+		fail "Unable to write the socket-aware mock ssh."
+		return 125
+	fi
+	: >"$SSH_LOG"
+	(
+		MOCK_SSH_LOG=$SSH_LOG
+		PATH=$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")
+		export MOCK_SSH_LOG PATH
+		planning_run_zxfer "$l_remote_state" "$@"
+	)
+}
+
+# A dry run with -O and -T contacts neither host: no ssh call, not even the
+# control-socket probe, and no zfs call. -V names each live step it skips,
+# and the -s preview runs the local zfs path on the origin, whose own was
+# never resolved.
+test_dry_run_with_remote_hosts_contacts_neither_host() {
+	planning_setup_env
+	# -z resolves the local codec while the options are parsed.
+	if ! printf '#!/bin/sh\nexec cat\n' >"$MOCKBIN_DIR/zstd" ||
+		! chmod +x "$MOCKBIN_DIR/zstd"; then
+		fail "Unable to write the mock zstd."
+	fi
+	SSH_LOG="$CASE_DIR/ssh.log"
+	(
+		ZXFER_BACKUP_DIR="$CASE_DIR/backup"
+		export ZXFER_BACKUP_DIR
+		contract_run_remote "$FIXTURE_DIR/incremental" -n -v -V -s -z -e \
+			-O localhost -T localhost -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	)
+	l_status=$?
+
+	assertEquals "a dry run with remote hosts should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_status"
+	assertEquals "a dry run must not run ssh" "" "$(cat "$SSH_LOG")"
+	assertEquals "a dry run must not run zfs" "" "$(cat "$ZFS_LOG" 2>/dev/null)"
+	for l_skipped in \
+		"ssh control-socket setup and remote capability preload for origin host" \
+		"ssh control-socket setup and remote capability preload for target host" \
+		"live remote source helper validation" \
+		"live remote destination helper validation" \
+		"live remote backup-restore helper validation"; do
+		assertEquals "-V should name the skipped $l_skipped" \
+			1 "$(grep -cFx "Dry run: skipping $l_skipped." "$CASE_DIR/zxfer.stderr")"
+	done
+	assertEquals "the -s preview should run the local zfs path on the origin: $(cat "$CASE_DIR/zxfer.stdout")" \
+		1 "$(tr -d "'\\\\" <"$CASE_DIR/zxfer.stdout" |
+			grep -cF "localhost $MOCKBIN_DIR/zfs snapshot -r $ZXFER_MOCKBIN_SOURCE_ROOT@zxfer_")"
+}
+
+# A clean run whose ssh control master cannot be closed at exit fails with a
+# trap cleanup report instead of claiming success. The run root, under a
+# TMPDIR long enough to move the sockets into a short directory of their own,
+# and that socket directory are still removed.
+test_failed_ssh_close_after_a_clean_run_fails_the_run() {
+	planning_setup_env
+	l_component="zxfer-long-tmpdir-component-00000000000000000000000000000"
+	l_tmpdir="$CASE_DIR/$l_component/$l_component"
+	mkdir -p "$l_tmpdir" "$CASE_DIR/calls" ||
+		fail "Unable to create the run directories."
+	chmod 700 "$l_tmpdir"
+	SSH_LOG="$CASE_DIR/ssh.log"
+	(
+		TMPDIR=$l_tmpdir
+		MOCK_FAIL_TOOL=ssh
+		MOCK_FAIL_CALL=1
+		MOCK_FAIL_DIR="$CASE_DIR/calls"
+		MOCK_FAIL_MATCH="* -O exit *"
+		export TMPDIR MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH
+		contract_run_remote "$FIXTURE_DIR/noop" -O localhost -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	)
+	l_status=$?
+	l_socket=$(awk '$1 == "master" {
+		for (i = 2; i < NF; i++) if ($i == "-S") { print $(i + 1); exit }
+	}' "$SSH_LOG")
+	l_socket_dir=${l_socket%/*}
+
+	assertEquals "a failed close must fail the clean run; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		1 "$l_status"
+	assertEquals "exactly the close must have failed" \
+		1 "$(grep -c '^FAIL 1 ssh .* -O exit localhost$' "$ZFS_LOG")"
+	planning_assert_failure_report "trap cleanup" \
+		"message: Failed to close one or more ssh control sockets during exit."
+	assertEquals "the run must print one report" \
+		1 "$(grep -c '^zxfer: failure report begin$' "$CASE_DIR/zxfer.stderr")"
+	assertContains "ssh's diagnostic must reach stderr" \
+		"$(cat "$CASE_DIR/zxfer.stderr")" "Connection to localhost closed by remote host."
+	assertNotNull "the master must name its socket" "$l_socket"
+	assertNotContains "the sockets must not sit under the long TMPDIR" \
+		"$l_socket_dir" "$l_component"
+	assertFalse "the socket directory must be gone after the failed close" \
+		"[ -e '$l_socket_dir' ]"
+	assertEquals "the run root must be gone" "" "$(ls -A "$l_tmpdir")"
+	planning_assert_no_mutations
+}
+
+# A failed capability preload only loses an optimization: the origin is
+# probed again when its operating system is needed, and the run succeeds.
+# Under -v the failed preload's ssh diagnostic reaches stderr.
+test_failed_capability_preload_is_probed_again_and_shown_under_verbose() {
+	planning_setup_env
+	mkdir -p "$CASE_DIR/calls" || fail "Unable to create the fault counter."
+	SSH_LOG="$CASE_DIR/ssh.log"
+	(
+		MOCK_FAIL_TOOL=ssh
+		MOCK_FAIL_CALL=1
+		MOCK_FAIL_DIR="$CASE_DIR/calls"
+		MOCK_FAIL_MATCH="*ZXFER_REMOTE_CAPS_V*"
+		export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH
+		contract_run_remote "$FIXTURE_DIR/noop" -v -O localhost -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	)
+	l_status=$?
+
+	assertEquals "a failed preload must not fail the run; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_status"
+	assertEquals "exactly the preload must have failed" \
+		1 "$(grep -c '^fail	' "$SSH_LOG")"
+	assertEquals "the origin must be probed again after the failed preload" \
+		2 "$(planning_count_remote_script_marker ZXFER_REMOTE_CAPS_V2)"
+	assertContains "-v must show the failed preload's diagnostic" \
+		"$(cat "$CASE_DIR/zxfer.stderr")" "Connection to localhost closed by remote host."
+	planning_assert_no_mutations
+}
+
+# Purpose: Build a -m environment: the mock svcadm first on the secure PATH,
+# and a first state from contract_migration_state.
+# Usage: contract_setup_migration <state-name>
+contract_setup_migration() {
+	planning_setup_env
+	planning_write_mock_svcadm "$MOCKBIN_DIR/svcadm" ||
+		fail "Unable to write the mock svcadm."
+	contract_migration_state "$1"
+}
+
+# Purpose: Clone the incremental fixture into STATE_DIR with what a -m run
+# reads: the property answers of the -P pass -m implies, every source
+# dataset mounted, and unmounts that succeed. Empties the zfs log.
+# Usage: contract_migration_state <state-name>; make a rule win over these
+# with contract_prepend_rules.
+contract_migration_state() {
+	planning_clone_state "$FIXTURE_DIR/incremental" "$1"
+	planning_add_property_transfer_fixtures
+	if ! printf 'yes\n' >"$STATE_DIR/mounted_yes.list" ||
+		! printf '%s\t%s\t0\n' "get -Ho value mounted *" mounted_yes.list \
+			"unmount *" - >>"$STATE_DIR/manifest"; then
+		fail "Unable to append the -m manifest rules."
+	fi
+	: >"$ZFS_LOG"
+}
+
+# Purpose: Put manifest rules in STATE_DIR ahead of the others; the first
+# matching rule wins.
+# Usage: contract_prepend_rules <rule>...; one manifest line each.
+contract_prepend_rules() {
+	if ! {
+		printf '%s\n' "$@"
+		cat "$STATE_DIR/manifest"
+	} >"$STATE_DIR/manifest.new" ||
+		! mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest"; then
+		fail "Unable to prepend the manifest rules."
+	fi
+}
+
+# Purpose: Run ./zxfer recursively against STATE_DIR, refusing to run without
+# the mock svcadm so a host's real svcadm is never reached.
+# Usage: contract_run_migration [zxfer-arg...]; export MOCK_SVCADM_FAIL in a
+# subshell around the call. Returns zxfer's status.
+contract_run_migration() {
+	if [ ! -x "$MOCKBIN_DIR/svcadm" ]; then
+		fail "The mock svcadm is missing; refusing to run zxfer."
+		return 125
+	fi
+	planning_run_zxfer "$STATE_DIR" "$@" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+}
+
+# Purpose: Print the -m steps of the zfs log in order: service changes, mount
+# checks, unmounts, the snapshot (its zxfer_<pid>_<time> name masked) and the
+# end of each receive.
+# Usage: contract_migration_steps
+contract_migration_steps() {
+	grep -E '^(svcadm |get -Ho value mounted |unmount |MUTATE snapshot |END receive )' "$ZFS_LOG" |
+		LC_ALL=C sed 's/@zxfer_[0-9]*_[0-9]*$/@zxfer_N/'
+}
+
+# -m -c stops each service (`svcadm disable -st`) before it checks any source
+# dataset, checks every dataset before it unmounts one, and takes the
+# recursive snapshot and discovers it before the first send; each service is
+# started once after the last receive. -m makes a differing mountpoint
+# settable. A name with a space stays one argument. Without -c, -m touches no
+# service.
+test_migrate_stops_services_and_unmounts_before_its_snapshot_then_restarts_them() {
+	planning_use_fixture_roots "srcpool/my data" "$ZXFER_MOCKBIN_DEST_ROOT" \
+		"$ZXFER_MOCKBIN_DEST_ROOT/my data"
+	contract_setup_migration migrate
+	l_rows=$(planning_property_default_rows)
+	planning_add_property_fixtures_for_rows "$l_rows" "$l_rows" \
+		"$(planning_property_rows_with "$l_rows" mountpoint /mnt/old local)" "$l_rows"
+	planning_log_canned_zfs_argv
+	l_src=$ZXFER_MOCKBIN_SOURCE_ROOT
+	l_dst=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT
+
+	contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
+	l_status=$?
+	l_snapshot_at=$(awk '/^MUTATE snapshot / { print NR; exit }' "$ZFS_LOG")
+	l_listing_at=$(awk -v key="list -Hr -o name,guid -s creation -t snapshot $l_src" \
+		'$0 == key { at = NR } END { print at + 0 }' "$ZFS_LOG")
+	l_send_at=$(awk '/^send / { print NR; exit }' "$ZFS_LOG")
+
+	assertEquals "-m -c should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_status"
+	assertEquals "services stop first, every dataset is checked before one is unmounted, and each service starts once after the last receive" \
+		"svcadm disable -st $CONTRACT_SVC_ONE
+svcadm disable -st $CONTRACT_SVC_TWO
+get -Ho value mounted $l_src
+get -Ho value mounted $l_src/child1
+get -Ho value mounted $l_src/child2
+unmount $l_src
+unmount $l_src/child1
+unmount $l_src/child2
+MUTATE snapshot -r $l_src@zxfer_N
+END receive $l_dst
+END receive $l_dst/child1
+END receive $l_dst/child2
+svcadm enable $CONTRACT_SVC_ONE
+svcadm enable $CONTRACT_SVC_TWO" "$(contract_migration_steps)"
+	assertTrue "the snapshot must be discovered before the first send (snapshot ${l_snapshot_at:-none}, listing $l_listing_at, send ${l_send_at:-none})" \
+		"[ '${l_snapshot_at:-99999}' -lt '$l_listing_at' ] && [ '$l_listing_at' -lt '${l_send_at:-0}' ]"
+	assertEquals "-m sets the differing mountpoint and nothing else" \
+		"MUTATE set mountpoint=/mnt/data $l_dst" "$(grep '^MUTATE set ' "$ZFS_LOG")"
+	for l_suffix in "" /child1 /child2; do
+		assertTrue "unmount must get [$l_src$l_suffix] as one argument; argv: $(cat "$ARGV_LOG")" \
+			"grep -Fqx '[unmount] [$l_src$l_suffix] ' '$ARGV_LOG'"
+	done
+
+	contract_migration_state migrate_without_services
+	contract_run_migration -m
+	l_status=$?
+
+	assertEquals "-m alone should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_status"
+	assertEquals "-m without -c must not touch a service" \
+		0 "$(grep -c '^svcadm ' "$ZFS_LOG")"
+	assertEquals "-m alone still unmounts every dataset" \
+		3 "$(grep -c '^unmount ' "$ZFS_LOG")"
+}
+
+# -n -m -c previews the service and unmount commands and runs none of them:
+# no svcadm call and no zfs call. The dry run previews only the named source
+# dataset, and its EXIT trap previews starting each stopped service again.
+test_migrate_dry_run_previews_services_and_unmounts_without_running_them() {
+	planning_use_fixture_roots "srcpool/my data" "$ZXFER_MOCKBIN_DEST_ROOT" \
+		"$ZXFER_MOCKBIN_DEST_ROOT/my data"
+	contract_setup_migration migrate_dry_run
+	l_src=$ZXFER_MOCKBIN_SOURCE_ROOT
+
+	contract_run_migration -n -v -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
+	l_status=$?
+
+	assertEquals "-n -m -c should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_status"
+	assertEquals "a dry run must run neither svcadm nor zfs" "" "$(cat "$ZFS_LOG")"
+	assertEquals "the preview renders each command once, each name whole" \
+		"Dry run: 'svcadm' 'disable' '-st' '$CONTRACT_SVC_ONE'
+Dry run: 'svcadm' 'disable' '-st' '$CONTRACT_SVC_TWO'
+Dry run: 'MOCKBIN/zfs' 'unmount' '$l_src'
+Creating recursive snapshot $l_src@zxfer_N.
+Dry run: 'MOCKBIN/zfs' 'snapshot' '-r' '$l_src@zxfer_N'
+Restarting service $CONTRACT_SVC_ONE
+Dry run: 'svcadm' 'enable' '$CONTRACT_SVC_ONE'
+Restarting service $CONTRACT_SVC_TWO
+Dry run: 'svcadm' 'enable' '$CONTRACT_SVC_TWO'" \
+		"$(LC_ALL=C sed -e "s|$MOCKBIN_DIR|MOCKBIN|g" \
+			-e 's/@zxfer_[0-9]*_[0-9]*/@zxfer_N/g' "$CASE_DIR/zxfer.stdout")"
+}
+
+# A service that cannot be stopped ends -m before any dataset is checked, and
+# the service already stopped is started again.
+test_migrate_starts_stopped_services_again_when_a_stop_fails() {
+	contract_setup_migration migrate_stop_failure
+
+	(
+		MOCK_SVCADM_FAIL="disable -st $CONTRACT_SVC_TWO"
+		export MOCK_SVCADM_FAIL
+		contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
+	)
+	l_status=$?
+
+	assertEquals "a failed stop must fail the run" 1 "$l_status"
+	planning_assert_failure_report "migration service handling" \
+		"message: Could not disable service $CONTRACT_SVC_TWO."
+	assertEquals "only the stopped service starts again, and no dataset is checked" \
+		"svcadm disable -st $CONTRACT_SVC_ONE
+svcadm disable -st $CONTRACT_SVC_TWO
+svcadm enable $CONTRACT_SVC_ONE" "$(contract_migration_steps)"
+	planning_assert_no_mutations
+}
+
+# -m checks that every source dataset is mounted before it unmounts one. An
+# unmounted dataset is a usage error; a check that fails is an error of its
+# own, never read as "not mounted". Neither run unmounts anything, and the
+# EXIT trap starts the stopped services again.
+test_migrate_checks_every_source_is_mounted_before_unmounting_one() {
+	contract_setup_migration migrate_unmounted
+	l_src=$ZXFER_MOCKBIN_SOURCE_ROOT
+	printf 'no\n' >"$STATE_DIR/mounted_no.list" ||
+		fail "Unable to write the unmounted answer."
+	contract_prepend_rules "get -Ho value mounted $l_src/child2	mounted_no.list	0"
+
+	contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
+	l_status=$?
+
+	assertEquals "an unmounted source must be a usage error" 2 "$l_status"
+	for l_report_line in "failure_class: usage" \
+		"failure_stage: migration service handling" \
+		"message: The source filesystem is not mounted, cannot use -m."; do
+		assertTrue "the report must hold [$l_report_line]; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+			"grep -Fqx '$l_report_line' '$CASE_DIR/zxfer.stderr'"
+	done
+	assertEquals "every dataset is checked, none unmounted, and the services start again" \
+		"svcadm disable -st $CONTRACT_SVC_ONE
+svcadm disable -st $CONTRACT_SVC_TWO
+get -Ho value mounted $l_src
+get -Ho value mounted $l_src/child1
+get -Ho value mounted $l_src/child2
+svcadm enable $CONTRACT_SVC_ONE
+svcadm enable $CONTRACT_SVC_TWO" "$(contract_migration_steps)"
+
+	contract_migration_state migrate_mount_check_failure
+	contract_prepend_rules "get -Ho value mounted $l_src/child1	-	1"
+	contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
+	l_status=$?
+
+	assertEquals "a failed mount check must fail the run" 1 "$l_status"
+	planning_assert_failure_report "migration service handling" \
+		"message: Couldn't determine whether source $l_src/child1 is mounted."
+	assertEquals "the check stops at the failure, and the services start again" \
+		"svcadm disable -st $CONTRACT_SVC_ONE
+svcadm disable -st $CONTRACT_SVC_TWO
+get -Ho value mounted $l_src
+get -Ho value mounted $l_src/child1
+svcadm enable $CONTRACT_SVC_ONE
+svcadm enable $CONTRACT_SVC_TWO" "$(contract_migration_steps)"
+}
+
+# An unmount that fails ends -m before its snapshot, and each stopped service
+# is started again once.
+test_migrate_starts_services_again_when_an_unmount_fails() {
+	contract_setup_migration migrate_unmount_failure
+	l_src=$ZXFER_MOCKBIN_SOURCE_ROOT
+	contract_prepend_rules "unmount $l_src/child1	-	1"
+
+	contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
+	l_status=$?
+
+	assertEquals "a failed unmount must fail the run" 1 "$l_status"
+	planning_assert_failure_report "migration service handling" \
+		"message: Couldn't unmount source $l_src/child1."
+	assertEquals "no snapshot follows the failed unmount, and each service starts again once" \
+		"svcadm disable -st $CONTRACT_SVC_ONE
+svcadm disable -st $CONTRACT_SVC_TWO
+get -Ho value mounted $l_src
+get -Ho value mounted $l_src/child1
+get -Ho value mounted $l_src/child2
+unmount $l_src
+unmount $l_src/child1
+svcadm enable $CONTRACT_SVC_ONE
+svcadm enable $CONTRACT_SVC_TWO" "$(contract_migration_steps)"
+	planning_assert_no_mutations
+}
+
+# After the replication -m starts each stopped service. One that fails is
+# named in the error while the others are still started, and the EXIT trap
+# does not try it again; when every start fails, each is named.
+test_migrate_names_each_service_it_cannot_start_again() {
+	contract_setup_migration migrate_start_failure
+
+	(
+		MOCK_SVCADM_FAIL="enable $CONTRACT_SVC_ONE"
+		export MOCK_SVCADM_FAIL
+		contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
+	)
+	l_status=$?
+
+	assertEquals "a failed start must fail the run" 1 "$l_status"
+	planning_assert_failure_report "migration service handling" \
+		"message: Couldn't re-enable service $CONTRACT_SVC_ONE."
+	assertEquals "each service is started once, the failed one too" \
+		"svcadm enable $CONTRACT_SVC_ONE
+svcadm enable $CONTRACT_SVC_TWO" "$(grep '^svcadm enable ' "$ZFS_LOG")"
+
+	contract_migration_state migrate_start_failures
+	(
+		MOCK_SVCADM_FAIL="enable *"
+		export MOCK_SVCADM_FAIL
+		contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
+	)
+	l_status=$?
+
+	assertEquals "failed starts must fail the run" 1 "$l_status"
+	planning_assert_failure_report "migration service handling" \
+		"message: Couldn't re-enable services: $CONTRACT_SVC_ONE $CONTRACT_SVC_TWO."
+}
+
+# When the run fails after -m stopped the services, the EXIT trap starts them
+# again. A service it cannot start is warned about on stderr, but the first
+# failure keeps the exit status and the report.
+test_migrate_keeps_the_first_failure_when_a_service_cannot_start_at_exit() {
+	contract_setup_migration migrate_exit_start_failure
+	l_listing="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	# The discovery after the -m snapshot fails.
+	contract_prepend_rules "$l_listing	dst_snapshots.list	0	once" \
+		"$l_listing	-	2"
+
+	(
+		MOCK_SVCADM_FAIL="enable $CONTRACT_SVC_ONE"
+		export MOCK_SVCADM_FAIL
+		contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
+	)
+	l_status=$?
+
+	assertEquals "the listing failure must keep its status" 2 "$l_status"
+	planning_assert_failure_report "snapshot discovery" \
+		"message: Failed to retrieve snapshot list from the destination."
+	assertEquals "the run must print one report" \
+		1 "$(grep -c '^zxfer: failure report begin$' "$CASE_DIR/zxfer.stderr")"
+	l_warning="Couldn't re-enable service $CONTRACT_SVC_ONE."
+	assertEquals "the failed start must be warned about once" \
+		1 "$(grep -cFx "$l_warning" "$CASE_DIR/zxfer.stderr")"
+	assertEquals "the EXIT trap starts every stopped service" \
+		"svcadm enable $CONTRACT_SVC_ONE
+svcadm enable $CONTRACT_SVC_TWO" "$(grep '^svcadm enable ' "$ZFS_LOG")"
+	assertEquals "nothing may be received after the failure" \
+		0 "$(grep -c '^receive ' "$ZFS_LOG")"
 }
 
 . "$SHUNIT2_BIN"

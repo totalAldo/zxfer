@@ -17,13 +17,36 @@ belong here.
   generator.
 - The seeded argv fuzz (`tests/run_argv_fuzz.sh`) runs host-safe against its
   own model-backed fake zfs.
-- Coverage is a report-only bash-xtrace or kcov run of the unit suites.
+- Coverage is a report-only bash-xtrace or kcov run of the suites;
+  bash-xtrace also traces the zxfer runs the contract suites start, so
+  `tests/run_coverage.sh tests/test_contract_*.sh` reports black-box
+  coverage.
 - Integration runs real file-backed pools, inside a disposable VM
   (`tests/run_vm_matrix.sh`) or, manually, on a disposable ZFS host.
 - Performance has three tools: `tests/run_microbench.sh` counts helper
   spawns on the canned zfs (its budgets gate every unit run), and the
   advisory timers `tests/run_perf_ab.sh` (canned zfs) and
   `tests/run_perf_tests.sh` (real pools).
+
+### Where a new test goes
+
+Pin what an operator can observe in a contract suite: zfs and ssh argv and
+their order, exit status, the failure report, and files written. Use the
+canned zfs, the mock ssh and `MOCK_FAIL_*` fault injection
+(`tests/helpers/blackbox.sh`). Unit-test only what that harness cannot
+reach:
+
+- pure helpers (quoting, parsers, path checks), table-driven where possible;
+- security guards;
+- failure branches the fault injector cannot trigger (mktemp, a redirection,
+  awk, sort, date, a partial write);
+- platform quirks;
+- process edge cases (PID reuse, zombies, TERM-ignoring children).
+
+Do not stub a module's collaborators to pin the order of its calls: such
+tests break on every refactor and catch little the contract suites miss. In
+2026-09 the unit layer was cut from 1,346 tests to 499 this way, with
+coverage and planted-bug checks guarding every deletion.
 
 ```mermaid
 flowchart TD
@@ -119,11 +142,13 @@ Contract suites come first:
 
 | Suite | Pins |
 | --- | --- |
-| `test_contract_cli_golden.sh` | Help, usage-error and failure-report output byte for byte (`tests/golden/cli_*.golden`; rewrite with `ZXFER_UPDATE_GOLDEN=1` and review the diff). |
-| `test_contract_failures.sh` | Fail-closed behavior when any zfs or ssh call fails (see Fail-Closed Sweep). |
-| `test_contract_planning.sh` | The zfs argv of whole runs: GUID-aware planning, fail-closed listings and the failure stage they report, `-d` deletes, the `-F` rollback and divergence, `-g`, `-Y` passes, `-j` order and cleanup, `-O`/`-T`, the property pass and `-k`/`-e`. |
-| `test_contract_properties.sh` | `-P` property argument boundaries, the recursive prefetch and its read races, and the `-o` rules: a repeated item is a usage error before any zfs call (the CLI goldens also pin a malformed one), and a property the source lacks stops the run before the destination is touched. |
-| `test_contract_send_receive.sh` | `-D` progress streams under `-j 1` and `-j 3`, and `-n`. |
+| `test_contract_backup.sh` | `-k`/`-e` property backup metadata: the file layout, modes and renames `-k` writes (locally and through the `-O`/`-T` ssh programs), alias forwarding, hostile values recorded literally, unsafe backup roots refused at startup, and the files `-e` accepts and restores from. |
+| `test_contract_cli_golden.sh` | Help, usage-error, dependency-failure and failure-report output byte for byte (`tests/golden/cli_*.golden`; rewrite with `ZXFER_UPDATE_GOLDEN=1` and review the diff), with fail-loud zfs, zstd and ssh stand-ins; the reported version matches `packaging/zxfer.spec`. |
+| `test_contract_failures.sh` | Fail-closed behavior when any zfs or ssh call fails (see Fail-Closed Sweep), plus single runs for the EXIT trap's status and report when its own cleanup fails, dry runs with remote hosts, `-m`/`-c` service handling through a mock `svcadm`, and the unsafe-`TMPDIR` fallback. |
+| `test_contract_planning.sh` | The zfs argv of whole runs: GUID-aware planning, discovery's no-op proof and listings (`-x`, `-j`, `-O -Z`), fail-closed listings and the failure stage they report, `-d` deletes and their source recheck, the `-F` rollback and divergence, `-g`, the SunOS existence probes, `-Y` passes, `-j` order and cleanup, and the property pass. |
+| `test_contract_properties.sh` | `-P` property argument boundaries, the recursive prefetch and its read races, the set/inherit plan, creates with their creation-time properties, `-U`, per-dataset fallback reads, read and change failures, and the `-o` rules: a repeated item is a usage error before any zfs call (the CLI goldens also pin a malformed one), and a property the source lacks stops the run before the destination is touched. |
+| `test_contract_remote.sh` | `-O`/`-T` transport: discovery and property reads over the target master, wrapper host specs, the ssh policy environment, one master per host spec and its close at exit, capability probes, their retries and the dependency errors they report. |
+| `test_contract_send_receive.sh` | Seeding, the re-plan after a `-d` destroy, `-n`/`-s`/`-m`/`-Y` passes, the post-seed property pass, `-j` scheduling and job failures, `-D` progress templates, probes and failures, and `-z` across every ssh hop. |
 | `test_contract_verbose.sh` | `-v`/`-V` output for hostile property values, and `-V` counters that start at zero whatever the environment holds. |
 
 Every `src/zxfer_NAME.sh` has one home: `tests/test_zxfer_NAME.sh` and the
@@ -145,15 +170,16 @@ written for: the entry's `setUp` asks `zxfer_test_running_test_is_in FILE`
 every suite sees the whole function set, and provides the lifecycle and
 capture helpers. A suite that needs clean module state calls
 `zxfer_test_reset_all_owner_state` (`tests/helpers/lifecycle.sh`) from
-`setUp`, directly or through its domain fixture; it runs the production
-owner resets without creating a run root or narrowing PATH.
-Stub `src/` functions inside a subshell. Domain fixtures are opt-in files in
+`setUp`, directly or through its domain fixture; it runs the production owner
+resets without creating a run root or narrowing PATH. Stub `src/` functions
+inside a subshell. Domain fixtures are opt-in files in
 `tests/helpers/*_fixtures.sh` (`exec`, `remote_host`, `runtime`, `send_job`,
 `property`, `replication`, `snapshot_discovery`, `fake_tool`, `backup`);
-contract suites share `tests/helpers/blackbox.sh`. The legacy string-capture
-helpers `zxfer_test_capture_subshell` and `zxfer_test_capture_subshell_split`
-evaluate their script; the lint shellcheck target rejects any other `eval` in
-the shared helpers.
+contract suites share `tests/helpers/blackbox.sh` (the fixture tree, canned
+zfs wrappers, and mock ssh, parallel, zstd and `svcadm`). The legacy
+string-capture helpers `zxfer_test_capture_subshell` and
+`zxfer_test_capture_subshell_split` evaluate their script; the lint shellcheck
+target rejects any other `eval` in the shared helpers.
 
 The vendored `tests/shunit2/shunit2` (2.1.8) carries two local changes:
 `_shunit_escapeCharInStr` escapes with `awk` (BSD `sed` rejects upstream's
@@ -237,13 +263,17 @@ down; the file header gives the rule.
 `tests/run_coverage.sh [--] [suite ...]` prefers kcov and falls back to a
 bash-xtrace report (`ZXFER_COVERAGE_MODE=auto|kcov|bash-xtrace`). The
 bash-xtrace mode runs the suites through `tests/run_shunit_tests.sh` with a
-`ZXFER_TEST_SHELL` wrapper that traces each suite into its own file, then
-writes `coverage/bash-xtrace/summary.tsv` (with a `TOTAL` row) and
-`missing.txt`. It discounts syntax xtrace cannot attribute (case labels,
-heredoc bodies, grouping delimiters, multi-line strings) and skips the
-`./zxfer` entry point unless `ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=1`. Coverage
-is report-only: the exit status reflects only the suites; `--report-only` is
-accepted and ignored.
+`ZXFER_TEST_SHELL` wrapper that traces each suite into its own file. It also
+traces every zxfer run a black-box suite starts: `tests/test_helper.sh` sets
+the launcher those suites run (`ZXFER_TEST_ZXFER_BIN`) to a wrapper that runs
+`./zxfer` under the same xtrace, so `tests/run_coverage.sh
+tests/test_contract_*.sh` reports black-box coverage. It writes
+`coverage/bash-xtrace/summary.tsv` (with a `TOTAL` row) and `missing.txt`,
+discounts syntax xtrace cannot attribute (case labels, heredoc bodies,
+grouping delimiters, multi-line strings), and counts the `./zxfer` entry point
+unless `ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=0`. Coverage is report-only: the
+exit status reflects only the suites; `--report-only` is accepted and
+ignored.
 
 ## Lint
 

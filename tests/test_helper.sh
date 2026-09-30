@@ -16,6 +16,10 @@ else
 	esac
 fi
 SHUNIT2_BIN="$ZXFER_ROOT/tests/shunit2/shunit2"
+# The launcher the black-box suites run. tests/run_coverage.sh points
+# ZXFER_COVERAGE_ZXFER_BIN at a wrapper that traces each run for coverage.
+# shellcheck disable=SC2034 # Read by the suites that source this file.
+ZXFER_TEST_ZXFER_BIN=${ZXFER_COVERAGE_ZXFER_BIN:-$ZXFER_ROOT/zxfer}
 
 if [ ! -r "$SHUNIT2_BIN" ]; then
 	echo "Missing shunit2 dependency at $SHUNIT2_BIN" >&2

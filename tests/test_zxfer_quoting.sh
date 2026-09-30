@@ -211,32 +211,6 @@ test_render_shell_command_matches_reference_bytes() {
 	quoting_test_assert_render_matches_reference "" ""
 }
 
-test_render_shell_command_counts_one_render_for_the_profile() {
-	g_zxfer_profile_command_render_calls=0
-
-	zxfer_render_shell_command_from_argv "zfs" "list"
-	zxfer_render_shell_command_from_argv "zfs"
-
-	assertEquals "Each render should count exactly one render in the current shell." \
-		2 "$g_zxfer_profile_command_render_calls"
-
-	# The count costs one arithmetic step, so it runs with or without -V;
-	# only -V prints it.
-	g_option_V_very_verbose=1
-	zxfer_render_shell_command_from_argv "zfs"
-	assertEquals "Renders should count the same way under -V." \
-		3 "$g_zxfer_profile_command_render_calls"
-}
-
-test_escape_single_quotes_into_result_escapes_apostrophes() {
-	# Single-quoted contexts require reopening the quotes around apostrophes,
-	# so ensure the helper inserts the standard '\''' sequence.
-	zxfer_escape_single_quotes_into_result "needs'single'quotes"
-
-	assertEquals "Input should be properly escaped for single quotes." \
-		"needs'\\''single'\\''quotes" "$g_zxfer_escaped_single_quotes_result"
-}
-
 test_shell_command_render_preserves_exact_argument_bytes() {
 	value="a'b
 
@@ -271,7 +245,7 @@ test_check_literal_token_string_publishes_only_the_rejection_message() {
 		"command $QUOTING_TEST_REJECTION_SUFFIX" "$g_zxfer_literal_token_error_result"
 }
 
-test_quote_cli_tokens_renders_nothing_for_blank_or_tokenless_input() {
+test_quote_cli_tokens_quotes_each_literal_token_and_rejects_shell_quoting() {
 	g_option_V_very_verbose=1
 	g_zxfer_profile_command_render_calls=0
 
@@ -291,39 +265,23 @@ test_quote_cli_tokens_renders_nothing_for_blank_or_tokenless_input() {
 	assertEquals "A rendered CLI string should count one render." \
 		1 "$g_zxfer_profile_command_render_calls"
 	assertFalse "quote_cli_tokens should print nothing." "[ -s '$TEST_TMPDIR/quote_cli.out' ]"
+	# Compression commands behave like arrays: each token is one argument, and
+	# ; or | never starts a new command or pipeline.
+	zxfer_quote_cli_tokens "zstd -3 --long=27"
+	assertEquals "CLI tokens should be individually quoted." \
+		"'zstd' '-3' '--long=27'" "$g_zxfer_shell_command_result"
+	zxfer_quote_cli_tokens "zstd -3; touch /tmp/pwn | cat"
+	assertEquals "CLI tokens should remain literal even with metacharacters." \
+		"'zstd' '-3;' 'touch' '/tmp/pwn' '|' 'cat'" "$g_zxfer_shell_command_result"
 
 	zxfer_quote_cli_tokens "a 'b'"
 	assertEquals "quote_cli_tokens should fail on shell quotes." 1 "$?"
 	assertEquals "quote_cli_tokens should default its label to CLI command." \
 		"CLI command $QUOTING_TEST_REJECTION_SUFFIX" "$g_zxfer_literal_token_error_result"
-}
-
-test_quote_cli_tokens_preserves_argument_boundaries() {
-	# Compression commands should behave like arrays, preserving each argument.
-	zxfer_quote_cli_tokens "zstd -3 --long=27"
-
-	assertEquals "CLI tokens should be individually quoted." \
-		"'zstd' '-3' '--long=27'" "$g_zxfer_shell_command_result"
-}
-
-test_quote_cli_tokens_blocks_shell_metacharacters() {
-	# Metacharacters such as ';' or '|' must be neutralized instead of being
-	# interpreted as new commands or pipelines.
-	zxfer_quote_cli_tokens "zstd -3; touch /tmp/pwn | cat"
-
-	assertEquals "CLI tokens should remain literal even with metacharacters." \
-		"'zstd' '-3;' 'touch' '/tmp/pwn' '|' 'cat'" "$g_zxfer_shell_command_result"
-}
-
-test_quote_cli_tokens_preserves_validation_failures() {
 	zxfer_quote_cli_tokens '"/opt/zstd dir/zstd" -3' "compression command"
-	status=$?
-
-	assertEquals "CLI quoting should fail closed when token validation rejects the input." \
-		1 "$status"
-	assertEquals "CLI quoting should publish the literal-token validation message." \
-		"compression command must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported." \
-		"$g_zxfer_literal_token_error_result"
+	assertEquals "CLI quoting should fail closed on a double-quoted path." 1 "$?"
+	assertEquals "CLI quoting should publish the rejection under the caller's label." \
+		"compression command $QUOTING_TEST_REJECTION_SUFFIX" "$g_zxfer_literal_token_error_result"
 }
 
 test_strip_trailing_slashes_publishes_the_result() {

@@ -1,51 +1,29 @@
 #!/bin/sh
 #
 # shunit2 tests for src/zxfer_destination_state.sh: the destination existence
-# cache and probes, destination dataset mapping, and the live depth-1
-# listing. The existence-probe fragment keeps the exec fixture and the
-# mapping fragment the snapshot-discovery fixture they were written
-# for.
+# cache, the probe's cache and live modes, destination dataset mapping, and
+# the live depth-1 listing. The probe's platform fallbacks (the SunOS
+# recursive listings) and its messages are pinned black-box in
+# tests/test_contract_planning.sh.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 TESTS_DIR=$(dirname "$0")
-TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
-# shellcheck source=tests/helpers/exec_fixtures.sh
-. "$TESTS_DIR/helpers/exec_fixtures.sh"
-# shellcheck source=tests/helpers/snapshot_discovery_fixtures.sh
-. "$TESTS_DIR/helpers/snapshot_discovery_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_destination_state.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_destination_state"
-	zxfer_test_exec_fixture_one_time_setup
-	zxfer_test_snapshot_discovery_fixture_write_tools
 }
 
 oneTimeTearDown() {
-	relax_test_tmpdir_permissions
 	zxfer_test_cleanup_tmpdir
 }
 
-tearDown() {
-	relax_test_tmpdir_permissions
-}
-
 setUp() {
-	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_destination_state_existence_probe_tests.sh"; then
-		zxfer_test_exec_fixture_setup
-		return
-	fi
-	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_destination_state_mapping_tests.sh"; then
-		# The exec fixture empties TEST_TMPDIR and writes its own ssh stand-in.
-		zxfer_test_snapshot_discovery_fixture_write_tools
-		zxfer_test_snapshot_discovery_fixture_setup
-		return
-	fi
 	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" || return "$?"
 	g_cmd_awk=${g_cmd_awk:-$(command -v awk 2>/dev/null || printf '%s\n' awk)}
 	g_zxfer_source_snapshot_record_cache_file=""
@@ -83,61 +61,6 @@ cached_state() {
 	fi
 }
 
-test_destination_probe_helpers_load_with_destination_state_not_generic_exec() {
-	# shellcheck disable=SC2016  # Module-root variables expand inside the clean child shell.
-	ownership_output=$(
-		ZXFER_SOURCE_MODULES_ROOT="$ZXFER_ROOT" /bin/sh -c '
-			. "$ZXFER_SOURCE_MODULES_ROOT/src/zxfer_modules.sh" || exit 1
-			zxfer_load_modules zxfer_exec.sh || exit 1
-			if command -v zxfer_probe_destination_existence >/dev/null 2>&1; then
-				printf "%s\n" "exec_has_destination_state=yes"
-			else
-				printf "%s\n" "exec_has_destination_state=no"
-			fi
-
-			zxfer_load_modules zxfer_destination_state.sh || exit 1
-			if command -v zxfer_probe_destination_existence >/dev/null 2>&1; then
-				printf "%s\n" "state_has_destination_probe=yes"
-			else
-				printf "%s\n" "state_has_destination_probe=no"
-			fi
-			if command -v zxfer_get_live_destination_record_file >/dev/null 2>&1; then
-				printf "%s\n" "state_has_live_listing=yes"
-			else
-				printf "%s\n" "state_has_live_listing=no"
-			fi
-		'
-	)
-	ownership_status=$?
-
-	assertEquals "Canonical partial loading should succeed across the exec and destination-state boundaries." \
-		0 "$ownership_status"
-	assertContains "Generic execution should not own destination-state probes." \
-		"$ownership_output" "exec_has_destination_state=no"
-	assertContains "Destination state should own destination existence probes." \
-		"$ownership_output" "state_has_destination_probe=yes"
-	assertContains "Destination state should own the live destination listing." \
-		"$ownership_output" "state_has_live_listing=yes"
-}
-
-test_zxfer_reset_destination_existence_cache_clears_root_and_completion_state() {
-	g_destination_existence_cache="1	backup/dst"
-	g_destination_existence_cache_root="backup/dst"
-	g_destination_existence_cache_root_complete=1
-	g_recursive_dest_list="backup/dst"
-
-	zxfer_reset_destination_existence_cache
-
-	assertEquals "Resetting the destination existence cache should clear cached dataset states." \
-		"" "$g_destination_existence_cache"
-	assertEquals "Resetting the destination existence cache should clear the remembered cache root." \
-		"" "$g_destination_existence_cache_root"
-	assertEquals "Resetting the destination existence cache should clear the root-complete marker." \
-		0 "${g_destination_existence_cache_root_complete:-0}"
-	assertEquals "Resetting the destination existence cache should clear the dataset inventory it was seeded from." \
-		"" "$g_recursive_dest_list"
-}
-
 test_zxfer_note_destination_receive_completed_clears_missing_subtree_assumption() {
 	zxfer_mark_destination_root_missing_in_cache "backup/dst"
 	zxfer_note_destination_receive_completed "backup/dst"
@@ -146,32 +69,6 @@ test_zxfer_note_destination_receive_completed_clears_missing_subtree_assumption(
 		1 "$(cached_state "backup/dst")"
 	assertEquals "Receive completion should clear stale missing-subtree defaults so descendants are live-probed." \
 		miss "$(cached_state "backup/dst/child")"
-}
-
-test_zxfer_destination_hierarchy_helpers_cover_current_shell_paths() {
-	zxfer_mark_destination_root_missing_in_cache "backup/dst"
-	zxfer_mark_destination_hierarchy_exists "backup/dst/child/grandchild"
-	root_state=$(cached_state "backup/dst")
-	child_state=$(cached_state "backup/dst/child")
-	grandchild_state=$(cached_state "backup/dst/child/grandchild")
-	zxfer_note_destination_dataset_exists "backup/dst/newchild"
-	recursive_after_first=$g_recursive_dest_list
-	zxfer_note_destination_dataset_exists "backup/dst/newchild"
-	recursive_after_duplicate=$g_recursive_dest_list
-	set +e
-	zxfer_note_destination_dataset_exists ""
-	set -e
-
-	assertEquals "Destination hierarchy marking should promote the cached root to present." \
-		1 "$root_state"
-	assertEquals "Destination hierarchy marking should populate intermediate descendants." \
-		1 "$child_state"
-	assertEquals "Destination hierarchy marking should populate the requested descendant." \
-		1 "$grandchild_state"
-	assertEquals "Destination dataset notes should append the first created dataset to the recursive destination list." \
-		"backup/dst/newchild" "$recursive_after_first"
-	assertEquals "Destination dataset notes should avoid duplicating datasets already present in the recursive destination list." \
-		"$recursive_after_first" "$recursive_after_duplicate"
 }
 
 test_zxfer_seed_destination_existence_cache_from_recursive_list_marks_root_and_children_present() {
@@ -208,60 +105,21 @@ test_zxfer_mark_destination_root_missing_in_cache_marks_descendants_missing() {
 		miss "$(cached_state "other/pool")"
 }
 
-test_zxfer_set_destination_existence_cache_entry_newest_entry_shadows_older_entries() {
-	zxfer_set_destination_existence_cache_entry "backup/dst" 0
-	zxfer_set_destination_existence_cache_entry "backup/dst/child" 1
-	zxfer_set_destination_existence_cache_entry "backup/dst" 1
-
-	assertEquals "The newest existence cache entry for a dataset should shadow its older entries." \
-		1 "$(cached_state "backup/dst")"
-	assertEquals "Updating an existence cache entry should preserve unrelated cached datasets." \
-		1 "$(cached_state "backup/dst/child")"
-
-	zxfer_set_destination_existence_cache_entry "backup/dst" 0
-
-	assertEquals "A still-newer existence cache entry should shadow every earlier state for the dataset." \
-		0 "$(cached_state "backup/dst")"
-}
-
-test_zxfer_lookup_destination_existence_cache_misses_unknown_and_prefix_sibling_datasets() {
-	zxfer_set_destination_existence_cache_entry "backup/dst/ab" 1
-
-	assertEquals "Unknown datasets should miss the existence cache so callers live-probe." \
-		miss "$(cached_state "backup/dst/other")"
-	assertEquals "Dataset-name suffixes of cached datasets should never match a cached row." \
-		miss "$(cached_state "b")"
-}
-
-test_zxfer_note_destination_dataset_exists_appends_missing_dataset_to_recursive_list() {
-	g_recursive_dest_list=$(printf '%s\n' "backup/dst/existing")
-
-	zxfer_note_destination_dataset_exists "backup/dst/newchild"
-
-	assertEquals "Noting a newly existing destination dataset should append it to the recursive destination list." \
-		"backup/dst/existing
-backup/dst/newchild" "$g_recursive_dest_list"
-	assertEquals "Noting an existing destination dataset should mark the dataset as present in the existence cache." \
-		1 "$(cached_state "backup/dst/newchild")"
-}
-
-test_zxfer_note_destination_dataset_exists_appends_new_children_in_current_shell() {
-	g_recursive_dest_list="backup/dst"
+test_zxfer_note_destination_dataset_exists_appends_each_dataset_once_and_marks_it_present() {
+	zxfer_note_destination_dataset_exists "backup/dst"
+	assertEquals "The first noted dataset should start the destination dataset inventory." \
+		"backup/dst" "$g_recursive_dest_list"
 
 	zxfer_note_destination_dataset_exists "backup/dst/child"
-
-	assertEquals "New destination datasets should be appended as exact newline-delimited entries." \
+	zxfer_note_destination_dataset_exists "backup/dst/child"
+	zxfer_note_destination_dataset_exists "backup/dst/ch"
+	zxfer_note_destination_dataset_exists "" || :
+	assertEquals "Later datasets should be appended once each, as whole newline-delimited names." \
 		"backup/dst
-backup/dst/child" "$g_recursive_dest_list"
-}
-
-test_zxfer_note_destination_dataset_exists_sets_first_entry_when_list_is_empty() {
-	g_recursive_dest_list=""
-
-	zxfer_note_destination_dataset_exists "backup/dst"
-
-	assertEquals "The first observed destination dataset should seed the recursive destination list directly." \
-		"backup/dst" "$g_recursive_dest_list"
+backup/dst/child
+backup/dst/ch" "$g_recursive_dest_list"
+	assertEquals "A noted dataset should read as present in the existence cache." \
+		1 "$(cached_state "backup/dst/child")"
 }
 
 test_zxfer_lookup_destination_existence_cache_matches_newest_row_semantics() {
@@ -387,42 +245,6 @@ list -H backup/broken" "$(cat "$probe_log")"
 		"broken_error=Failed to determine whether destination dataset [backup/broken] exists: permission denied"
 }
 
-test_zxfer_probe_destination_existence_resolves_ambiguous_sunos_probes_in_current_shell() {
-	output=$(
-		(
-			g_destination_operating_system="SunOS"
-			# Exact probes fail without a diagnostic (ambiguous on SunOS).
-			zxfer_run_destination_zfs_cmd() {
-				if [ "$*" = "list -H -r -o name backup/dst" ]; then
-					printf '%s\n' "backup/dst" "backup/dst/old"
-				elif [ "$*" = "list -H -r -o name backup/gone" ]; then
-					printf '%s\n' "backup/other"
-				else
-					return 1
-				fi
-			}
-			zxfer_probe_destination_existence "backup/dst/new"
-			printf 'new=%s\n' "$g_zxfer_destination_exists_result"
-			printf 'new_cached=%s\n' "$(cached_state "backup/dst/new")"
-			printf 'parent_cached=%s\n' "$(cached_state "backup/dst")"
-			gone_status=0
-			zxfer_probe_destination_existence "backup/gone/new" || gone_status=$?
-			printf 'gone_status=%s\n' "$gone_status"
-			printf 'gone_error=%s\n' "$g_zxfer_destination_exists_error"
-		)
-	)
-
-	assertContains "A parent listing without the dataset should prove it missing." "$output" "new=0"
-	assertContains "The fallback should cache the missing dataset in the caller's shell." \
-		"$output" "new_cached=0"
-	assertContains "The fallback should cache the listed parent as present." \
-		"$output" "parent_cached=1"
-	assertContains "A parent listing that lacks the parent itself should fail closed." \
-		"$output" "gone_status=1"
-	assertContains "The fallback failure should keep its operator message." "$output" \
-		"gone_error=Failed to determine whether destination dataset [backup/gone/new] exists: parent recursive listing for [backup/gone] did not contain the parent dataset."
-}
-
 test_zxfer_get_live_destination_record_file_lists_the_dataset_at_depth_one() {
 	zfs_log="$TEST_TMPDIR/live_record_file_zfs.log"
 	listing_copy="$TEST_TMPDIR/live_record_file_listing.copy"
@@ -500,21 +322,10 @@ tank/src|1|backup/dst|tank/src/child|backup/dst/child
 tank/src|1|backup/dst|tank/src1|backup/dst
 pool|0|backup|pool/child|backup/pool/child
 tank/my data|0|back|tank/my data/child|back/my data/child
+tank/app.v1|0|backup/dst|tank/app.v1/releases.2026|backup/dst/app.v1/releases.2026
+tank/app.v1|1|backup/dst|tank/app.v1/releases.2026|backup/dst/releases.2026
+tank/app.v1|0|backup/dst|tank/appXv1/releases.2026|backup/dst/app.v1
 EOF
-}
-
-# zxfer-test-fragment: suites/zxfer_destination_state_existence_probe_tests.sh
-# shellcheck source=tests/suites/zxfer_destination_state_existence_probe_tests.sh
-. "$TESTS_DIR/suites/zxfer_destination_state_existence_probe_tests.sh"
-# zxfer-test-fragment: suites/zxfer_destination_state_mapping_tests.sh
-# shellcheck source=tests/suites/zxfer_destination_state_mapping_tests.sh
-. "$TESTS_DIR/suites/zxfer_destination_state_mapping_tests.sh"
-
-suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_destination_state.sh" \
-		"$TESTS_DIR/suites/zxfer_destination_state_existence_probe_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_destination_state_mapping_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

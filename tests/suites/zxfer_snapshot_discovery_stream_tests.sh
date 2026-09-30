@@ -1,7 +1,9 @@
 #!/bin/sh
 # shellcheck shell=sh
-# Snapshot stream diffing, reversal, and recursive-state cases for
-# src/zxfer_snapshot_discovery.sh. Run by tests/test_zxfer_snapshot_discovery.sh.
+# Snapshot delta, reversal and recursive work-list cases for
+# src/zxfer_snapshot_discovery.sh that only a unit test can reach: helper
+# edge cases, awk/sort/comm failures, argument-size limits and producer
+# teardown. Run by tests/test_zxfer_snapshot_discovery.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
 test_write_snapshot_delta_files_splits_both_diff_directions() {
@@ -69,50 +71,25 @@ EOF
 		"$output" "comm=16"
 }
 
-test_reverse_file_lines_uses_linear_reverse_for_small_inputs() {
+test_reverse_file_lines_reverses_small_and_large_inputs() {
 	input_file="$TEST_TMPDIR/reverse_file_lines_input.txt"
-	cat <<'EOF' >"$input_file"
-tank/src@snap-a
-tank/src@snap-million
-tank/src@snap-b
-EOF
-	output=$(zxfer_reverse_file_lines "$input_file")
-
-	assertEquals "zxfer_reverse_file_lines should reverse small inputs without depending on numbered-sort formatting." \
-		"tank/src@snap-b
-tank/src@snap-million
-tank/src@snap-a" "$output"
-}
-
-test_reverse_file_lines_falls_back_to_sort_for_large_inputs() {
-	input_file="$TEST_TMPDIR/reverse_file_lines_fallback_input.txt"
-	cat <<'EOF' >"$input_file"
-tank/src@snap-a
-tank/src@snap-b
-tank/src@snap-million
-tank/src@snap-c
-EOF
+	printf '%s\n' "tank/src@snap-a" "tank/src@snap-b" "tank/src@snap-million" \
+		"tank/src@snap-c" >"$input_file"
 	expected="tank/src@snap-c
 tank/src@snap-million
 tank/src@snap-b
 tank/src@snap-a"
-	output=$(
-		(
-			g_zxfer_linear_reverse_max_lines=1
-			zxfer_reverse_file_lines "$input_file"
-		)
-	)
-	bogus_output=$(
-		(
-			g_zxfer_linear_reverse_max_lines="bogus"
-			zxfer_reverse_file_lines "$input_file"
-		)
-	)
 
-	assertEquals "zxfer_reverse_file_lines should retain the sort-based fallback for larger inputs to avoid unbounded awk memory growth." \
-		"$expected" "$output"
-	assertEquals "A non-numeric reverse threshold should take the bounded sort fallback." \
-		"$expected" "$bogus_output"
+	# No limit uses the linear awk reverse; a limit below the line count, or
+	# one that is not a number, takes the bounded numbered-sort fallback.
+	for l_reverse_limit in "" 1 bogus; do
+		output=$(
+			g_zxfer_linear_reverse_max_lines=$l_reverse_limit
+			zxfer_reverse_file_lines "$input_file"
+		)
+		assertEquals "The lines should come out last first [limit:$l_reverse_limit]." \
+			"$expected" "$output"
+	done
 }
 
 test_reverse_file_lines_preserves_awk_and_fallback_failures() {
@@ -159,137 +136,6 @@ EOF
 		"$output" "tempfile=45"
 	assertContains "The sort fallback should fail cleanly when numbering the file fails." \
 		"$output" "numbering=1"
-}
-
-test_set_g_recursive_source_list_applies_exclude_filter_and_verbose_output() {
-	source_tmp="$TEST_TMPDIR/source_snapshots.txt"
-	dest_tmp="$TEST_TMPDIR/dest_snapshots.txt"
-	cat <<'EOF' >"$source_tmp"
-tank/src@a
-tank/src/child@a
-tank/src@b
-tank/src/child@b
-EOF
-	cat <<'EOF' >"$dest_tmp"
-tank/src@a
-tank/src/child@a
-tank/src/extra@z
-EOF
-	sort "$source_tmp" -o "$source_tmp"
-	sort "$dest_tmp" -o "$dest_tmp"
-	g_option_x_exclude_datasets="^tank/src/child$"
-	g_option_V_very_verbose=1
-	verbose_file="$TEST_TMPDIR/set_recursive_source.verbose"
-	zxfer_reset_runtime_artifact_state
-
-	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp" >"$verbose_file" 2>&1
-	output=$(cat "$verbose_file")
-
-	assertEquals "Excluded datasets should be removed from the transfer list." "tank/src" "$g_recursive_source_list"
-	assertEquals "Excluded datasets should also be removed from the dataset cache." "tank/src" "$g_recursive_source_dataset_list"
-	assertNotEquals "Recursive source-list discovery should stage its work under a run root." \
-		"" "${g_zxfer_run_tmp_root:-}"
-	assertEquals "Successful recursive source-list discovery should remove every stage file it allocated." \
-		"" "$(ls -A "$g_zxfer_run_tmp_root" 2>&1)"
-	assertContains "Very-verbose mode should print the missing-source snapshot heading." \
-		"$output" "Snapshots present in source but missing in destination"
-	assertContains "Very-verbose mode should print the extra-destination snapshot heading." \
-		"$output" "Extra Destination snapshots not in source"
-}
-
-test_set_g_recursive_source_list_accepts_leading_dash_exclude_patterns() {
-	source_tmp="$TEST_TMPDIR/source_dash_pattern_snapshots.txt"
-	dest_tmp="$TEST_TMPDIR/dest_dash_pattern_snapshots.txt"
-	output_file="$TEST_TMPDIR/dash_pattern_output.txt"
-	cat <<'EOF' >"$source_tmp"
-tank/src@a
-tank/src/child-exclude@a
-tank/src@b
-tank/src/child-exclude@b
-EOF
-	: >"$dest_tmp"
-	sort "$source_tmp" -o "$source_tmp"
-	g_option_x_exclude_datasets="-exclude$"
-
-	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp" >"$output_file" 2>&1
-	output=$(cat "$output_file")
-
-	assertEquals "Leading-dash regex patterns should still exclude matching datasets." \
-		"tank/src" "$g_recursive_source_list"
-	assertEquals "Leading-dash regex patterns should also filter the dataset cache." \
-		"tank/src" "$g_recursive_source_dataset_list"
-	assertNotContains "Leading-dash patterns should be treated as regexes, not grep options." \
-		"$output" "illegal option"
-	assertNotContains "Leading-dash patterns should not trigger grep usage errors on GNU systems either." \
-		"$output" "invalid option"
-}
-
-test_set_g_recursive_source_list_filters_excluded_snapshots_before_noop_compare() {
-	source_tmp="$TEST_TMPDIR/source_excluded_noop_snapshots.txt"
-	dest_tmp="$TEST_TMPDIR/dest_excluded_noop_snapshots.txt"
-	output_file="$TEST_TMPDIR/excluded_noop_output.txt"
-	cat <<'EOF' >"$source_tmp"
-tank/src/replica@source-only
-tank/src@a
-EOF
-	cat <<'EOF' >"$dest_tmp"
-tank/src/replica@destination-only
-tank/src@a
-EOF
-	sort "$dest_tmp" -o "$dest_tmp"
-	g_option_R_recursive="tank/src"
-	g_option_x_exclude_datasets='/replica$'
-
-	(
-		zxfer_write_snapshot_delta_files() {
-			printf '%s\n' "unexpected-diff"
-			return 99
-		}
-		zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-		printf 'source=%s\n' "$g_recursive_source_list"
-		printf 'dest=%s\n' "$g_recursive_destination_extra_dataset_list"
-		printf 'datasets=%s\n' "$g_recursive_source_dataset_list"
-	) >"$output_file"
-	status=$?
-	output=$(cat "$output_file")
-
-	assertEquals "Excluded source and destination snapshot rows should be removed before the exact no-op comparison." \
-		0 "$status"
-	assertNotContains "Excluded-only differences should not fall through to the full comm/splitter path." \
-		"$output" "unexpected-diff"
-	assertContains "Excluded-only differences should leave no source datasets queued for transfer." \
-		"$output" "source="
-	assertContains "Excluded-only differences should leave no destination datasets queued for deletion." \
-		"$output" "dest="
-	assertContains "Recursive no-op runs without property work should still avoid whole-tree source dataset inventory." \
-		"$output" "datasets="
-}
-
-test_set_g_recursive_source_list_treats_trailing_slash_rewritten_destination_snapshots_as_common() {
-	source_tmp="$TEST_TMPDIR/source_trailing_common.txt"
-	dest_full_tmp="$TEST_TMPDIR/dest_trailing_common_full.txt"
-	dest_norm_tmp="$TEST_TMPDIR/dest_trailing_common_norm.txt"
-	g_initial_source_had_trailing_slash=1
-	g_initial_source="tank/src"
-	g_destination="backup/dst"
-	g_option_x_exclude_datasets=""
-	cat <<'EOF' >"$source_tmp"
-tank/src@snap1	111
-tank/src/child@snap2	222
-EOF
-	cat <<'EOF' >"$dest_full_tmp"
-backup/dst@snap1	111
-backup/dst/child@snap2	222
-EOF
-
-	zxfer_normalize_destination_snapshot_list "backup/dst" "$dest_full_tmp" "$dest_norm_tmp"
-	LC_ALL=C sort "$source_tmp" -o "$source_tmp"
-	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_norm_tmp" "$source_tmp"
-
-	assertEquals "Trailing-slash destination snapshots with matching GUIDs should not be queued as missing source work." \
-		"" "$g_recursive_source_list"
-	assertEquals "Trailing-slash destination snapshots with matching GUIDs should not be queued as destination-only deletes." \
-		"" "$g_recursive_destination_extra_dataset_list"
 }
 
 test_failed_source_discovery_wait_stops_descendants_after_group_leader_exit() {
@@ -449,39 +295,6 @@ test_failed_source_discovery_never_signals_a_reaped_producer_pid() {
 	wait "$victim_pid" 2>/dev/null || :
 }
 
-test_filter_snapshot_file_with_excludes_filters_by_snapshot_dataset() {
-	input_file="$TEST_TMPDIR/snapshot_exclude_filter_input.txt"
-	output_file="$TEST_TMPDIR/snapshot_exclude_filter_output.txt"
-	cat <<'EOF' >"$input_file"
-tank/src/replica@snapA
-tank/src@snap-replica
-tank/src@snapA	guidA
-EOF
-	g_option_x_exclude_datasets='/replica$'
-
-	zxfer_filter_snapshot_file_with_excludes "$input_file" "$output_file"
-
-	assertEquals "Snapshot-list exclude filtering should match dataset names, not snapshot names or GUID fields." \
-		"tank/src@snap-replica
-tank/src@snapA	guidA" "$(cat "$output_file")"
-}
-
-test_filter_snapshot_file_with_excludes_copies_input_without_patterns() {
-	input_file="$TEST_TMPDIR/snapshot_exclude_passthrough_input.txt"
-	output_file="$TEST_TMPDIR/snapshot_exclude_passthrough_output.txt"
-	cat <<'EOF' >"$input_file"
-tank/src/app@snap2
-tank/src/app@snap1
-EOF
-	g_option_x_exclude_datasets=""
-
-	zxfer_filter_snapshot_file_with_excludes "$input_file" "$output_file"
-
-	assertEquals "Snapshot-list exclude filtering should copy records unchanged when no exclude pattern is configured." \
-		"tank/src/app@snap2
-tank/src/app@snap1" "$(cat "$output_file")"
-}
-
 test_snapshot_discovery_need_helpers_cover_recursive_shortcuts() {
 	output=$(
 		(
@@ -551,60 +364,6 @@ test_snapshot_discovery_need_helpers_cover_recursive_shortcuts() {
 		"$output" "dest_props=0"
 }
 
-test_set_g_recursive_source_list_logs_when_no_new_snapshots_exist() {
-	source_tmp="$TEST_TMPDIR/source_same_snapshots.txt"
-	dest_tmp="$TEST_TMPDIR/dest_same_snapshots.txt"
-	output_file="$TEST_TMPDIR/source_same_output.txt"
-	cat <<'EOF' >"$source_tmp"
-tank/src@a
-tank/src@b
-EOF
-	cat <<'EOF' >"$dest_tmp"
-tank/src@a
-tank/src@b
-EOF
-	sort "$source_tmp" -o "$source_tmp"
-	sort "$dest_tmp" -o "$dest_tmp"
-	g_option_v_verbose=1
-	g_option_x_exclude_datasets=""
-	output=$(
-		(
-			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp" >"$output_file"
-			printf 'source=%s\n' "$g_recursive_source_list"
-			printf 'datasets=%s\n' "$g_recursive_source_dataset_list"
-			printf 'dest=%s\n' "$g_recursive_destination_extra_dataset_list"
-		)
-	)
-
-	assertContains "Matching source and destination snapshots should leave no datasets queued for transfer after guid validation." \
-		"$output" "source="
-	assertContains "Dataset caches should still reflect the source datasets even when nothing needs transfer." \
-		"$output" "datasets=tank/src"
-	assertContains "Matching source and destination snapshots should leave no datasets queued for delete-only inspection after guid validation." \
-		"$output" "dest="
-	assertNotContains "Recursive delta planning should not leak current-shell temp file paths into stdout when no datasets differ." \
-		"$output" "$TEST_TMPDIR/zxfer."
-	assertContains "Verbose mode should explain when no new snapshots need transfer." \
-		"$(cat "$output_file")" "No new snapshots to transfer."
-}
-
-test_set_g_recursive_source_list_uses_existing_presorted_source_sidecar() {
-	source_tmp="$TEST_TMPDIR/source_presorted_unused_raw.txt"
-	presorted_tmp="$TEST_TMPDIR/source_presorted_existing.txt"
-	dest_tmp="$TEST_TMPDIR/dest_presorted_existing.txt"
-	cat <<'EOF' >"$presorted_tmp"
-tank/src@a
-tank/src@b
-EOF
-	cp "$presorted_tmp" "$dest_tmp"
-	rm -f "$source_tmp"
-
-	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp" "$presorted_tmp"
-
-	assertEquals "Recursive planning should use an existing sorted source sidecar without reading the raw source list." \
-		"" "$g_recursive_source_list"
-}
-
 test_set_g_recursive_source_list_reports_missing_presorted_source_sidecar() {
 	source_tmp="$TEST_TMPDIR/source_presorted_missing_raw.txt"
 	dest_tmp="$TEST_TMPDIR/dest_presorted_missing.txt"
@@ -621,82 +380,6 @@ test_set_g_recursive_source_list_reports_missing_presorted_source_sidecar() {
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Missing sorted source sidecar failures should preserve recursive delta context." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Failed to locate staged sorted source snapshots for recursive delta planning."
-}
-
-test_set_g_recursive_source_list_tracks_destination_only_snapshot_datasets() {
-	source_tmp="$TEST_TMPDIR/source_delete_delta.txt"
-	dest_tmp="$TEST_TMPDIR/dest_delete_delta.txt"
-	cat <<'EOF' >"$source_tmp"
-tank/src@a
-EOF
-	cat <<'EOF' >"$dest_tmp"
-tank/src@a
-tank/src/child@extra
-EOF
-	sort "$source_tmp" -o "$source_tmp"
-	sort "$dest_tmp" -o "$dest_tmp"
-	g_option_x_exclude_datasets=""
-
-	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-
-	assertEquals "Destination-only snapshot datasets should be tracked separately for delete-only inspection." \
-		"tank/src/child" "$g_recursive_destination_extra_dataset_list"
-}
-
-test_set_g_recursive_source_list_queues_name_identical_guid_divergence_from_initial_records() {
-	source_tmp="$TEST_TMPDIR/source_guid_divergence.txt"
-	dest_tmp="$TEST_TMPDIR/dest_guid_divergence.txt"
-	output_file="$TEST_TMPDIR/source_guid_divergence.out"
-	cat <<'EOF' >"$source_tmp"
-tank/src@same	111
-EOF
-	cat <<'EOF' >"$dest_tmp"
-tank/src@same	999
-EOF
-	sort "$source_tmp" -o "$source_tmp"
-	sort "$dest_tmp" -o "$dest_tmp"
-	g_option_x_exclude_datasets=""
-
-	(
-		zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-		printf 'source=%s\n' "$g_recursive_source_list"
-		printf 'dest=%s\n' "$g_recursive_destination_extra_dataset_list"
-	) >"$output_file"
-
-	assertContains "Initial identity-aware discovery should queue same-name source snapshots with different GUIDs for transfer planning." \
-		"$(cat "$output_file")" "source=tank/src"
-	assertContains "Initial identity-aware discovery should queue same-name destination snapshots with different GUIDs for delete/common-snapshot inspection." \
-		"$(cat "$output_file")" "dest=tank/src"
-}
-
-test_set_g_recursive_source_list_verbose_summarizes_dirty_recursive_delta() {
-	source_tmp="$TEST_TMPDIR/source_verbose_delta.txt"
-	dest_tmp="$TEST_TMPDIR/dest_verbose_delta.txt"
-	cat <<'EOF' >"$source_tmp"
-tank/src/app@snapA	111
-tank/src/db@snapB	222
-tank/src@snap0	000
-EOF
-	cat <<'EOF' >"$dest_tmp"
-tank/src/old@snapZ	999
-tank/src@snap0	000
-EOF
-	sort "$source_tmp" -o "$source_tmp"
-	sort "$dest_tmp" -o "$dest_tmp"
-	g_option_v_verbose=1
-	g_option_V_very_verbose=0
-	g_option_x_exclude_datasets=""
-
-	output=$(zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp" "$source_tmp")
-
-	assertContains "Verbose recursive delta output should show compact source/destination dirty counts." \
-		"$output" "Recursive snapshot delta summary: source_missing_snapshots=2 destination_extra_snapshots=1 source_datasets=2 destination_extra_datasets=1"
-	assertContains "Verbose recursive delta output should name source datasets queued for transfer." \
-		"$output" "  tank/src/app"
-	assertContains "Verbose recursive delta output should name every source-delta dataset." \
-		"$output" "  tank/src/db"
-	assertContains "Verbose recursive delta output should name destination-only datasets queued for delete inspection." \
-		"$output" "  tank/src/old"
 }
 
 test_report_recursive_snapshot_delta_counts_lists_larger_than_argument_limits() {
@@ -761,29 +444,6 @@ EOF
 		"$output" "Recursive snapshot delta summary"
 }
 
-test_set_g_recursive_source_list_treats_tmpdir_derived_paths_as_literal() {
-	old_tmpdir=${TMPDIR:-}
-	marker="$TEST_TMPDIR/source_sort_marker"
-	tmpdir_with_payload="$TEST_TMPDIR/tmpdir.\$(touch source_sort_marker)"
-	source_tmp="$TEST_TMPDIR/source_sort_input.txt"
-	dest_tmp="$TEST_TMPDIR/dest_sort_input.txt"
-	rm -f "$marker"
-	rm -rf "$tmpdir_with_payload"
-	mkdir -p "$tmpdir_with_payload"
-	printf '%s\n%s\n' "tank/src@snap1" "tank/src@snap2" >"$source_tmp"
-	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
-	TMPDIR=$tmpdir_with_payload
-
-	zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-
-	TMPDIR=$old_tmpdir
-
-	assertEquals "Sorting source snapshots should still identify the missing dataset when TMPDIR contains metacharacters." \
-		"tank/src" "$g_recursive_source_list"
-	assertFalse "Sorting source snapshots should not execute command substitutions embedded in TMPDIR-derived temp paths." \
-		"[ -e '$marker' ]"
-}
-
 test_set_g_recursive_source_list_reports_recursive_snapshot_diff_failures() {
 	source_tmp="$TEST_TMPDIR/recursive_diff_failure_source.txt"
 	dest_tmp="$TEST_TMPDIR/recursive_diff_failure_dest.txt"
@@ -811,171 +471,58 @@ test_set_g_recursive_source_list_reports_recursive_snapshot_diff_failures() {
 		"$output" "Failed to diff source and destination snapshots for recursive delta planning."
 }
 
-test_set_g_recursive_source_list_reports_recursive_source_dataset_transfer_awk_failures() {
-	source_tmp="$TEST_TMPDIR/recursive_source_transfer_awk_failure_source.txt"
-	dest_tmp="$TEST_TMPDIR/recursive_source_transfer_awk_failure_dest.txt"
-	fake_awk="$TEST_TMPDIR/recursive_source_transfer_awk_fail.sh"
-	printf '%s\n%s\n' "tank/src@snap1" "tank/src@snap2" >"$source_tmp"
-	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
-	create_selective_awk_failure_bin "$fake_awk" 8
+# Each dataset list comes from its delta file through awk -F@ and sort -u, and
+# then through the exclude filter; a failure at any step stops delta planning
+# with that step's status and names the list. The fixture decides which list
+# is the first to reach the failing step.
+test_set_g_recursive_source_list_fails_closed_when_a_dataset_list_cannot_be_derived_or_filtered() {
+	source_tmp="$TEST_TMPDIR/dataset_list_failure_source.txt"
+	dest_tmp="$TEST_TMPDIR/dataset_list_failure_dest.txt"
+	fake_awk="$TEST_TMPDIR/dataset_list_failure_awk.sh"
 
-	set +e
-	output=$(
-		(
-			g_cmd_awk="$fake_awk"
-
-			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Recursive delta planning should fail closed when deriving the source transfer dataset list fails before sort notices." \
-		8 "$status"
-	assertContains "Recursive delta planning should preserve the upstream awk failure from the source transfer dataset derivation." \
-		"$output" "awk failed"
-	assertContains "Recursive delta planning should report a specific source transfer dataset derivation error." \
-		"$output" "Failed to derive recursive source dataset transfer list."
-}
-
-test_set_g_recursive_source_list_reports_recursive_destination_dataset_delete_awk_failures() {
-	source_tmp="$TEST_TMPDIR/recursive_destination_delete_awk_failure_source.txt"
-	dest_tmp="$TEST_TMPDIR/recursive_destination_delete_awk_failure_dest.txt"
-	fake_awk="$TEST_TMPDIR/recursive_destination_delete_awk_fail.sh"
-	printf '%s\n' "tank/src@snap1" >"$source_tmp"
-	printf '%s\n%s\n' "tank/src/child@extra" "tank/src@snap1" >"$dest_tmp"
-	create_selective_awk_failure_bin "$fake_awk" 9
-
-	set +e
-	output=$(
-		(
-			g_cmd_awk="$fake_awk"
-
-			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Recursive delete-only planning should fail closed when deriving destination delete datasets fails before sort notices." \
-		9 "$status"
-	assertContains "Recursive delete-only planning should preserve the upstream awk failure from the destination delete dataset derivation." \
-		"$output" "awk failed"
-	assertContains "Recursive delete-only planning should report a specific destination delete dataset derivation error." \
-		"$output" "Failed to derive recursive destination dataset delete list."
-}
-
-test_set_g_recursive_source_list_reports_recursive_source_dataset_inventory_failures() {
-	source_tmp="$TEST_TMPDIR/recursive_source_inventory_error_source.txt"
-	dest_tmp="$TEST_TMPDIR/recursive_source_inventory_error_dest.txt"
-	printf '%s\n' "tank/src@snap1" >"$source_tmp"
-	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
-
-	set +e
-	output=$(
-		(
-			sort() {
-				if [ "$1" = "-u" ]; then
-					return 7
+	# step|status|source records|destination records|filtered list|message;
+	# records and list lines are comma-separated.
+	while IFS='|' read -r l_step l_status l_source l_dest l_filtered l_message; do
+		printf '%s\n' "$l_source" | tr ',' '\n' | LC_ALL=C sort >"$source_tmp"
+		printf '%s\n' "$l_dest" | tr ',' '\n' | LC_ALL=C sort >"$dest_tmp"
+		[ "$l_step" != awk ] || create_selective_awk_failure_bin "$fake_awk" "$l_status"
+		output=$(
+			(
+				FAIL_STATUS=$l_status
+				FAIL_LIST=$(printf '%s' "$l_filtered" | tr ',' '\n')
+				# if, not case: bash 3.2 misparses case patterns inside $(...).
+				if [ "$l_step" = awk ]; then
+					g_cmd_awk=$fake_awk
+				elif [ "$l_step" = sort ]; then
+					sort() {
+						[ "$1" != "-u" ] || return "$FAIL_STATUS"
+						command sort "$@"
+					}
+				else
+					zxfer_filter_recursive_dataset_list_with_excludes() {
+						[ "$1" != "$FAIL_LIST" ] || return "$FAIL_STATUS"
+						g_zxfer_recursive_dataset_list_result=$1
+					}
 				fi
-				command sort "$@"
-			}
+				zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+			) 2>&1
+		)
+		l_row_status=$?
 
-			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Recursive delta planning should fail closed when source dataset inventory derivation fails." \
-		7 "$status"
-	assertContains "Recursive delta planning should preserve a specific source dataset inventory error." \
-		"$output" "Failed to derive recursive source dataset inventory."
-}
-
-test_set_g_recursive_source_list_reports_recursive_source_dataset_inventory_awk_failures() {
-	source_tmp="$TEST_TMPDIR/recursive_source_inventory_awk_error_source.txt"
-	dest_tmp="$TEST_TMPDIR/recursive_source_inventory_awk_error_dest.txt"
-	fake_awk="$TEST_TMPDIR/recursive_source_inventory_awk_fail.sh"
-	printf '%s\n' "tank/src@snap1" >"$source_tmp"
-	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
-	create_selective_awk_failure_bin "$fake_awk" 10
-
-	set +e
-	output=$(
-		(
-			g_cmd_awk="$fake_awk"
-
-			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Recursive delta planning should fail closed when source dataset inventory derivation fails before sort notices." \
-		10 "$status"
-	assertContains "Recursive delta planning should preserve the upstream awk failure from source dataset inventory derivation." \
-		"$output" "awk failed"
-	assertContains "Recursive delta planning should report a specific source dataset inventory error." \
-		"$output" "Failed to derive recursive source dataset inventory."
-}
-
-test_set_g_recursive_source_list_reports_invalid_exclude_pattern_failures() {
-	source_tmp="$TEST_TMPDIR/recursive_exclude_pattern_failure_source.txt"
-	dest_tmp="$TEST_TMPDIR/recursive_exclude_pattern_failure_dest.txt"
-	printf '%s\n%s\n' "tank/src@snap1" "tank/src/child@snap1" >"$source_tmp"
-	: >"$dest_tmp"
-	g_option_x_exclude_datasets='['
-
-	set +e
-	output=$(
-		(
-			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Recursive delta planning should fail closed when exclude filtering uses an invalid pattern." \
-		2 "$status"
-	assertContains "Recursive delta planning should report the specific pre-diff snapshot exclude-filter context." \
-		"$output" "Failed to filter source snapshots against exclude patterns for recursive delta planning."
-}
-
-test_set_g_recursive_source_list_fuzzes_tmpdir_derived_paths_with_odd_characters() {
-	old_tmpdir=${TMPDIR:-}
-	marker="$TEST_TMPDIR/source_sort_marker_fuzz"
-	case_file="$TEST_TMPDIR/tmpdir_fuzz_cases.txt"
-	source_tmp="$TEST_TMPDIR/source_sort_fuzz_input.txt"
-	dest_tmp="$TEST_TMPDIR/dest_sort_fuzz_input.txt"
-	printf '%s\n%s\n' "tank/src@snap1" "tank/src@snap2" >"$source_tmp"
-	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
-	cat >"$case_file" <<EOF
-tmpdir,comma
-tmpdir=equals
-tmpdir:semicolon;literal
-tmpdir.\$(touch source_sort_marker_fuzz)
+		assertEquals "Delta planning should stop with the failing step's status [$l_step: $l_message]." \
+			"$l_status" "$l_row_status"
+		assertContains "Delta planning should name the list [$l_step]." \
+			"$output" "$l_message"
+		if [ "$l_step" = awk ]; then
+			assertContains "Delta planning should keep awk's diagnostic." \
+				"$output" "awk failed"
+		fi
+	done <<'EOF'
+awk|8|tank/src@snap1,tank/src@snap2|tank/src@snap1||Failed to derive recursive source dataset transfer list.
+awk|9|tank/src@snap1|tank/src/child@extra,tank/src@snap1||Failed to derive recursive destination dataset delete list.
+awk|10|tank/src@snap1|tank/src@snap1||Failed to derive recursive source dataset inventory.
+sort|7|tank/src@snap1|tank/src@snap1||Failed to derive recursive source dataset inventory.
+filter|2|tank/src@snap1|tank/src/child@extra,tank/src@snap1|tank/src/child|Failed to filter recursive destination dataset delete list against exclude patterns.
+filter|2|tank/src@snap1,tank/src/child@snap2|tank/src@snap1|tank/src,tank/src/child|Failed to filter recursive source dataset inventory against exclude patterns.
 EOF
-
-	case_index=0
-	rm -f "$marker"
-	while IFS= read -r tmpdir_tail || [ -n "$tmpdir_tail" ]; do
-		[ -n "$tmpdir_tail" ] || continue
-		case_index=$((case_index + 1))
-		tmpdir_case="$TEST_TMPDIR/$tmpdir_tail"
-		rm -rf "$tmpdir_case"
-		mkdir -p "$tmpdir_case"
-		TMPDIR=$tmpdir_case
-		g_recursive_source_list=""
-		g_recursive_source_dataset_list=""
-
-		zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-
-		assertEquals "TMPDIR fuzz case $case_index should still identify the missing dataset." \
-			"tank/src" "$g_recursive_source_list"
-	done <"$case_file"
-
-	if [ -n "${old_tmpdir+set}" ]; then
-		TMPDIR=$old_tmpdir
-	else
-		unset TMPDIR
-	fi
-
-	assertFalse "TMPDIR fuzz cases should not execute command substitutions embedded in derived temp paths." \
-		"[ -e '$marker' ]"
 }

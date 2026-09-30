@@ -83,23 +83,6 @@
 #         its anchor; the same run with -F also rolls the root back to its
 #         anchor before the root's send.
 #
-#   -T destination discovery (ordinary listings over the target master)
-#       test_remote_target_destination_listing_failure_fails_closed
-#       → a failed snapshot listing on the -T host keeps the zfs exit status
-#         and the local "Failed to retrieve snapshot list" report.
-#       test_remote_target_ssh_failure_during_discovery_fails_closed
-#       → an ssh failure of that listing exits 255 with a report.
-#       test_remote_target_bootstraps_a_missing_destination_root
-#       → a missing -T root whose pool the live probe lists is bootstrapped.
-#       test_remote_target_missing_root_with_an_unlistable_pool_fails_closed
-#       → the same root with an unlistable pool fails closed.
-#
-#   -T remote destination, -P property pass (role-routing fix, 2026-09)
-#       test_remote_target_property_pass_reads_destination_properties_over_ssh
-#       → every destination-side `zfs get` crosses the ssh transport and no
-#         source-side `zfs get` does, even though zfs resolves to the same
-#         path on both "hosts"; zero MUTATE / send / receive argv.
-#
 #   property pass operator contract (-P / -o / -I / -U, pinned 2026-09)
 #       test_property_pass_sets_differing_property_and_skips_identical_one
 #       → a differing settable property is `MUTATE set` per dataset, an
@@ -119,46 +102,6 @@
 #       test_property_read_failure_fails_closed_without_mutations
 #       → a failed source property read exits non-zero with a failure
 #         report and zero MUTATE lines.
-#
-#   -k / -e property backup metadata contract (pinned 2026-09)
-#       test_backup_mode_writes_metadata_once_per_run
-#       → `-k -P` writes ZXFER_BACKUP_DIR/<source>/.zxfer_backup_info.v2/h/
-#         <identity-chunks>/.zxfer_backup_info.v2 (mode 0600, versioned
-#         header, one relative row per dataset) plus the forwarded
-#         provenance alias under the destination root, with exactly ONE
-#         rename per file for the whole run (no per-dataset rewrites).
-#       test_backup_mode_second_run_rewrites_metadata_in_place
-#       → a second run replaces the file through one rename again and
-#         leaves no stage files behind.
-#       test_backup_mode_refuses_symlinked_backup_directory_and_target
-#       → a symlinked ZXFER_BACKUP_DIR and a symlinked target file are both
-#         refused with a non-zero exit and the link target untouched.
-#       test_restore_mode_rejects_legacy_layout_and_unsupported_format_version
-#       → `-e` fails closed before any zfs argv when only a legacy flat
-#         layout exists or the header declares an unsupported version.
-#       test_restore_mode_applies_recorded_properties
-#       → `-e` reads the exact-pair file and `MUTATE set`s the recorded
-#         value even when the live source has drifted.
-#       test_remote_target_backup_mode_writes_metadata_through_ssh
-#       → `-T -k` publishes both files through ONE rollback-capable pair
-#         write script over the ssh transport, with the same layout and mode.
-#       test_restore_mode_reads_a_current_file_under_the_retired_cksum_name
-#       → `-e` still restores from the read-only retired name
-#         .zxfer_backup_info.<tail>.k<cksum>.<length>.
-#       test_backup_mode_refuses_a_v1_forwarded_alias_under_the_retired_name
-#       → a v1 forwarded alias at the retired name fails `-k` closed and
-#         writes nothing.
-#       test_backup_mode_forwards_an_alias_below_the_source_root
-#       → a forwarded alias for a child dataset supplies that child's row.
-#       test_remote_origin_backup_mode_forwards_an_alias_below_the_source_root
-#       → with -O the same alias is found through one listing of the
-#         origin's storage directories.
-#       test_dry_run_backup_mode_previews_only_the_backup_root
-#       → `-n -v -k -P` prints the mkdir/chmod preview and the no-data
-#         note, issues no zfs argv, and creates nothing.
-#       test_backup_mode_failure_partway_keeps_the_previous_files
-#       → a `-k` run that fails at a later dataset leaves the previous
-#         complete files byte-identical.
 #
 #   operator flags without another host-safe pin (pinned 2026-09)
 #       test_nonrecursive_option_replicates_only_the_named_dataset
@@ -211,6 +154,40 @@
 #       test_parallel_jobs_term_tears_down_jobs_and_removes_run_tmp_root
 #       → a TERM during a -j run exits 143 with one structured report,
 #         leaving no job process or temp file behind.
+#
+#   snapshot discovery (no-op proof, listings, -x, -j, -Z, temp paths)
+#       test_proof_source_listing_that_fails_after_the_destination_rows_never_proves_a_noop
+#       → a proof listing that dies after the destination's rows fails
+#         closed with its stderr and status; over -O -z the sentinel exposes
+#         the truncated stream and full discovery sends every dataset.
+#       test_proof_destination_listing_that_fails_after_its_rows_fails_closed_unless_the_root_is_missing
+#       → the same on the destination side, unless it reports the root
+#         missing, which declines the proof.
+#       test_empty_source_listing_fails_closed_before_any_change
+#       → an empty but successful source listing fails, proof or full.
+#       test_exclude_option_proves_a_noop_when_only_excluded_datasets_differ
+#       → -x differences are a proven no-op (no parallel, no pattern on the
+#         origin); an all-excluded source falls back and finds no work.
+#       test_invalid_exclude_pattern_fails_closed_before_any_change
+#       → an exclude pattern awk rejects fails -R and -N runs closed.
+#       test_parallel_jobs_dataset_enumeration_that_fails_partway_fails_closed
+#       → a -j enumeration that fails partway exits 70 with no change.
+#       test_parallel_jobs_very_verbose_reports_the_delta_profile_and_job_count
+#       → -j -V reports the exact delta and listing counters, and parallel
+#         gets -j N --line-buffer and the bare zfs runner.
+#       test_remote_origin_compressed_parallel_discovery_replicates_every_dataset
+#       → -O -Z -j compresses every origin stream with -Z's command and
+#         decompresses it locally; the origin runs parallel with -j N.
+#       test_destination_inventory_failures_fail_closed_with_the_listing_diagnostic
+#       → a failed or empty inventory, or a missing root whose pool cannot
+#         be listed, fails closed with the listing's diagnostic.
+#       test_nonrecursive_destination_listing_diagnostics_are_passed_on
+#       → full discovery passes listing warnings on, and a listing failure
+#         is classified by an exact root probe, local status 255 included.
+#       test_trailing_slash_source_maps_onto_the_destination_itself
+#       → "SRC/" lists and replicates into the destination itself.
+#       test_hostile_tmpdir_is_used_literally_by_discovery_pipelines
+#       → temp paths stay literal words in the rendered pipelines.
 #
 # shellcheck disable=SC1090,SC2034,SC2154
 
@@ -309,7 +286,9 @@ test_incremental_dryrun_issues_zero_zfs_argv_and_renders_no_plan() {
 # mutating argv is ever issued. Both source listing shapes are forced to
 # fail: the proof's identity listing failure surfaces as a stream mismatch
 # and falls back to full discovery, whose creation-order listing failure
-# then fails the run closed.
+# then fails the run closed. When the listing prints a diagnostic, the
+# message carries it, and an unsafe report names the failed background
+# listing as its last command, not a later foreground one.
 test_source_snapshot_listing_failure_fails_closed() {
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/noop" srcfail
@@ -326,6 +305,28 @@ test_source_snapshot_listing_failure_fails_closed() {
 	planning_assert_no_send_receive
 	planning_assert_failure_report "snapshot discovery" \
 		"Failed to retrieve snapshots from the source"
+
+	: >"$ZFS_LOG"
+	mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
+	(
+		MOCK_FAIL_TOOL=zfs
+		MOCK_FAIL_CALL=1
+		MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
+		MOCK_FAIL_MATCH="list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
+		MOCK_FAIL_STDERR="cannot iterate filesystems: I/O error"
+		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
+		export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
+			MOCK_FAIL_STDERR ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
+		planning_run_zxfer "$FIXTURE_DIR/incremental" -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	)
+	assertEquals "a failed listing with stderr keeps its status" 1 $?
+	planning_assert_failure_report "snapshot discovery" \
+		"Failed to retrieve snapshots from the source: cannot iterate filesystems: I/O error"
+	assertTrue "the report must name the failed listing as its last command; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		"grep '^last_command: ' '$CASE_DIR/zxfer.stderr' | grep -Fq \"'list' '-Hr' '-o' 'name,guid' '-s' 'creation' '-t' 'snapshot' '$ZXFER_MOCKBIN_SOURCE_ROOT'\""
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
 }
 
 # Invariant: an operational destination existence-check failure (non-zero
@@ -754,7 +755,7 @@ test_parallel_jobs_term_tears_down_jobs_and_removes_run_tmp_root() {
 		TMPDIR="$JOB_TMP_DIR"
 		export MOCK_ZFS_LOG MOCK_ZFS_FIXTURE_DIR ZXFER_SECURE_PATH \
 			ZXFER_SECURE_PATH_APPEND TMPDIR
-		exec "$ZXFER_ROOT/zxfer" -j 2 -R \
+		exec "$ZXFER_TEST_ZXFER_BIN" -j 2 -R \
 			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	) >"$CASE_DIR/zxfer.stdout" 2>"$CASE_DIR/zxfer.stderr" &
 	l_parjobsterm_pid=$!
@@ -864,505 +865,6 @@ test_parallel_jobs_keep_dataset_names_with_spaces_whole_locally_and_over_origin(
 	done
 	planning_assert_no_parallel_job_leftovers
 	return 0
-}
-
-# Invariant: -V must not change replication outcomes, and an ssh without
-# control-socket support still replicates over direct connections, -T
-# destination discovery included. Regression for -T destination discovery
-# aborting under -V because a profiling recorder's non-zero status leaked into
-# a discovery function's return value (zxfer_profile_record_zfs_call returned
-# 1 for destination-side calls). The minimal mock ssh rejects -M.
-test_remote_target_discovery_succeeds_with_very_verbose() {
-	planning_setup_env
-	zxfer_mockbin_write_minimal_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write minimal mock ssh."
-	SSH_LOG="$CASE_DIR/ssh.log"
-	export MOCK_SSH_LOG="$SSH_LOG"
-
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -V -O localhost -T localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_remote_noop_status=$?
-	unset MOCK_SSH_LOG
-
-	assertEquals "-V remote no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_remote_noop_status"
-	assertTrue "the -T destination snapshot listing must have run over ssh" \
-		"grep -q \"'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'\" '$SSH_LOG'"
-	for l_remote_noop_role in origin target; do
-		assertContains "-V must explain the direct-connection fallback for the $l_remote_noop_role host" \
-			"$(cat "$CASE_DIR/zxfer.stderr")" \
-			"ssh client does not support control sockets; continuing without connection reuse for $l_remote_noop_role host."
-	done
-	assertFalse "without control-socket support no command may name a socket" \
-		"grep -q -- '-S ' '$SSH_LOG'"
-	planning_assert_no_mutations
-	planning_assert_no_send_receive
-}
-
-# Invariant: a clean remote-origin pull no-op opens the origin's ssh control
-# master before its first remote command, runs the capability probe and the
-# source listing over that socket, probes exactly ONCE, and closes the master
-# once at exit.
-test_remote_origin_pull_noop_opens_master_first_and_probes_once() {
-	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write socket-aware mock ssh."
-	SSH_LOG="$CASE_DIR/ssh_pull_noop.log"
-	: >"$SSH_LOG"
-	export MOCK_SSH_LOG="$SSH_LOG"
-
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_pull_noop_status=$?
-	unset MOCK_SSH_LOG
-
-	assertEquals "-O pull no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_pull_noop_status"
-	planning_assert_ssh_commands_multiplexed 1
-	assertTrue "the origin master must use the origin role socket" \
-		"grep -q -- '-M -S [^ ]*/ssh-origin.sock -fN localhost' '$SSH_LOG'"
-	assertEquals "a warmed origin host must cost exactly one capability probe round trip" \
-		1 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
-	assertTrue "the source listing must run over the origin master" \
-		"grep -q -- 'ssh-origin.sock localhost .*snapshot' '$SSH_LOG'"
-	planning_assert_no_mutations
-	planning_assert_no_send_receive
-}
-
-# Invariant: a clean -T push no-op opens the target's master before its first
-# remote command, runs the capability probe and the destination snapshot
-# listing over it, lists no destination dataset inventory (nothing on a no-op
-# reads it), and closes the master once at exit.
-test_remote_target_push_noop_opens_master_first_and_probes_once() {
-	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write socket-aware mock ssh."
-	SSH_LOG="$CASE_DIR/ssh_push_noop.log"
-	: >"$SSH_LOG"
-	export MOCK_SSH_LOG="$SSH_LOG"
-
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -T localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_push_noop_status=$?
-	unset MOCK_SSH_LOG
-
-	assertEquals "-T push no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_push_noop_status"
-	planning_assert_ssh_commands_multiplexed 1
-	assertTrue "the target master must use the target role socket" \
-		"grep -q -- '-M -S [^ ]*/ssh-target.sock -fN localhost' '$SSH_LOG'"
-	assertEquals "the target host must cost exactly one capability probe round trip" \
-		1 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
-	assertEquals "the destination snapshot listing must run once over the target master" \
-		1 "$(grep -c -- "ssh-target.sock localhost .*'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'" "$SSH_LOG")"
-	assertEquals "a no-op must not list the destination dataset inventory" \
-		0 "$(grep -c -- "'filesystem,volume'" "$SSH_LOG")"
-	planning_assert_no_mutations
-	planning_assert_no_send_receive
-}
-
-# Invariant: with distinct -O and -T host specs each role opens its own master
-# before any remote command and sends every command over its own socket; each
-# master closes once at exit. A -T spec equal to the -O spec shares the origin
-# master, since commands for that spec already use the origin socket, and one
-# capability probe, since both roles ask that host the same questions.
-test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
-	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write socket-aware mock ssh."
-	SSH_LOG="$CASE_DIR/ssh_both_noop.log"
-	: >"$SSH_LOG"
-	export MOCK_SSH_LOG="$SSH_LOG"
-
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -T 127.0.0.1 -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_both_noop_status=$?
-
-	assertEquals "-O -T no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_both_noop_status"
-	planning_assert_ssh_commands_multiplexed 2
-	assertEquals "each host must cost exactly one capability probe round trip" \
-		2 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
-	assertFalse "origin commands must never use the target socket" \
-		"grep -q -- 'ssh-target.sock localhost' '$SSH_LOG'"
-	assertFalse "target commands must never use the origin socket" \
-		"grep -q -- 'ssh-origin.sock 127.0.0.1' '$SSH_LOG'"
-	assertEquals "the destination snapshot listing must run once over the target master" \
-		1 "$(grep -c -- "ssh-target.sock 127.0.0.1 .*'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'" "$SSH_LOG")"
-
-	: >"$SSH_LOG"
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -T localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_same_noop_status=$?
-	unset MOCK_SSH_LOG
-
-	assertEquals "-O -T no-op to one host spec must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_same_noop_status"
-	planning_assert_ssh_commands_multiplexed 1
-	assertFalse "one host spec must not open a second master" \
-		"grep -q -- 'ssh-target.sock' '$SSH_LOG'"
-	assertEquals "one host spec must cost exactly one capability probe round trip" \
-		1 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
-	planning_assert_no_mutations
-	planning_assert_no_send_receive
-}
-
-# Invariant: when a long TMPDIR would push the control-socket path past the
-# sun_path limit, the master's socket lives in a short private directory
-# under the default temp root instead: the socket path, with the suffix ssh
-# adds to its temporary listener, stays under 104 bytes, and the run leaves
-# neither that directory nor its run root behind. Root and other users alike
-# accept the 0700 TMPDIR they made and a root-owned sticky default root.
-test_remote_noop_under_a_long_tmpdir_removes_its_short_socket_directory() {
-	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write socket-aware mock ssh."
-	SSH_LOG="$CASE_DIR/ssh_long_tmpdir.log"
-	: >"$SSH_LOG"
-	l_long_component="zxfer-long-tmpdir-component-00000000000000000000000000000"
-	l_long_tmpdir="$CASE_DIR/$l_long_component/$l_long_component"
-	mkdir -p "$l_long_tmpdir" || fail "Unable to create the long TMPDIR."
-	chmod 700 "$l_long_tmpdir"
-
-	# Export in a subshell: FreeBSD sh exports a prefix assignment on a
-	# function call only when the name was already exported, and ksh93 not
-	# even then, so zxfer would miss this TMPDIR and keep its sockets in a
-	# short run root under the default temp root.
-	(
-		TMPDIR=$l_long_tmpdir
-		PATH=$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")
-		MOCK_SSH_LOG=$SSH_LOG
-		export TMPDIR PATH MOCK_SSH_LOG
-		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -R \
-			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	)
-	l_long_tmpdir_status=$?
-	l_long_socket=$(awk '$1 == "-M" || index($0, " -M -S ") {
-		for (i = 1; i < NF; i++) if ($i == "-S") { print $(i + 1); exit }
-	}' "$SSH_LOG")
-	l_long_socket_dir=${l_long_socket%/*}
-	# ssh binds SOCKET plus a dot and 16 random characters, then renames it.
-	l_long_socket_listener="$l_long_socket.0123456789abcdef"
-	# The default temp roots zxfer may pick, by physical path (/tmp is
-	# /private/tmp on macOS).
-	l_long_socket_parent_is_default=no
-	for l_long_default_root in /dev/shm /run/shm /tmp; do
-		[ -d "$l_long_default_root" ] || continue
-		[ "$(cd -P "$l_long_default_root" && pwd)" != "${l_long_socket_dir%/*}" ] ||
-			l_long_socket_parent_is_default=yes
-	done
-
-	assertEquals "-O no-op under a long TMPDIR must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_long_tmpdir_status"
-	planning_assert_ssh_commands_multiplexed 1
-	assertNotNull "the origin master must name its control socket" \
-		"$l_long_socket"
-	assertTrue "the socket's temporary listener path must fit sun_path: $l_long_socket_listener" \
-		"[ ${#l_long_socket_listener} -lt 104 ]"
-	assertNotContains "the origin socket must not sit under the long TMPDIR" \
-		"$l_long_socket_dir" "$l_long_component"
-	assertContains "the origin socket should sit in a short zxfer.ssh directory" \
-		"${l_long_socket_dir##*/}" "zxfer.ssh."
-	assertEquals "the short socket directory must sit directly under a default temp root: $l_long_socket_dir" \
-		yes "$l_long_socket_parent_is_default"
-	assertFalse "the short socket directory must be gone after the run" \
-		"[ -e '$l_long_socket_dir' ]"
-	assertEquals "the run root under the long TMPDIR must be gone too" \
-		"" "$(ls -A "$l_long_tmpdir")"
-	planning_assert_no_mutations
-}
-
-# Purpose: Run a -T localhost push of STATE_DIR through the fault-injecting
-# socket-aware mock ssh, logging ssh calls to $CASE_DIR/ssh.log (SSH_LOG).
-# Usage: planning_run_remote_target_push; sets PLANNING_RUN_STATUS. Export
-# any MOCK_FAIL_* variables first: a prefix assignment on a function call is
-# not exported on FreeBSD sh.
-planning_run_remote_target_push() {
-	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write socket-aware mock ssh."
-	SSH_LOG="$CASE_DIR/ssh.log"
-	: >"$SSH_LOG"
-	MOCK_SSH_LOG=$SSH_LOG
-	export MOCK_SSH_LOG
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$STATE_DIR" -T localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	PLANNING_RUN_STATUS=$?
-	unset MOCK_SSH_LOG
-}
-
-# Purpose: Make the -T destination root and its mapped datasets answer like
-# missing datasets, while the pool rule is left to the caller. The recursive
-# snapshot listing fails, each exact probe prints zfs's missing-dataset line
-# (probes read stdout and stderr together) and the dataset inventory fails
-# once with that line on stderr, through the zfs fault injector.
-# Usage: planning_make_remote_destination_root_missing; exports the MOCK_FAIL_*
-# variables, which the caller unsets.
-# shellcheck disable=SC2089,SC2090  # the quotes are part of the zfs message
-planning_make_remote_destination_root_missing() {
-	planning_force_manifest_failure \
-		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" 1
-	for l_missing_suffix in "" /child1 /child2; do
-		l_missing_dataset=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_missing_suffix
-		l_missing_fixture="missing_${l_missing_suffix#/}.list"
-		printf "cannot open '%s': dataset does not exist\n" "$l_missing_dataset" \
-			>"$STATE_DIR/$l_missing_fixture" ||
-			fail "Unable to write the missing-dataset fixture."
-		# The first matching rule wins, so these go first.
-		{
-			printf 'list -H %s\t%s\t1\n' "$l_missing_dataset" "$l_missing_fixture"
-			cat "$STATE_DIR/manifest"
-		} >"$STATE_DIR/manifest.new" ||
-			fail "Unable to prepend the missing-dataset rule."
-		mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
-			fail "Unable to install the missing-dataset rule."
-	done
-	mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
-	MOCK_FAIL_TOOL=zfs
-	MOCK_FAIL_CALL=1
-	MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
-	MOCK_FAIL_MATCH="list -t filesystem,volume -Hr -o name $ZXFER_MOCKBIN_DEST_ROOT"
-	MOCK_FAIL_STDERR="cannot open '$ZXFER_MOCKBIN_DEST_ROOT': dataset does not exist"
-	MOCK_FAIL_STATUS=1
-	export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
-		MOCK_FAIL_STDERR MOCK_FAIL_STATUS
-}
-
-# Invariant (-T discovery): a failed destination snapshot listing on the -T
-# host fails closed like a local one: the zfs exit status, the snapshot
-# discovery stage report, and zero mutating or send/receive argv.
-test_remote_target_destination_listing_failure_fails_closed() {
-	planning_setup_env
-	planning_clone_state "$FIXTURE_DIR/incremental" remote_dstsnapfail
-	planning_force_manifest_failure \
-		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" 2
-
-	planning_run_remote_target_push
-	assertEquals "a failed -T destination snapshot listing must keep the zfs exit status; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		2 "$PLANNING_RUN_STATUS"
-	assertEquals "the listing must have run over the target master" \
-		1 "$(grep -c -- "ssh-target.sock localhost .*'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'" "$SSH_LOG")"
-	planning_assert_no_mutations
-	planning_assert_no_send_receive
-	planning_assert_failure_report "snapshot discovery" \
-		"Failed to retrieve snapshot list from the destination."
-}
-
-# Invariant (-T discovery): when the ssh call carrying the destination
-# snapshot listing fails, the run stops with ssh's exit status 255 and ssh's
-# diagnostic, sends no existence probe over that connection (a lost one would
-# turn the status into the probe's 1), and changes nothing.
-# shellcheck disable=SC2089,SC2090  # the quotes are part of the ssh argv glob
-test_remote_target_ssh_failure_during_discovery_fails_closed() {
-	planning_setup_env
-	planning_clone_state "$FIXTURE_DIR/incremental" remote_sshfail
-	mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
-	MOCK_FAIL_TOOL=ssh
-	MOCK_FAIL_CALL=1
-	MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
-	MOCK_FAIL_MATCH="*'list' '-Hr' '-o' 'name,guid' '-t' 'snapshot' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'"
-	export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH
-
-	planning_run_remote_target_push
-	unset MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH
-	assertEquals "an ssh failure during -T discovery must exit with ssh's status; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		255 "$PLANNING_RUN_STATUS"
-	assertEquals "exactly the listing's ssh call must have failed" \
-		1 "$(grep -c '^fail	' "$SSH_LOG")"
-	assertEquals "no existence probe may follow an undelivered listing" \
-		0 "$(grep -c -- "'list' '-H' '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT'" "$SSH_LOG")"
-	assertContains "ssh's diagnostic must reach stderr" \
-		"$(cat "$CASE_DIR/zxfer.stderr")" "Connection to localhost closed by remote host."
-	planning_assert_no_mutations
-	planning_assert_no_send_receive
-	planning_assert_failure_report "snapshot discovery" \
-		"Failed to retrieve snapshot list from the destination."
-}
-
-# Invariant (-T discovery): a missing -T destination root is bootstrapped
-# only after the live pool probe, run over the target master, lists its pool;
-# every dataset is then received.
-test_remote_target_bootstraps_a_missing_destination_root() {
-	planning_setup_env
-	planning_clone_state "$FIXTURE_DIR/noop" remote_missing_root
-	l_missing_pool=${ZXFER_MOCKBIN_DEST_ROOT%%/*}
-	printf '%s\n' "$l_missing_pool" >"$STATE_DIR/dst_pool.list"
-	printf 'list -H -o name %s\tdst_pool.list\t0\n' "$l_missing_pool" \
-		>>"$STATE_DIR/manifest" || fail "Unable to append the pool rule."
-	planning_make_remote_destination_root_missing
-
-	planning_run_remote_target_push
-	unset MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
-		MOCK_FAIL_STDERR MOCK_FAIL_STATUS
-	assertEquals "a missing -T root whose pool exists must be bootstrapped; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$PLANNING_RUN_STATUS"
-	assertEquals "the pool probe must run once, over the target master" \
-		1 "$(grep -c -- "ssh-target.sock localhost .*'list' '-H' '-o' 'name' '$l_missing_pool'" "$SSH_LOG")"
-	for l_missing_suffix in "" /child1 /child2; do
-		planning_assert_log_has_line \
-			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_missing_suffix"
-	done
-	planning_assert_no_mutations
-	assertNotContains "a bootstrap must not report a failure" \
-		"$(cat "$CASE_DIR/zxfer.stderr")" "zxfer: failure report begin"
-}
-
-# Invariant (-T discovery): a missing -T destination root whose pool cannot be
-# listed fails closed in discovery, before any send or receive.
-test_remote_target_missing_root_with_an_unlistable_pool_fails_closed() {
-	planning_setup_env
-	planning_clone_state "$FIXTURE_DIR/noop" remote_missing_pool
-	l_missing_pool=${ZXFER_MOCKBIN_DEST_ROOT%%/*}
-	printf 'list -H -o name %s\t-\t2\n' "$l_missing_pool" \
-		>>"$STATE_DIR/manifest" || fail "Unable to append the pool rule."
-	planning_make_remote_destination_root_missing
-
-	planning_run_remote_target_push
-	unset MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
-		MOCK_FAIL_STDERR MOCK_FAIL_STATUS
-	assertEquals "an unlistable -T pool must keep the pool probe's status; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		2 "$PLANNING_RUN_STATUS"
-	planning_assert_no_mutations
-	planning_assert_no_send_receive
-	planning_assert_failure_report "snapshot discovery" \
-		"Destination dataset [$ZXFER_MOCKBIN_DEST_ROOT] is missing and destination pool [$l_missing_pool] could not be listed"
-}
-
-# Invariant: when the origin's control master cannot be opened the run fails
-# closed before any other remote command or zfs call, with ssh's diagnostic
-# and the structured socket error, and leaves no master to close.
-test_remote_master_open_failure_fails_closed_before_any_remote_command() {
-	planning_setup_env
-	SSH_LOG="$CASE_DIR/ssh_master_failure.log"
-	: >"$SSH_LOG"
-	cat >"$MOCKBIN_DIR/ssh" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >>"$MOCK_SSH_LOG"
-for l_arg in "$@"; do
-	[ "$l_arg" = -S ] || continue
-	printf '%s\n' 'ssh: connect to host localhost port 22: Connection refused' >&2
-	exit 255
-done
-exit 0
-EOF
-	chmod +x "$MOCKBIN_DIR/ssh"
-	export MOCK_SSH_LOG="$SSH_LOG"
-
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/incremental" -O localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_master_failure_status=$?
-	unset MOCK_SSH_LOG
-
-	assertEquals "a failed master open must fail the run" 1 "$l_master_failure_status"
-	planning_assert_failure_report "cli validation" \
-		"Error creating ssh control socket for origin host."
-	assertContains "ssh's own diagnostic must reach the operator" \
-		"$(cat "$CASE_DIR/zxfer.stderr")" "Connection refused"
-	assertEquals "only the support probe and the master open may reach ssh" \
-		"-M -V
--o BatchMode=yes -o StrictHostKeyChecking=yes -M -S" \
-		"$(sed 's/ -M -S .*/ -M -S/' "$SSH_LOG")"
-	assertFalse "no zfs command may run" "[ -s '$ZFS_LOG' ]"
-}
-
-# Invariant: an invalid ZXFER_SSH_* policy fails the run at startup with the
-# policy diagnostic and a structured report even without -V, before any ssh
-# connection or zfs call.
-test_remote_invalid_ssh_policy_fails_at_startup_without_very_verbose() {
-	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write socket-aware mock ssh."
-	SSH_LOG="$CASE_DIR/ssh_invalid_policy.log"
-	: >"$SSH_LOG"
-	export MOCK_SSH_LOG="$SSH_LOG"
-	export ZXFER_SSH_USER_KNOWN_HOSTS_FILE=relative_known_hosts
-
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_invalid_policy_status=$?
-	unset MOCK_SSH_LOG ZXFER_SSH_USER_KNOWN_HOSTS_FILE
-
-	assertEquals "an invalid ssh policy must fail the run" 1 "$l_invalid_policy_status"
-	planning_assert_failure_report "cli validation" \
-		"ZXFER_SSH_USER_KNOWN_HOSTS_FILE must be an absolute path."
-	assertEquals "only the control-socket support probe may reach ssh" \
-		"-M -V" "$(cat "$SSH_LOG")"
-	assertFalse "no zfs command may run" "[ -s '$ZFS_LOG' ]"
-}
-
-# Invariant: an incremental remote-origin pull opens the per-run ssh control
-# master exactly ONCE, multiplexes later remote commands over that one
-# socket, probes capabilities exactly once, and closes the master once at
-# exit -- no per-command reconnect or per-command handshake regression.
-test_remote_origin_pull_incremental_opens_master_once() {
-	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write socket-aware mock ssh."
-	SSH_LOG="$CASE_DIR/ssh_pull_incr.log"
-	: >"$SSH_LOG"
-	export MOCK_SSH_LOG="$SSH_LOG"
-
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/incremental" -O localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_pull_incr_status=$?
-	unset MOCK_SSH_LOG
-
-	assertEquals "-O pull incremental must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_pull_incr_status"
-	for l_pull_suffix in "" /child1 /child2; do
-		planning_assert_log_has_line \
-			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_pull_suffix"
-	done
-	assertEquals "an incremental pull must open the ssh control master exactly once" \
-		1 "$(grep -c -- ' -M ' "$SSH_LOG")"
-	assertEquals "a warmed origin host must cost exactly one capability probe round trip" \
-		1 "$(planning_count_remote_script_marker 'ZXFER_REMOTE_CAPS_V2')"
-	assertEquals "the per-run ssh control master must be closed exactly once at exit" \
-		1 "$(grep -c -- ' -O exit ' "$SSH_LOG")"
-	l_master_socket=$(awk '/ -M /{for (i=1;i<NF;i++) if ($i=="-S") {print $(i+1); exit}}' "$SSH_LOG")
-	assertNotNull "the master open must carry a -S control socket path" "$l_master_socket"
-	l_multiplexed=$(grep -c -- "-S $l_master_socket" "$SSH_LOG")
-	assertTrue "remote send commands must multiplex over the one opened master socket" \
-		"[ ${l_multiplexed:-0} -ge 2 ]"
-	planning_assert_no_mutations
-}
-
-# Invariant: with a remote destination (-T) every destination-side property
-# read of the -P pass crosses the ssh transport and no source-side read does.
-# Regression for the zfs command dispatcher routing by comparing the
-# requested binary path against the source path first: with zfs installed at
-# the same path on both hosts (as here, where both "hosts" resolve the one
-# canned zfs) every destination `zfs get` silently ran against the LOCAL
-# pool, so the property diff compared the source with itself.
-test_remote_target_property_pass_reads_destination_properties_over_ssh() {
-	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write socket-aware mock ssh."
-	planning_clone_state "$FIXTURE_DIR/noop" remote_props
-	planning_add_property_transfer_fixtures
-	SSH_LOG="$CASE_DIR/ssh_remote_props.log"
-	: >"$SSH_LOG"
-	export MOCK_SSH_LOG="$SSH_LOG"
-
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$STATE_DIR" -T localhost -P -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_remote_props_status=$?
-	unset MOCK_SSH_LOG
-
-	assertEquals "-T -P no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_remote_props_status"
-	planning_assert_property_reads_routed_by_side
-	planning_assert_no_mutations
-	planning_assert_no_send_receive
 }
 
 # Invariant (-P, differing plain property): a settable property whose source
@@ -1747,24 +1249,30 @@ test_raw_send_option_adds_w_to_every_send() {
 }
 
 # Invariant (-x): a dataset matching the exclude pattern is never sent to or
-# received into; the others replicate normally.
+# received into; the others replicate normally. A pattern that starts with
+# "-" is still a pattern, never a grep option. (It holds no "h": the
+# launcher's early -h scan reads such an argument as an option cluster.)
 test_exclude_option_skips_matching_child() {
 	planning_setup_env
 
-	planning_run_zxfer "$FIXTURE_DIR/incremental" -x child1 -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_run_status=$?
-	assertEquals "-x run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	for l_exclude_pattern in child1 '-*ild1$'; do
+		: >"$ZFS_LOG"
+		planning_run_zxfer "$FIXTURE_DIR/incremental" -x "$l_exclude_pattern" -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		l_run_status=$?
+		assertEquals "-x run should exit 0 [pattern:$l_exclude_pattern]; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+			0 "$l_run_status"
 
-	for l_exclude_suffix in "" /child2; do
-		planning_assert_log_has_line \
-			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_exclude_suffix"
+		for l_exclude_suffix in "" /child2; do
+			planning_assert_log_has_line \
+				"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_exclude_suffix"
+		done
+		assertEquals "the excluded child must never be sent or received [pattern:$l_exclude_pattern]" \
+			0 "$(grep -E '^(send|receive) ' "$ZFS_LOG" | grep -c 'child1')"
+		assertEquals "the two remaining datasets are each sent once [pattern:$l_exclude_pattern]" \
+			2 "$(grep -c '^send ' "$ZFS_LOG")"
+		planning_assert_no_mutations
 	done
-	assertEquals "the excluded child must never be sent or received" \
-		0 "$(grep -E '^(send|receive) ' "$ZFS_LOG" | grep -c 'child1')"
-	assertEquals "the two remaining datasets are each sent once" \
-		2 "$(grep -c '^send ' "$ZFS_LOG")"
-	planning_assert_no_mutations
 }
 
 # Invariant (-F): every receive forces a rollback of the destination.
@@ -2001,394 +1509,1094 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# -k / -e property backup metadata contract. planning_backup_metadata_file
-# (tests/helpers/blackbox.sh) derives the documented layout independently.
+# Snapshot planning and destination state: deletes, -g, divergence, seeding
+# and the SunOS existence probes. These cases took over the white-box pins of
+# the snapshot-plan and destination-state unit suites.
 
-# Invariant (-k write-once): one live `-k -P` run over three datasets writes
-# the exact-pair file and the forwarded alias exactly once each: two `mv`
-# spawns for the whole run. The pre-2026-09 per-dataset flush cost 14+ mv
-# and mktemp spawns on the same fixture.
-test_backup_mode_writes_metadata_once_per_run() {
-	planning_setup_backup_env k_write
-
-	planning_run_backup_zxfer -k -P
-	l_run_status=$?
-	assertEquals "-k -P no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	planning_assert_no_mutations
-	planning_assert_no_send_receive
-	planning_assert_backup_file_is_current_format "$PRIMARY_FILE" \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
-	planning_assert_backup_file_is_current_format "$FORWARDED_FILE" \
-		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
-	assertEquals "each metadata file is published by exactly one rename per run" \
-		2 "$(grep -c '^mv$' "$SPAWN_LOG")"
-	case "$(ls -ldn "$BACKUP_ROOT")" in
-	drwx------*) ;;
-	*) fail "the backup root zxfer creates must be mode 0700: $(ls -ldn "$BACKUP_ROOT")" ;;
-	esac
+# Purpose: Drop child1's rows from both source snapshot listings in
+# STATE_DIR, so -d plans to delete every child1 destination snapshot, and
+# answer the live source recheck of child1 with the given output and status.
+# Usage: planning_empty_child1_source_listing <recheck-output> <status>
+planning_empty_child1_source_listing() {
+	l_empty_child="$ZXFER_MOCKBIN_SOURCE_ROOT/child1"
+	for l_empty_fixture in src_snapshots.list src_snapshots_dataset.list; do
+		grep -v "^$l_empty_child@" "$STATE_DIR/$l_empty_fixture" \
+			>"$STATE_DIR/$l_empty_fixture.new" ||
+			fail "Unable to drop $l_empty_child from $l_empty_fixture."
+		mv "$STATE_DIR/$l_empty_fixture.new" "$STATE_DIR/$l_empty_fixture" ||
+			fail "Unable to install the emptied $l_empty_fixture."
+	done
+	printf '%s' "$1" >"$STATE_DIR/src_recheck.list" ||
+		fail "Unable to write the live source recheck fixture."
+	printf 'list -H -d 1 -o name -t snapshot %s\tsrc_recheck.list\t%s\n' \
+		"$l_empty_child" "$2" >>"$STATE_DIR/manifest" ||
+		fail "Unable to append the live source recheck rule."
 }
 
-# Invariant (-k rewrite): a second run over the same pair replaces both files
-# through one rename each and keeps the single-row-per-dataset contract.
-test_backup_mode_second_run_rewrites_metadata_in_place() {
-	planning_setup_backup_env k_rewrite
+# Invariant (-d, full wipe): when a dataset's cached source listing holds no
+# snapshot, -d would delete every destination snapshot of it, so the source
+# is first listed again live. A recheck that finds snapshots skips the delete
+# with a warning; an empty one destroys them all in one comma-joined destroy
+# with no creation-time query and no re-list (nothing is left to send), and
+# transport noise in it is no snapshot; a failed recheck stops the run with
+# its status before any destroy.
+test_delete_option_rechecks_the_source_before_deleting_every_destination_snapshot() {
+	planning_setup_env
+	l_wipe_source="$ZXFER_MOCKBIN_SOURCE_ROOT/child1"
+	l_wipe_destroy="MUTATE destroy $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1@snap3,snap2,snap1"
 
-	planning_run_backup_zxfer -k -P
+	planning_clone_state "$FIXTURE_DIR/noop" wipe_live
+	planning_empty_child1_source_listing "$l_wipe_source@snap1" 0
+	planning_run_zxfer "$STATE_DIR" -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
-	assertEquals "first -k -P run must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	printf '#stale-marker\n' >>"$PRIMARY_FILE"
-
-	planning_run_backup_zxfer -k -P
-	l_run_status=$?
-	assertEquals "second -k -P run must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	planning_assert_backup_file_is_current_format "$PRIMARY_FILE" \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
-	planning_assert_backup_file_is_current_format "$FORWARDED_FILE" \
-		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
-	assertEquals "the rewrite is again one rename per file" \
-		2 "$(grep -c '^mv$' "$SPAWN_LOG")"
-	assertFalse "the rewrite must replace the previous file rather than append to it" \
-		"grep -q '#stale-marker' '$PRIMARY_FILE'"
-}
-
-# Invariant (symlink guards): a symlinked ZXFER_BACKUP_DIR is refused before
-# anything is written into its target, and a symlink planted at the exact
-# metadata path is refused without following it.
-test_backup_mode_refuses_symlinked_backup_directory_and_target() {
-	planning_setup_backup_env k_symlink
-	l_real_root="$CASE_DIR/backup_real"
-	mkdir -p "$l_real_root"
-	BACKUP_ROOT="$CASE_DIR/backup_link"
-	ln -s "$l_real_root" "$BACKUP_ROOT"
-
-	planning_run_backup_zxfer -k -P
-	assertNotEquals "a symlinked backup directory must fail the run" 0 $?
-	grep -q "Refusing to use backup directory" "$CASE_DIR/zxfer.stderr" ||
-		fail "expected the symlinked backup directory refusal; stderr: $(cat "$CASE_DIR/zxfer.stderr")"
-	assertEquals "nothing may be written through the symlinked root" \
-		"" "$(find "$l_real_root" -type f)"
+	assertEquals "a skipped wipe should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	planning_assert_log_has_line "list -H -d 1 -o name -t snapshot $l_wipe_source"
+	assertTrue "the skip must warn that the cached source listing was incomplete" \
+		"grep -Fq 'WARNING: skipping destination snapshot deletion for [$l_wipe_source]' '$CASE_DIR/zxfer.stderr'"
 	planning_assert_no_mutations
 
-	BACKUP_ROOT="$CASE_DIR/backup"
-	PRIMARY_FILE=$(planning_backup_metadata_file "$BACKUP_ROOT" \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT")
-	l_decoy="$CASE_DIR/decoy"
-	printf 'decoy\n' >"$l_decoy"
-	mkdir -p "${PRIMARY_FILE%/*}"
-	chmod 700 "${PRIMARY_FILE%/*}"
-	ln -s "$l_decoy" "$PRIMARY_FILE"
+	for l_wipe_case in empty noise; do
+		: >"$ZFS_LOG"
+		planning_clone_state "$FIXTURE_DIR/noop" "wipe_$l_wipe_case"
+		if [ "$l_wipe_case" = empty ]; then
+			planning_empty_child1_source_listing "" 0
+		else
+			planning_empty_child1_source_listing \
+				"Warning: Permanently added 'src' (ED25519) to the list of known hosts." 0
+		fi
+		planning_run_zxfer "$STATE_DIR" -d -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		l_run_status=$?
+		assertEquals "a confirmed wipe should exit 0 [$l_wipe_case]; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+			0 "$l_run_status"
+		planning_assert_log_has_line "$l_wipe_destroy"
+		assertEquals "the one destroy is the only mutation [$l_wipe_case]" \
+			1 "$(grep -c '^MUTATE ' "$ZFS_LOG")"
+		assertFalse "without a common snapshot or -g no creation time is read [$l_wipe_case]" \
+			"grep -q '^get -H -o name,value -p creation ' '$ZFS_LOG'"
+		assertFalse "with nothing left to send nothing is listed again [$l_wipe_case]" \
+			"grep -q '^list -H -d 1 -o name,guid ' '$ZFS_LOG'"
+	done
 
-	planning_run_backup_zxfer -k -P
-	assertNotEquals "a symlinked metadata target must fail the run" 0 $?
-	grep -q "Refusing to write backup metadata" "$CASE_DIR/zxfer.stderr" ||
-		fail "expected the symlinked target refusal; stderr: $(cat "$CASE_DIR/zxfer.stderr")"
-	assertEquals "the symlink target must be untouched" "decoy" "$(cat "$l_decoy")"
-	assertTrue "the planted symlink must not be replaced" "[ -L '$PRIMARY_FILE' ]"
-	assertEquals "no rename may run when the target is refused" \
-		0 "$(grep -c '^mv$' "$SPAWN_LOG")"
+	: >"$ZFS_LOG"
+	planning_clone_state "$FIXTURE_DIR/noop" wipe_failed
+	planning_empty_child1_source_listing "cannot open '$l_wipe_source': I/O error" 2
+	planning_run_zxfer "$STATE_DIR" -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "a failed recheck must stop the run with its status" 2 $?
+	planning_assert_failure_report replication \
+		"Failed to re-verify source snapshots for [$l_wipe_source] before deleting all destination snapshots: cannot open '$l_wipe_source': I/O error"
+	planning_assert_no_mutations
 }
 
-# Invariant (-e fail-closed reads): a legacy flat-layout file is never
-# consulted and an unsupported #format_version is rejected, both before any
-# zfs argv is issued and with zero MUTATE lines.
-test_restore_mode_rejects_legacy_layout_and_unsupported_format_version() {
-	planning_setup_backup_env e_reject
-	mkdir -p "$BACKUP_ROOT/$ZXFER_MOCKBIN_SOURCE_ROOT"
-	printf '%s\n%s\n%s\n' "#zxfer property backup file" "#format_version:1" \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT,$ZXFER_MOCKBIN_DEST_MAPPED_ROOT,compression=lz4" \
-		>"$BACKUP_ROOT/$ZXFER_MOCKBIN_SOURCE_ROOT/.zxfer_backup_info.data"
-	chmod 600 "$BACKUP_ROOT/$ZXFER_MOCKBIN_SOURCE_ROOT/.zxfer_backup_info.data"
+# Invariant (-d, fail closed): a failed creation-time query or destroy stops
+# the run with that zfs call's status and diagnostic, and no destroy starts.
+test_delete_failures_keep_the_zfs_status_and_diagnostic() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" delete_failures
+	planning_add_extra_destination_snapshot
 
-	planning_run_backup_zxfer -e
-	assertNotEquals "-e with only a legacy layout must fail" 0 $?
-	grep -q "Cannot find backup property file" "$CASE_DIR/zxfer.stderr" ||
-		fail "expected the missing-backup error; stderr: $(cat "$CASE_DIR/zxfer.stderr")"
-	assertEquals "the restore must fail before any zfs argv" "" "$(cat "$ZFS_LOG" 2>/dev/null)"
-
-	planning_run_backup_zxfer -k -P
-	l_run_status=$?
-	assertEquals "-k -P must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	sed 's/^#format_version:2$/#format_version:999/' "$PRIMARY_FILE" >"$CASE_DIR/bad_version"
-	cat "$CASE_DIR/bad_version" >"$PRIMARY_FILE"
-	: >"$ZFS_LOG"
-
-	planning_run_backup_zxfer -e
-	assertNotEquals "-e with an unsupported format version must fail" 0 $?
-	grep -q "does not declare supported zxfer backup metadata format version #format_version:2" \
-		"$CASE_DIR/zxfer.stderr" ||
-		fail "expected the unsupported-version error; stderr: $(cat "$CASE_DIR/zxfer.stderr")"
-	assertEquals "the rejected restore must fail before any zfs argv" "" "$(cat "$ZFS_LOG" 2>/dev/null)"
+	for l_delfail_case in \
+		"get -H -o name,value -p creation *|5|Failed to query destination snapshot creation times while planning snapshot deletions." \
+		"destroy *|6|Error when executing command."; do
+		l_delfail_match=${l_delfail_case%%|*}
+		l_delfail_rest=${l_delfail_case#*|}
+		l_delfail_status=${l_delfail_rest%%|*}
+		: >"$ZFS_LOG"
+		rm -rf "$CASE_DIR/fail_calls"
+		mkdir "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
+		# Export in a subshell: FreeBSD sh does not export a prefix assignment
+		# on a function call.
+		(
+			MOCK_FAIL_TOOL=zfs
+			MOCK_FAIL_CALL=1
+			MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
+			MOCK_FAIL_MATCH=$l_delfail_match
+			MOCK_FAIL_STATUS=$l_delfail_status
+			MOCK_FAIL_STDERR="Permission denied (publickey)."
+			export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
+				MOCK_FAIL_STATUS MOCK_FAIL_STDERR
+			planning_run_zxfer "$STATE_DIR" -d -R \
+				"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		)
+		l_run_status=$?
+		assertEquals "a failed [$l_delfail_match] must keep its status; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+			"$l_delfail_status" "$l_run_status"
+		planning_assert_failure_report replication "${l_delfail_rest#*|}"
+		assertTrue "the zfs diagnostic must reach stderr [$l_delfail_match]" \
+			"grep -Fqx 'Permission denied (publickey).' '$CASE_DIR/zxfer.stderr'"
+		planning_assert_no_mutations
+	done
 }
 
-# Invariant (-e restore): the source side reads the exact-pair file and the
-# plan applies the RECORDED value (compression=lz4) even though the live
-# source and destination both report gzip now.
-test_restore_mode_applies_recorded_properties() {
-	planning_setup_backup_env e_restore
+# Invariant (-d, names with spaces): the creation-time query, the destroy and
+# the re-list after it pass a dataset name holding a space as one argument.
+test_delete_option_keeps_dataset_names_with_spaces_whole() {
+	planning_use_fixture_roots "srcpool/my data" "$ZXFER_MOCKBIN_DEST_ROOT" \
+		"$ZXFER_MOCKBIN_DEST_ROOT/my data"
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" delete_spaces
+	planning_add_extra_destination_snapshot
+	planning_log_canned_zfs_argv
+	l_spaces_root=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT
 
-	planning_run_backup_zxfer -k -P
+	planning_run_zxfer "$STATE_DIR" -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
-	assertEquals "-k -P must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	assertEquals "-d over names with spaces should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	for l_spaces_argv in \
+		"[get] [-H] [-o] [name,value] [-p] [creation] [$l_spaces_root@snap3] [$l_spaces_root@snap9] " \
+		"[destroy] [$l_spaces_root@snap9] " \
+		"[list] [-H] [-d] [1] [-o] [name,guid] [-t] [snapshot] [$l_spaces_root] "; do
+		assertTrue "zfs must get [$l_spaces_argv]; argv: $(cat "$ARGV_LOG")" \
+			"grep -Fxq '$l_spaces_argv' '$ARGV_LOG'"
+	done
+	assertEquals "the destroy is the only mutation" 1 "$(grep -c '^MUTATE ' "$ZFS_LOG")"
+}
 
-	l_drifted_rows=$(planning_property_rows_with "$(planning_property_default_rows)" \
-		compression gzip local)
-	planning_add_property_fixtures_for_rows "$l_drifted_rows" "$l_drifted_rows" \
-		"$l_drifted_rows" "$l_drifted_rows"
-	: >"$ZFS_LOG"
+# Invariant (-d -g report): refusing to destroy a protected snapshot is a
+# usage error (exit 2) whose report names the -g limit and the snapshot with
+# its age and creation date, and says how to recover.
+test_grandfather_refusal_names_the_limit_and_the_protected_snapshot() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" grandfather_report
+	planning_add_extra_destination_snapshot
 
-	planning_run_backup_zxfer -e
+	planning_run_zxfer "$STATE_DIR" -d -g 30 -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "a -g refusal is a usage error" 2 $?
+	for l_grandfather_line in \
+		"failure_class: usage" \
+		"You have set grandfather protection at 30 days." \
+		"Snapshot name: $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap9" \
+		"Snapshot date: " \
+		"Either amend/remove option g, fix your system date, or manually"; do
+		grep -Fq -- "$l_grandfather_line" "$CASE_DIR/zxfer.stderr" ||
+			fail "Missing -g refusal line: $l_grandfather_line
+stderr: $(cat "$CASE_DIR/zxfer.stderr")"
+	done
+	assertTrue "the refusal must give the snapshot's age in days" \
+		"grep -Eq 'Snapshot age : [0-9]+ days old' '$CASE_DIR/zxfer.stderr'"
+	planning_assert_no_mutations
+}
+
+# Purpose: Diverge child1's newest destination snapshot (@snap2, guid
+# 9999900102000000007) in an incremental STATE_DIR until its convergence
+# receive: one 'once' rule serves the diverged recursive listing (the fast
+# no-op proof's, which discovery reuses), one serves the post-destroy
+# depth-1 listing to the re-plan, and the post-receive check falls through to
+# the aligned listing. Adds the creation-time and existence rules that the
+# destroy and the rollback read.
+# Usage: planning_make_child1_diverged_until_receive
+planning_make_child1_diverged_until_receive() {
+	l_diverged_child="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1"
+	awk -F'\t' -v name="$l_diverged_child@snap2" 'BEGIN { OFS = "\t" }
+		$1 == name { $2 = "9999900102000000007" }
+		{ print }
+	' "$STATE_DIR/dst_snapshots.list" >"$STATE_DIR/dst_snapshots_diverged.list" ||
+		fail "Unable to write the diverged listing."
+	grep -v "^$l_diverged_child@snap2" "$STATE_DIR/dst_d1_1.list" \
+		>"$STATE_DIR/dst_d1_1_post_destroy.list" ||
+		fail "Unable to write the post-destroy listing."
+	printf '%s@snap1\t1700000001\n%s@snap2\t1700000002\n' \
+		"$l_diverged_child" "$l_diverged_child" \
+		>"$STATE_DIR/dst_child1_creation.list" ||
+		fail "Unable to write the creation-time fixture."
+	printf '%s\t96K\t1.0G\t24K\t/%s\n' "$l_diverged_child" "$l_diverged_child" \
+		>"$STATE_DIR/dst_exists_child1.list" ||
+		fail "Unable to write the existence fixture."
+	awk -F'\t' \
+		-v key="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
+		-v d1_key="list -H -d 1 -o name,guid -t snapshot $l_diverged_child" '
+		BEGIN { OFS = "\t" }
+		$1 == key { print key, "dst_snapshots_diverged.list", 0, "once" }
+		$1 == d1_key { print d1_key, "dst_d1_1_post_destroy.list", 0, "once" }
+		{ print }
+	' "$STATE_DIR/manifest" >"$STATE_DIR/manifest.new" ||
+		fail "Unable to stage the consumable diverged listing rules."
+	mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
+		fail "Unable to install the consumable diverged listing rules."
+	printf '%s\t%s\t0\n' \
+		"get -H -o name,value -p creation $l_diverged_child@*" dst_child1_creation.list \
+		"list -H $l_diverged_child" dst_exists_child1.list >>"$STATE_DIR/manifest" ||
+		fail "Unable to append the creation-time and existence rules."
+}
+
+# Invariant (-d -F -g, divergence): the -g pre-pass plans every dataset and
+# the main pass plans it again, yet a diverged dataset warns and counts once.
+# While child1 carries its convergence mark, the root's receive is not
+# checked against a live listing: only child1 is listed at depth 1, before
+# its rollback and after its receive. -V names each planned dataset's last
+# common snapshot.
+test_grandfather_prepass_warns_once_and_checks_only_the_diverged_child() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" prepass_diverged_child
+	planning_make_child1_diverged_until_receive
+	l_prepass_child="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1"
+	l_prepass_tab=$(printf '\t')
+
+	planning_run_zxfer "$STATE_DIR" -V -d -F -g 36500 -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
-	assertEquals "-e must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	for l_restore_suffix in "" /child1 /child2; do
+	assertEquals "-V -d -F -g over a diverged child should converge and exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	assertEquals "the pre-pass and the main pass must warn about child1 once" \
+		1 "$(grep -cF "WARNING: destination dataset [$l_prepass_child] has 1 snapshot" "$CASE_DIR/zxfer.stderr")"
+	assertTrue "the -V profile must count the warned dataset once" \
+		"grep -Fq 'zxfer profile: diverged_snapshot_warnings=1' '$CASE_DIR/zxfer.stderr'"
+	assertEquals "only child1 is listed at depth 1: for its re-plan and its post-receive check" \
+		"2 2" "$(grep -c '^list -H -d 1 ' "$ZFS_LOG") $(grep -cFx "list -H -d 1 -o name,guid -t snapshot $l_prepass_child" "$ZFS_LOG")"
+	planning_assert_log_has_line "MUTATE rollback -r $l_prepass_child@snap1"
+	for l_prepass_suffix in "" /child1 /child2; do
 		planning_assert_log_has_line \
-			"MUTATE set compression=lz4 $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_restore_suffix"
+			"receive -F $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_prepass_suffix"
 	done
-	assertEquals "the restore sets exactly the recorded property on each dataset" \
-		3 "$(grep -c '^MUTATE ' "$ZFS_LOG")"
-	assertFalse "the drifted live value must never be applied" \
-		"grep -q 'compression=gzip' '$ZFS_LOG'"
-	planning_assert_no_send_receive
+	assertTrue "-V must name each dataset's last common snapshot" \
+		"grep -Fq 'Found last common snapshot: $ZXFER_MOCKBIN_SOURCE_ROOT@snap2${l_prepass_tab}1000000002000000007.' '$CASE_DIR/zxfer.stderr'"
 }
 
-# Invariant (-T -k): with a remote destination both metadata files are
-# published together through one ssh write script, and land
-# with the same layout and 0600 mode (the mock ssh runs the rendered script
-# locally through `sh -c`).
-test_remote_target_backup_mode_writes_metadata_through_ssh() {
-	planning_setup_backup_env k_remote
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write socket-aware mock ssh."
-	SSH_LOG="$CASE_DIR/ssh_backup.log"
-	: >"$SSH_LOG"
-	export MOCK_SSH_LOG="$SSH_LOG"
+# Invariant (post-receive check, fail closed): when the live listing that
+# checks a converged dataset after its receive fails, the run stops with a
+# report naming the dataset and carrying the listing's output.
+test_post_receive_divergence_check_fails_closed_when_its_listing_fails() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" verify_listing_failure
+	planning_make_destination_diverged_until_receive
+	l_verify_root=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT
+	printf "cannot open '%s': I/O error\n" "$l_verify_root" \
+		>"$STATE_DIR/verify_failure.list" ||
+		fail "Unable to write the listing failure fixture."
+	# The re-plan keeps its 'once' rule; the check after the receive fails.
+	awk -F'\t' -v key="list -H -d 1 -o name,guid -t snapshot $l_verify_root" '
+		BEGIN { OFS = "\t" }
+		$1 == key && $4 != "once" { print key, "verify_failure.list", 2; next }
+		{ print }
+	' "$STATE_DIR/manifest" >"$STATE_DIR/manifest.new" ||
+		fail "Unable to stage the failing check rule."
+	mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
+		fail "Unable to install the failing check rule."
 
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_backup_zxfer -T localhost -k -P
-	l_remote_backup_status=$?
-	unset MOCK_SSH_LOG
+	planning_run_zxfer "$STATE_DIR" -d -F -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "a failed post-receive listing must stop the run" 1 $?
+	planning_assert_log_has_line "receive -F $l_verify_root"
+	for l_verify_line in \
+		"zxfer: failure report begin" \
+		"failure_class: runtime" \
+		"message: Failed to retrieve live destination snapshots for [$l_verify_root] during post-receive divergence verification: cannot open '$l_verify_root': I/O error"; do
+		grep -Fq -- "$l_verify_line" "$CASE_DIR/zxfer.stderr" ||
+			fail "Missing failure report line: $l_verify_line
+stderr: $(cat "$CASE_DIR/zxfer.stderr")"
+	done
+}
 
-	assertEquals "-T -k -P no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_remote_backup_status"
+# Invariant: a destination snapshot row without a guid fails its dataset's
+# plan closed like a source row does: the planner's exit 3, a report naming
+# both datasets, and nothing received into that dataset.
+test_guidless_destination_row_fails_its_dataset_plan_closed() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" guidless_destination_row
+	l_guidless_source="$ZXFER_MOCKBIN_SOURCE_ROOT/child1"
+	l_guidless_dest="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1"
+	awk -F'\t' -v row="$l_guidless_dest@snap2" \
+		'$1 == row { print $1; next } { print }' \
+		"$FIXTURE_DIR/incremental/dst_snapshots.list" >"$STATE_DIR/dst_snapshots.list" ||
+		fail "Unable to strip the guid from one destination row."
+
+	planning_run_zxfer "$STATE_DIR" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "a guid-less destination row must stop the run with the planner's status" \
+		3 "$l_run_status"
+	planning_assert_failure_report replication \
+		"message: Failed to determine the last common snapshot for [$l_guidless_source] and [$l_guidless_dest]."
+	assertFalse "nothing may be received into the dataset with the guid-less row" \
+		"grep -q '^receive $l_guidless_dest\$' '$ZFS_LOG'"
 	planning_assert_no_mutations
-	planning_assert_no_send_receive
-	planning_assert_backup_file_is_current_format "$PRIMARY_FILE" \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
-	planning_assert_backup_file_is_current_format "$FORWARDED_FILE" \
-		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
-	assertEquals "one remote write script publishes the metadata pair" \
-		1 "$(planning_count_remote_script_marker '.zxfer-backup-write')"
 }
 
-# Invariant (-e retired name): a current-format file under the retired name
-# .zxfer_backup_info.<tail>.k<cksum>.<length>, where cksum hashes
-# "srcpool/data<LF>dstpool/back" with no final newline, still restores.
-test_restore_mode_reads_a_current_file_under_the_retired_cksum_name() {
-	planning_setup_backup_env e_retired
-	planning_run_backup_zxfer -k -P
+# Invariant (seed): a destination dataset that exists without snapshots is
+# seeded with every source snapshot, oldest first: a forced full receive of
+# the oldest, then one increment to the newest. One whose snapshots share no
+# guid with the source is refused before anything is sent.
+test_snapshotless_destination_is_seeded_oldest_first_and_unrelated_snapshots_are_refused() {
+	planning_setup_env
+	l_seed_source="$ZXFER_MOCKBIN_SOURCE_ROOT/child2"
+	l_seed_dest="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child2"
+
+	planning_clone_state "$FIXTURE_DIR/noop" seed_empty
+	grep -v "^$l_seed_dest@" "$FIXTURE_DIR/noop/dst_snapshots.list" \
+		>"$STATE_DIR/dst_snapshots.list" ||
+		fail "Unable to drop the child2 destination snapshots."
+	planning_run_zxfer "$STATE_DIR" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
-	assertEquals "-k -P must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	mv "$PRIMARY_FILE" "$BACKUP_ROOT/$ZXFER_MOCKBIN_SOURCE_ROOT/.zxfer_backup_info.data.k1095302263.25" ||
-		fail "Unable to rename the metadata file to its retired name."
-	l_drifted_rows=$(planning_property_rows_with "$(planning_property_default_rows)" \
-		compression gzip local)
-	planning_add_property_fixtures_for_rows "$l_drifted_rows" "$l_drifted_rows" \
-		"$l_drifted_rows" "$l_drifted_rows"
+	assertEquals "seeding a snapshot-less child2 should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	# Either side of a send | receive pipeline may log first, so sends and
+	# receives are compared as two sequences.
+	assertEquals "child2 is seeded with its oldest snapshot, then sent one increment to the newest" \
+		"send $l_seed_source@snap1
+send -I $l_seed_source@snap1 $l_seed_source@snap3" "$(grep '^send ' "$ZFS_LOG")"
+	assertEquals "the seed is received with -F and the increment without" \
+		"receive -F $l_seed_dest
+receive $l_seed_dest" "$(grep '^receive ' "$ZFS_LOG")"
+	planning_assert_no_mutations
+
 	: >"$ZFS_LOG"
-
-	planning_run_backup_zxfer -e
-	l_run_status=$?
-	assertEquals "-e must restore from the retired name; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	for l_restore_suffix in "" /child1 /child2; do
-		planning_assert_log_has_line \
-			"MUTATE set compression=lz4 $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_restore_suffix"
-	done
-	assertFalse "restore never writes the current name" "[ -e '$PRIMARY_FILE' ]"
+	planning_clone_state "$FIXTURE_DIR/noop" seed_unrelated
+	# child2's snapshots become ones the source never had (other names and
+	# guids), so no snapshot is common and none is diverged.
+	awk -F'\t' -v prefix="$l_seed_dest@snap" 'BEGIN { OFS = "\t" }
+		index($1, prefix) == 1 { sub(/@snap/, "@other", $1); $2 = "8888800201000000007" }
+		{ print }
+	' "$FIXTURE_DIR/noop/dst_snapshots.list" >"$STATE_DIR/dst_snapshots.list" ||
+		fail "Unable to replace the child2 destination snapshots."
+	planning_run_zxfer "$STATE_DIR" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "a destination with only unrelated snapshots must be refused" 1 $?
+	planning_assert_failure_report replication \
+		"Destination dataset [$l_seed_dest] has snapshots but none share a common guid with the source."
+	planning_assert_no_send_receive
+	planning_assert_no_mutations
 }
 
-# Invariant (-k retired alias): a version-1 forwarded alias under the retired
-# name (cksum of "srcpool/data<LF>srcpool/data") fails the chained -k run
-# closed instead of silently recording live properties.
-test_backup_mode_refuses_a_v1_forwarded_alias_under_the_retired_name() {
-	planning_setup_backup_env k_retired_alias
-	l_retired_alias="$BACKUP_ROOT/$ZXFER_MOCKBIN_SOURCE_ROOT/.zxfer_backup_info.data.k2770155462.25"
-	(umask 077 && mkdir -p "${l_retired_alias%/*}") ||
-		fail "Unable to create the retired alias directory."
-	printf '%s\n' "#zxfer property backup file" "#format_version:1" \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT,$ZXFER_MOCKBIN_SOURCE_ROOT,compression=gzip" \
-		>"$l_retired_alias"
-	chmod 600 "$l_retired_alias"
+# Invariant (environment): a convergence mark inherited from the environment
+# cannot let a diverged dataset through without -d and -F: the run still
+# fails closed in divergence reconciliation before any send.
+test_inherited_convergence_mark_cannot_bypass_the_divergence_contract() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" inherited_mark
+	planning_make_destination_diverged
 
-	planning_run_backup_zxfer -k -P
-	assertNotEquals "a v1 alias must fail the -k run" 0 $?
-	grep -q "Forwarded backup property file $l_retired_alias does not declare supported zxfer backup metadata format version #format_version:2." \
-		"$CASE_DIR/zxfer.stderr" ||
-		fail "expected the forwarded version refusal; stderr: $(cat "$CASE_DIR/zxfer.stderr")"
-	assertFalse "no metadata may be written" "[ -e '$PRIMARY_FILE' ]"
-	assertFalse "no alias may be written" "[ -e '$FORWARDED_FILE' ]"
+	# Export in a subshell: FreeBSD sh does not export a prefix assignment on
+	# a function call.
+	(
+		g_zxfer_diverged_converged_datasets=$(printf '%s\t%s' \
+			"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZXFER_MOCKBIN_SOURCE_ROOT")
+		export g_zxfer_diverged_converged_datasets
+		planning_run_zxfer "$STATE_DIR" -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	)
+	assertEquals "an inherited mark must not let divergence through" 1 $?
+	planning_assert_failure_report "divergence reconciliation" \
+		"Destination dataset [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT] has diverged from source dataset [$ZXFER_MOCKBIN_SOURCE_ROOT]"
+	planning_assert_no_send_receive
+	planning_assert_no_mutations
 }
 
-# Invariant (-k chained provenance): an alias left by an earlier hop for a
-# child dataset (keyed srcpool/data/child1 on both sides) supplies that
-# child's row; datasets it does not cover keep their live properties.
-test_backup_mode_forwards_an_alias_below_the_source_root() {
-	planning_setup_backup_env k_child_alias
-	l_child=$ZXFER_MOCKBIN_SOURCE_ROOT/child1
-	l_child_alias=$(planning_backup_metadata_file "$BACKUP_ROOT" "$l_child" "$l_child")
-	(umask 077 && mkdir -p "${l_child_alias%/*}") ||
-		fail "Unable to create the child alias directory."
-	printf '%s\n' "#zxfer property backup file" "#format_version:2" \
-		"#source_root:$l_child" "#destination_root:$l_child" \
-		".	compression=gzip=local" >"$l_child_alias"
-	chmod 600 "$l_child_alias"
-
-	planning_run_backup_zxfer -k -P
-	l_run_status=$?
-	assertEquals "-k -P must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	assertTrue "child1 records the forwarded provenance: $(cat "$PRIMARY_FILE")" \
-		"grep -Fxq 'child1	compression=gzip=local' '$PRIMARY_FILE'"
-	for l_live_key in . child2; do
-		grep -q "^$l_live_key	.*compression=lz4=local" "$PRIMARY_FILE" ||
-			fail "row $l_live_key must keep the live properties: $(cat "$PRIMARY_FILE")"
-	done
+# Purpose: Put a uname in MOCKBIN_DIR that names the given operating system
+# ("mockhost" for -n), so zxfer takes that platform's code paths.
+# Usage: planning_write_mock_uname <os>
+planning_write_mock_uname() {
+	cat >"$MOCKBIN_DIR/uname" <<EOF
+#!/bin/sh
+case "\${1:-}" in
+-n) printf '%s\n' mockhost ;;
+*) printf '%s\n' '$1' ;;
+esac
+EOF
+	chmod +x "$MOCKBIN_DIR/uname"
 }
 
-# Invariant (-O -k chained provenance): over ssh the same child alias is
-# found through ONE listing of the origin's storage directories, and only the
-# roots that listing reports are read.
-test_remote_origin_backup_mode_forwards_an_alias_below_the_source_root() {
-	planning_setup_backup_env k_remote_child_alias
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write socket-aware mock ssh."
-	l_child=$ZXFER_MOCKBIN_SOURCE_ROOT/child1
-	l_child_alias=$(planning_backup_metadata_file "$BACKUP_ROOT" "$l_child" "$l_child")
-	(umask 077 && mkdir -p "${l_child_alias%/*}") ||
-		fail "Unable to create the child alias directory."
-	printf '%s\n' "#zxfer property backup file" "#format_version:2" \
-		"#source_root:$l_child" "#destination_root:$l_child" \
-		".	compression=gzip=local" >"$l_child_alias"
-	chmod 600 "$l_child_alias"
-	SSH_LOG="$CASE_DIR/ssh_backup_origin.log"
-	: >"$SSH_LOG"
-	export MOCK_SSH_LOG="$SSH_LOG"
-
-	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_backup_zxfer -O localhost -k -P
-	l_remote_origin_status=$?
-	unset MOCK_SSH_LOG
-
-	assertEquals "-O -k -P must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_remote_origin_status"
-	assertTrue "child1 records the forwarded provenance: $(cat "$PRIMARY_FILE")" \
-		"grep -Fxq 'child1	compression=gzip=local' '$PRIMARY_FILE'"
-	grep -q "^\.	.*compression=lz4=local" "$PRIMARY_FILE" ||
-		fail "the root row must keep the live properties: $(cat "$PRIMARY_FILE")"
-	assertEquals "one listing of the origin's storage directories" \
-		1 "$(planning_count_remote_script_marker 'l_listing_dir')"
-}
-
-# Purpose: Run a first -k -P hop from SOURCE_ROOT into DEST_ROOT that excludes
-# its own source root with -x, so zxfer itself writes the forwarded alias of
-# MAPPED_ROOT with child rows (compression=gzip) and no "." row. Restores the
-# default fixture roots for the next hop; BACKUP_ROOT stays the case's.
-# Usage: planning_run_rootless_backup_hop SOURCE_ROOT DEST_ROOT MAPPED_ROOT
-planning_run_rootless_backup_hop() {
-	planning_use_fixture_roots "$1" "$2" "$3"
-	planning_setup_backup_env rootless_hop
-	l_hop_rows=$(planning_property_default_rows)
-	planning_add_property_fixtures_for_rows "$l_hop_rows" \
-		"$(planning_property_rows_with "$l_hop_rows" compression gzip local)" \
-		"$l_hop_rows" "$l_hop_rows"
-
-	planning_run_backup_zxfer -k -P -x "^$1\$"
-	l_run_status=$?
-	assertEquals "hop 1 must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	assertTrue "hop 1 must write the forwarded alias of $3" "[ -f '$FORWARDED_FILE' ]"
-	assertFalse "the alias must have no row for its own root: $(cat "$FORWARDED_FILE")" \
-		"grep -q '^\.	' '$FORWARDED_FILE'"
-	planning_use_fixture_roots "$planning_default_source_root" \
-		"$planning_default_dest_root" "$planning_default_dest_mapped_root"
-}
-
-# Invariant (-k chained, root excluded below the source root): a hop that
-# excluded its own root with -x leaves an alias without a "." row for
-# srcpool/data/child1. A later -k of the parent reads it, finds no row for
-# child1 there, and records every dataset. Regression: the run stopped at
-# child1 with "does not contain a current-format relative row".
-test_backup_mode_chains_through_an_alias_without_its_root_row_below_the_source_root() {
-	planning_run_rootless_backup_hop qpool/child1 "$ZXFER_MOCKBIN_SOURCE_ROOT" \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT/child1"
-	planning_setup_backup_env rootless_below
-
-	planning_run_backup_zxfer -k -P
-	l_run_status=$?
-	assertEquals "the chained -k -P run must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	planning_assert_backup_file_is_current_format "$PRIMARY_FILE" \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
-}
-
-# Invariant (-k chained, root excluded at the source root): the alias of
-# srcpool/data itself has no "." row, so the root keeps its live properties
-# while child1 and child2 record the forwarded gzip rows.
-test_backup_mode_forwards_child_rows_from_an_alias_without_its_root_row() {
-	planning_run_rootless_backup_hop qpool/data "${ZXFER_MOCKBIN_SOURCE_ROOT%/*}" \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT"
-	planning_setup_backup_env rootless_at_root
-
-	planning_run_backup_zxfer -k -P
-	l_run_status=$?
-	assertEquals "the chained -k -P run must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	grep -q "^\.	.*compression=lz4=local" "$PRIMARY_FILE" ||
-		fail "the root row must keep the live properties: $(cat "$PRIMARY_FILE")"
-	for l_forwarded_key in child1 child2; do
-		grep -q "^$l_forwarded_key	.*compression=gzip=local" "$PRIMARY_FILE" ||
-			fail "row $l_forwarded_key must record the forwarded properties: $(cat "$PRIMARY_FILE")"
-	done
-}
-
-# Invariant (-n -k): a dry run previews only the backup-root preparation;
-# with no property pass there is nothing to write, and nothing is created.
-test_dry_run_backup_mode_previews_only_the_backup_root() {
-	planning_setup_backup_env k_dry_run
-
-	planning_run_backup_zxfer -n -v -k -P
-	l_run_status=$?
-	assertEquals "-n -k -P must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	assertEquals "the preview is the root preparation plus the no-data note" \
-		"Dry run: umask 077; 'mkdir' '-p' '$BACKUP_ROOT'; 'chmod' '700' '$BACKUP_ROOT'
-No property data collected; skipping backup write." "$(cat "$CASE_DIR/zxfer.stdout")"
-	assertEquals "a dry run issues no zfs argv" "" "$(cat "$ZFS_LOG" 2>/dev/null)"
-	assertFalse "a dry run creates no backup root" "[ -e '$BACKUP_ROOT' ]"
-}
-
-# Invariant (-k write boundary): rows are published only at run end, so a
-# run that fails at a later dataset leaves the previous complete files
-# byte-identical and no stage file behind.
-test_backup_mode_failure_partway_keeps_the_previous_files() {
-	planning_setup_backup_env k_partial
-	planning_run_backup_zxfer -k -P
-	l_run_status=$?
-	assertEquals "the first -k -P run must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
-	cp "$PRIMARY_FILE" "$CASE_DIR/primary.before"
-	cp "$FORWARDED_FILE" "$CASE_DIR/forwarded.before"
-
-	planning_clone_state "$FIXTURE_DIR/incremental" k_partial_incremental
-	planning_add_property_transfer_fixtures
+# Purpose: Make the mapped destination root in STATE_DIR ambiguous the SunOS
+# way: its snapshot listing and every exact `list -H` probe at or below it
+# fail without a diagnostic, and the dataset inventory lists only its parent.
+# The parent's recursive listing answers the first rows and status, the
+# pool's the second ("-" for no output, "," between lines), and the root's
+# lists the root, as it would after its seed receive.
+# Usage: planning_make_destination_root_ambiguous <parent-rows> <status>
+# <pool-rows> <status>
+planning_make_destination_root_ambiguous() {
+	l_ambiguous_root=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT
+	l_ambiguous_parent=$ZXFER_MOCKBIN_DEST_ROOT
+	l_ambiguous_parent_fixture=-
+	l_ambiguous_pool_fixture=-
+	if [ "$1" != - ]; then
+		printf '%s\n' "$1" | tr ',' '\n' >"$STATE_DIR/parent_listing.list" ||
+			fail "Unable to write the parent listing fixture."
+		l_ambiguous_parent_fixture=parent_listing.list
+	fi
+	if [ "$3" != - ]; then
+		printf '%s\n' "$3" | tr ',' '\n' >"$STATE_DIR/pool_listing.list" ||
+			fail "Unable to write the pool listing fixture."
+		l_ambiguous_pool_fixture=pool_listing.list
+	fi
+	printf '%s\n' "$l_ambiguous_root" >"$STATE_DIR/root_listing.list" ||
+		fail "Unable to write the root listing fixture."
+	printf '%s\n' "$l_ambiguous_parent" >"$STATE_DIR/dst_datasets.list" ||
+		fail "Unable to write the dataset inventory fixture."
 	{
-		printf 'receive*child2*\t-\t1\n'
+		printf '%s\t-\t1\n' \
+			"list -Hr -o name,guid -t snapshot $l_ambiguous_root" \
+			"list -H $l_ambiguous_root*"
+		printf '%s\t%s\t%s\n' \
+			"list -H -r -o name $l_ambiguous_parent" "$l_ambiguous_parent_fixture" "$2" \
+			"list -H -r -o name ${l_ambiguous_parent%%/*}" "$l_ambiguous_pool_fixture" "$4" \
+			"list -H -r -o name $l_ambiguous_root" root_listing.list 0
 		cat "$STATE_DIR/manifest"
 	} >"$STATE_DIR/manifest.new" ||
-		fail "Unable to inject the child2 receive failure."
+		fail "Unable to prepend the ambiguous probe rules."
 	mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
-		fail "Unable to install the rewritten manifest."
-	: >"$ZFS_LOG"
+		fail "Unable to install the ambiguous probe rules."
+}
 
-	planning_run_backup_zxfer -k -P
-	assertNotEquals "the run must fail at child2" 0 $?
-	planning_assert_log_has_line "END receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1"
-	assertTrue "the primary file is unchanged" "cmp -s '$CASE_DIR/primary.before' '$PRIMARY_FILE'"
-	assertTrue "the forwarded alias is unchanged" "cmp -s '$CASE_DIR/forwarded.before' '$FORWARDED_FILE'"
-	assertEquals "no stage file is left behind" \
-		"" "$(find "$BACKUP_ROOT" -name '.zxfer-backup-*')"
+# Invariant (SunOS existence probes): OmniOS zfs list fails without a
+# diagnostic for a missing dataset, so on SunOS an ambiguous exact probe is
+# settled by a recursive listing of the parent and, when that is ambiguous
+# too, of each ancestor. A root proven missing is bootstrapped and seeded
+# from its oldest snapshot; a root listed there exists, so its failed
+# snapshot listing stops the run; anything unproven fails closed in
+# discovery with nothing sent. Elsewhere the same silent probe fails closed
+# at once. -V traces each fallback listing.
+test_sunos_ambiguous_existence_probes_decide_from_recursive_listings() {
+	planning_setup_env
+	l_amb_root=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT
+	l_amb_parent=$ZXFER_MOCKBIN_DEST_ROOT
+	l_amb_pool=${ZXFER_MOCKBIN_DEST_ROOT%%/*}
+	l_amb_unknown="Failed to determine whether destination dataset [$l_amb_root] exists"
+	l_amb_failed="$l_amb_unknown: parent recursive listing for [$l_amb_parent] failed"
+	l_amb_row_count=0
+	# os|parent rows|status|pool rows|status|outcome: "seed" or the message.
+	for l_amb_row in \
+		"SunOS|$l_amb_parent|0|-|0|seed" \
+		"SunOS|$l_amb_parent,$l_amb_root|0|-|0|Failed to retrieve snapshot list from the destination." \
+		"SunOS|otherpool/other|0|-|0|$l_amb_unknown: parent recursive listing for [$l_amb_parent] did not contain the parent dataset." \
+		"SunOS|permission denied|1|-|0|$l_amb_failed: permission denied" \
+		"SunOS|cannot open '$l_amb_parent': dataset does not exist|1|-|0|seed" \
+		"SunOS|-|1|$l_amb_pool|0|seed" \
+		"SunOS|-|1|-|1|$l_amb_failed." \
+		"SunOS|-|1|$l_amb_pool,$l_amb_parent|0|$l_amb_failed." \
+		"SunOS|-|1|otherpool|0|$l_amb_failed." \
+		"SunOS|-|1|cannot open '$l_amb_pool': no such pool or dataset|1|seed" \
+		"Linux|$l_amb_parent|0|-|0|$l_amb_unknown."; do
+		l_amb_row_count=$((l_amb_row_count + 1))
+		l_amb_os=${l_amb_row%%|*}
+		l_amb_rest=${l_amb_row#*|}
+		l_amb_parent_rows=${l_amb_rest%%|*}
+		l_amb_rest=${l_amb_rest#*|}
+		l_amb_parent_status=${l_amb_rest%%|*}
+		l_amb_rest=${l_amb_rest#*|}
+		l_amb_pool_rows=${l_amb_rest%%|*}
+		l_amb_rest=${l_amb_rest#*|}
+		l_amb_pool_status=${l_amb_rest%%|*}
+		l_amb_outcome=${l_amb_rest#*|}
+		: >"$ZFS_LOG"
+		planning_clone_state "$FIXTURE_DIR/noop" "ambiguous_$l_amb_row_count"
+		planning_write_mock_uname "$l_amb_os"
+		planning_make_destination_root_ambiguous "$l_amb_parent_rows" \
+			"$l_amb_parent_status" "$l_amb_pool_rows" "$l_amb_pool_status"
+
+		planning_run_zxfer "$STATE_DIR" -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		l_run_status=$?
+		if [ "$l_amb_outcome" = seed ]; then
+			assertEquals "a root proven missing is bootstrapped [$l_amb_row]; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+				0 "$l_run_status"
+			planning_assert_log_has_line "send $ZXFER_MOCKBIN_SOURCE_ROOT@snap1"
+			planning_assert_log_has_line "receive $l_amb_root"
+		else
+			assertEquals "an unproven or existing root stops the run [$l_amb_row]" \
+				1 "$l_run_status"
+			planning_assert_failure_report "snapshot discovery" "message: $l_amb_outcome"
+			planning_assert_no_send_receive
+		fi
+		planning_assert_no_mutations
+	done
+
+	# -V traces the exact probe and both fallback listings.
+	: >"$ZFS_LOG"
+	planning_clone_state "$FIXTURE_DIR/noop" ambiguous_traced
+	planning_write_mock_uname SunOS
+	planning_make_destination_root_ambiguous - 1 "$l_amb_pool" 0
+	planning_run_zxfer "$STATE_DIR" -V -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "the traced ancestor walk should bootstrap the root; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	# Each trace is "LABEL: '<zfs path>' 'arg' ...".
+	for l_amb_trace in \
+		"Checking if destination exists|'list' '-H' '$l_amb_root'" \
+		"Exact destination probe was ambiguous on SunOS; checking parent recursively|'list' '-H' '-r' '-o' 'name' '$l_amb_parent'" \
+		"Parent recursive destination probe was ambiguous on SunOS; checking ancestor recursively|'list' '-H' '-r' '-o' 'name' '$l_amb_pool'"; do
+		grep -F "${l_amb_trace%%|*}: '" "$CASE_DIR/zxfer.stderr" |
+			grep -Fq "/zfs' ${l_amb_trace#*|}" ||
+			fail "Missing -V trace line: $l_amb_trace
+stderr: $(cat "$CASE_DIR/zxfer.stderr")"
+	done
+}
+
+# ---------------------------------------------------------------------------
+# Snapshot discovery: the fast no-op proof, full discovery's listings, -x,
+# -j, -O -Z and the temp paths discovery renders into its pipelines.
+
+# Invariant (no-op proof, source side): a source listing that dies after
+# printing only the rows the destination already has never proves a no-op.
+# Locally zfs's status reaches the proof, which fails closed with the
+# listing's stderr and status (the bare message without stderr) before full
+# discovery starts. Over -O with -z the origin's compressor masks that
+# status, so only the success sentinel inside the compressed stream marks a
+# listing complete: the truncated stream fails the local check, the proof
+# declines, and full discovery sends every dataset.
+test_proof_source_listing_that_fails_after_the_destination_rows_never_proves_a_noop() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" truncated_proof
+	l_truncated_key="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
+	# The listing stops before the newest snapshots, the ones the destination
+	# lacks, so the rows it prints match the destination's exactly.
+	grep -v '@snap3' "$FIXTURE_DIR/incremental/src_snapshots_dataset.list" \
+		>"$STATE_DIR/src_snapshots_dataset.list" ||
+		fail "Unable to write the truncated proof listing."
+
+	for l_truncated_stderr in "cannot iterate filesystems: I/O error" ""; do
+		: >"$ZFS_LOG"
+		planning_fail_canned_zfs_after_output "$l_truncated_key" 1 "$l_truncated_stderr"
+		planning_run_zxfer "$STATE_DIR" -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		assertEquals "a proof listing that failed must fail the run with its status [stderr:$l_truncated_stderr]" \
+			1 $?
+		planning_assert_failure_report "snapshot discovery" \
+			"message: Failed to retrieve snapshots from the source${l_truncated_stderr:+: $l_truncated_stderr}"
+		assertTrue "the message must end where the listing's stderr does [stderr:$l_truncated_stderr]" \
+			"grep -Fqx 'message: Failed to retrieve snapshots from the source${l_truncated_stderr:+: $l_truncated_stderr}' '$CASE_DIR/zxfer.stderr'"
+		assertFalse "a failed proof must not continue into full discovery [stderr:$l_truncated_stderr]" \
+			"grep -q -- '-s creation' '$ZFS_LOG'"
+		planning_assert_no_mutations
+		planning_assert_no_send_receive
+	done
+
+	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write socket-aware mock ssh."
+	planning_write_mock_zstd "$MOCKBIN_DIR/zstd" ||
+		fail "Unable to write the mock zstd."
+	: >"$ZFS_LOG"
+	planning_fail_canned_zfs_after_output "$l_truncated_key" 1 \
+		"cannot iterate filesystems: I/O error"
+	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
+		planning_run_zxfer "$STATE_DIR" -O localhost -z -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-O -z must fall back to full discovery and succeed; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	planning_assert_log_has_line \
+		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
+	for l_truncated_suffix in "" /child1 /child2; do
+		planning_assert_log_has_line \
+			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_truncated_suffix"
+	done
+	planning_assert_no_mutations
+}
+
+# Invariant (-O -Z -j): every stream the origin sends, both discovery
+# listings and each send, is compressed there with the configured command and
+# decompressed locally; zxfer checks and strips the listing's success sentinel
+# only after decompression. The compressed -j listing runs the origin's
+# parallel with the requested job count. The stand-in zstd rewrites every
+# line, so a stream that skipped either side of the codec would not parse.
+# -V counts the parallel listing and the source ssh shell invocations.
+test_remote_origin_compressed_parallel_discovery_replicates_every_dataset() {
+	planning_setup_parallel_jobs_env compressed_parallel
+	planning_log_mock_parallel_argv
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write socket-aware mock ssh."
+	planning_write_mock_zstd "$MOCKBIN_DIR/zstd" ||
+		fail "Unable to write the mock zstd."
+	SSH_LOG="$CASE_DIR/ssh_compressed.log"
+	: >"$SSH_LOG"
+	export MOCK_SSH_LOG="$SSH_LOG"
+
+	TMPDIR="$JOB_TMP_DIR" PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
+		planning_run_zxfer "$STATE_DIR" -V -O localhost -Z "zstd -5" -j 2 -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	unset MOCK_SSH_LOG
+	assertEquals "-O -Z -j must replicate the tree; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	for l_compressed_suffix in "" /child1 /child2; do
+		planning_assert_log_has_line \
+			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_compressed_suffix"
+	done
+	assertEquals "the proof listing, the -j listing and three sends must compress with -Z's command" \
+		"-5 -5 -5 -5 -5" "$(grep -vx -e -d "$MOCKBIN_DIR/zstd.argv" | tr '\n' ' ' | sed 's/ $//')"
+	assertEquals "each compressed stream must be decompressed once" \
+		5 "$(grep -cx -e -d "$MOCKBIN_DIR/zstd.argv")"
+	assertEquals "the origin's parallel must get the job count, line buffering and the bare zfs runner" \
+		"-j 2 --line-buffer -- '$MOCKBIN_DIR/zfs' 'list' '-H' '-o' 'name,guid' '-s' 'creation' '-d' '1' '-t' 'snapshot' {}" \
+		"$(cat "$PARALLEL_ARGV_LOG")"
+	# Every command ran over the origin's master, so each counts once.
+	for l_compressed_counter in source_snapshot_list_parallel_commands=1 \
+		"source_ssh_shell_invocations=$(grep -c '^mux' "$SSH_LOG")"; do
+		assertTrue "-V must report $l_compressed_counter; stderr: $(grep '^zxfer profile: ' "$CASE_DIR/zxfer.stderr")" \
+			"grep -Fqx 'zxfer profile: $l_compressed_counter' '$CASE_DIR/zxfer.stderr'"
+	done
+	planning_assert_no_mutations
+	planning_assert_no_parallel_job_leftovers
+}
+
+# Invariant (no-op proof, destination side): a destination listing that
+# prints every row and then fails is never trusted. An operational error
+# fails the run closed with the listing's stderr and status before full
+# discovery starts; a listing that reports the root itself missing declines
+# the proof, and full discovery lists the destination again.
+test_proof_destination_listing_that_fails_after_its_rows_fails_closed_unless_the_root_is_missing() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" proof_destination_failure
+	l_proof_key="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+
+	planning_fail_canned_zfs_after_output "$l_proof_key" 1 \
+		"cannot open '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1': permission denied"
+	planning_run_zxfer "$STATE_DIR" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "a failed destination listing must fail the run with its status" 1 $?
+	assertContains "the listing's stderr must reach the operator" \
+		"$(cat "$CASE_DIR/zxfer.stderr")" \
+		"cannot open '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1': permission denied"
+	planning_assert_failure_report "snapshot discovery" \
+		"Failed to retrieve snapshot list from the destination."
+	assertFalse "a failed proof must not continue into full discovery" \
+		"grep -q -- '-s creation' '$ZFS_LOG'"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+
+	: >"$ZFS_LOG"
+	planning_fail_canned_zfs_after_output "$l_proof_key" 1 \
+		"cannot open '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT': dataset does not exist"
+	planning_run_zxfer "$STATE_DIR" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "a listing that reports the root missing must decline the proof, not fail; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	planning_assert_log_has_line \
+		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
+	assertEquals "full discovery must list the destination again" \
+		2 "$(grep -cFx "$l_proof_key" "$ZFS_LOG")"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+}
+
+# Invariant: a source listing that succeeds without a single snapshot is an
+# error, never an empty source; with -d it would otherwise mark every
+# destination snapshot for destruction. The no-op proof refuses an empty
+# source stream even when the destination's is empty too, and full
+# discovery refuses an empty creation-order listing.
+test_empty_source_listing_fails_closed_before_any_change() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" empty_proof
+	planning_answer_manifest_key_with_nothing \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
+	planning_answer_manifest_key_with_nothing \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	planning_run_zxfer "$STATE_DIR" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "an empty proof source listing must fail the run" 1 $?
+	planning_assert_failure_report "snapshot discovery" \
+		"Failed to retrieve snapshots from the source"
+	assertFalse "the proof must not fall back to full discovery" \
+		"grep -q -- '-s creation' '$ZFS_LOG'"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+
+	: >"$ZFS_LOG"
+	planning_clone_state "$FIXTURE_DIR/noop" empty_full
+	# The destination-only @snap9 declines the proof.
+	planning_add_extra_destination_snapshot
+	planning_answer_manifest_key_with_nothing \
+		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
+	planning_run_zxfer "$STATE_DIR" -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "an empty creation-order listing must fail the run" 1 $?
+	planning_assert_log_has_line \
+		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
+	planning_assert_failure_report "snapshot discovery" \
+		"Failed to retrieve snapshots from the source"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+}
+
+# Invariant (-x, no-op proof): both sides drop an excluded dataset's records
+# before the proof compares them, so a run whose only difference is an
+# excluded dataset is a proven no-op with the two identity listings alone,
+# even under -j (the proof never runs parallel) and over -O (the origin lists
+# without the pattern). An exclude that matches every dataset leaves nothing
+# to prove, so the proof falls back to full discovery, which finds no work.
+# Full discovery also drops excluded records before it diffs, so -v reports
+# no delta for them.
+test_exclude_option_proves_a_noop_when_only_excluded_datasets_differ() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" excluded_difference
+	for l_excluded_fixture in dst_snapshots.list dst_d1_1.list; do
+		grep -v "/child1@snap3" "$FIXTURE_DIR/noop/$l_excluded_fixture" \
+			>"$STATE_DIR/$l_excluded_fixture" ||
+			fail "Unable to drop child1@snap3 from $l_excluded_fixture."
+	done
+	# A parallel that must never run.
+	cat >"$MOCKBIN_DIR/parallel" <<EOF_PARALLEL
+#!/bin/sh
+printf '%s\n' "\$*" >>"$CASE_DIR/parallel.log"
+exit 1
+EOF_PARALLEL
+	chmod +x "$MOCKBIN_DIR/parallel" || fail "Unable to write the parallel stand-in."
+
+	planning_run_zxfer "$STATE_DIR" -j 2 -x child1 -v -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "an excluded-only difference must be a proven no-op; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	assertEquals "the proof must cost exactly the two identity listings; zfs log: $(cat "$ZFS_LOG")" \
+		2 "$(wc -l <"$ZFS_LOG" | tr -d ' ')"
+	assertTrue "-v must report that nothing needs transfer" \
+		"grep -Fqx 'No new snapshots to transfer.' '$CASE_DIR/zxfer.stdout'"
+
+	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write socket-aware mock ssh."
+	SSH_LOG="$CASE_DIR/ssh_excluded.log"
+	: >"$SSH_LOG"
+	export MOCK_SSH_LOG="$SSH_LOG"
+	: >"$ZFS_LOG"
+	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
+		planning_run_zxfer "$STATE_DIR" -O localhost -j 2 -x child1 -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	unset MOCK_SSH_LOG
+	assertEquals "an -O excluded-only difference must be a proven no-op; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	assertEquals "the -O proof must cost exactly the two identity listings; zfs log: $(cat "$ZFS_LOG")" \
+		2 "$(wc -l <"$ZFS_LOG" | tr -d ' ')"
+	l_origin_listing=$(grep -- "ssh-origin.sock localhost .*snapshot" "$SSH_LOG")
+	assertEquals "the origin must list once; ssh log: $(cat "$SSH_LOG")" \
+		1 "$(printf '%s\n' "$l_origin_listing" | grep -c .)"
+	assertNotContains "the origin must list without the exclude pattern" \
+		"$l_origin_listing" "child1"
+	assertFalse "parallel must never run for the proof" "[ -e '$CASE_DIR/parallel.log' ]"
+
+	: >"$ZFS_LOG"
+	planning_run_zxfer "$FIXTURE_DIR/noop" -x "$ZXFER_MOCKBIN_SOURCE_ROOT" -v -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "an exclude that matches every dataset must succeed; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	planning_assert_log_has_line \
+		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
+	assertTrue "-v must report that nothing needs transfer after the fallback" \
+		"grep -Fqx 'No new snapshots to transfer.' '$CASE_DIR/zxfer.stdout'"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+
+	: >"$ZFS_LOG"
+	planning_run_zxfer "$STATE_DIR" -x child1 -v -N \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-N with an excluded-only difference must succeed; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	assertFalse "full discovery must drop excluded records before it reports a delta; stdout: $(cat "$CASE_DIR/zxfer.stdout")" \
+		"grep -q 'Recursive snapshot delta summary' '$CASE_DIR/zxfer.stdout'"
+	assertTrue "-v must report that nothing needs transfer" \
+		"grep -Fqx 'No new snapshots to transfer.' '$CASE_DIR/zxfer.stdout'"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+}
+
+# Invariant (-j): the dataset enumeration that feeds parallel must succeed as
+# a whole. One that prints some datasets and then fails would otherwise look
+# like a shorter tree whose listing parallel completes: the missing datasets'
+# destination snapshots would read as destination-only for -d. The listing
+# stops with exit 70 instead, before any change.
+test_parallel_jobs_dataset_enumeration_that_fails_partway_fails_closed() {
+	planning_setup_parallel_jobs_env enumeration_partway
+	printf '%s\n' "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_SOURCE_ROOT/child1" \
+		>"$STATE_DIR/src_datasets_partial.list" ||
+		fail "Unable to write the partial enumeration fixture."
+	{
+		printf 'list -Hr -t filesystem,volume -o name %s\tsrc_datasets_partial.list\t1\n' \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT"
+		cat "$STATE_DIR/manifest"
+	} >"$STATE_DIR/manifest.new" ||
+		fail "Unable to prepend the partial enumeration rule."
+	mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
+		fail "Unable to install the partial enumeration rule."
+
+	TMPDIR="$JOB_TMP_DIR" planning_run_zxfer "$STATE_DIR" -j 2 -d -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "a failed enumeration must stop the -j listing with exit 70; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		70 "$l_run_status"
+	planning_assert_failure_report "snapshot discovery" \
+		"Failed to retrieve snapshots from the source"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+	planning_assert_no_parallel_job_leftovers
+}
+
+# Invariant: the destination dataset inventory later work reads must be
+# complete. A failed inventory listing stops the run with the listing's
+# status and stderr (the bare message without stderr), one that succeeds
+# empty stops it too, and a missing root whose pool cannot be listed names
+# the pool probe's stderr. Nothing is sent in any case.
+test_destination_inventory_failures_fail_closed_with_the_listing_diagnostic() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" inventory_failures
+	l_inventory_key="list -t filesystem,volume -Hr -o name $ZXFER_MOCKBIN_DEST_ROOT"
+
+	for l_inventory_case in "permission denied|13" "|14"; do
+		l_inventory_stderr=${l_inventory_case%|*}
+		rm -rf "$CASE_DIR/fail_calls"
+		mkdir "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
+		: >"$ZFS_LOG"
+		(
+			MOCK_FAIL_TOOL=zfs
+			MOCK_FAIL_CALL=1
+			MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
+			MOCK_FAIL_MATCH=$l_inventory_key
+			MOCK_FAIL_STDERR=$l_inventory_stderr
+			MOCK_FAIL_STATUS=${l_inventory_case##*|}
+			export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
+				MOCK_FAIL_STDERR MOCK_FAIL_STATUS
+			planning_run_zxfer "$STATE_DIR" -R \
+				"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		)
+		assertEquals "a failed inventory listing must keep its status [stderr:$l_inventory_stderr]" \
+			"${l_inventory_case##*|}" $?
+		assertTrue "the report must carry the listing's stderr, or none [stderr:$l_inventory_stderr]; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+			"grep -Fqx 'message: Failed to retrieve list of datasets from the destination${l_inventory_stderr:+: $l_inventory_stderr}' '$CASE_DIR/zxfer.stderr'"
+		planning_assert_no_mutations
+		planning_assert_no_send_receive
+	done
+
+	: >"$ZFS_LOG"
+	planning_answer_manifest_key_with_nothing "$l_inventory_key"
+	planning_run_zxfer "$STATE_DIR" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "an empty inventory must fail the run" 1 $?
+	planning_assert_failure_report "snapshot discovery" \
+		"Staged destination dataset inventory was empty."
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+
+	: >"$ZFS_LOG"
+	planning_clone_state "$FIXTURE_DIR/noop" inventory_missing_pool
+	l_missing_pool=${ZXFER_MOCKBIN_DEST_ROOT%%/*}
+	printf 'list -H -o name %s\t-\t0\n' "$l_missing_pool" >>"$STATE_DIR/manifest" ||
+		fail "Unable to append the pool rule."
+	rm -rf "$CASE_DIR/fail_calls"
+	planning_make_remote_destination_root_missing
+	planning_fail_canned_zfs_after_output "list -H -o name $l_missing_pool" 2 \
+		"cannot open '$l_missing_pool': pool I/O is currently suspended"
+	planning_run_zxfer "$STATE_DIR" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	unset MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
+		MOCK_FAIL_STDERR MOCK_FAIL_STATUS
+	assertEquals "an unlistable pool must keep the pool probe's status; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		2 "$l_run_status"
+	planning_assert_failure_report "snapshot discovery" \
+		"Destination dataset [$ZXFER_MOCKBIN_DEST_ROOT] is missing and destination pool [$l_missing_pool] could not be listed: cannot open '$l_missing_pool': pool I/O is currently suspended"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+}
+
+# Invariant: discovery renders its temp paths into the background pipelines
+# it runs through sh -c, so each path must stay one literal word. With a
+# private TMPDIR whose name holds a command substitution, a space and single
+# quotes, a -j -x run still replicates every dataset, runs nothing embedded
+# in the name and leaves the TMPDIR empty.
+# shellcheck disable=SC2089,SC2090  # the quotes are part of the directory name
+test_hostile_tmpdir_is_used_literally_by_discovery_pipelines() {
+	planning_setup_parallel_jobs_env hostile_tmpdir
+	l_hostile_tmpdir="$CASE_DIR/tmp \$(touch hostile-marker) 'q'"
+	mkdir -m 700 "$l_hostile_tmpdir" || fail "Unable to create the hostile TMPDIR."
+	l_hostile_zxfer=$(cd "${ZXFER_TEST_ZXFER_BIN%/*}" && pwd)/${ZXFER_TEST_ZXFER_BIN##*/}
+
+	# A substitution that ran would touch the marker in zxfer's working
+	# directory, so run from the case directory.
+	(
+		cd "$CASE_DIR" || exit 1
+		ZXFER_TEST_ZXFER_BIN=$l_hostile_zxfer
+		TMPDIR=$l_hostile_tmpdir
+		export TMPDIR
+		planning_run_zxfer "$STATE_DIR" -j 2 -x no-such-dataset -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	)
+	l_run_status=$?
+	assertEquals "a hostile TMPDIR must not break the run; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	for l_hostile_suffix in "" /child1 /child2; do
+		planning_assert_log_has_line \
+			"receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_hostile_suffix"
+	done
+	assertFalse "no command substitution in the TMPDIR name may run" \
+		"[ -e '$CASE_DIR/hostile-marker' ]"
+	assertEquals "the run must leave the TMPDIR empty" \
+		"" "$(ls -A "$l_hostile_tmpdir")"
+}
+
+# Invariant (-j -V): -V reports the recursive delta exactly: the summary
+# counts the three missing snapshots (the -j listing's success sentinel is
+# stripped, never counted), names each queued dataset and dumps both delta
+# directions; the profile counts the proof's and the full listing and the one
+# parallel fan-out; and parallel gets the requested job count, line
+# buffering and the bare depth-1 zfs runner.
+test_parallel_jobs_very_verbose_reports_the_delta_profile_and_job_count() {
+	planning_setup_parallel_jobs_env verbose_parallel
+	planning_log_mock_parallel_argv
+
+	TMPDIR="$JOB_TMP_DIR" planning_run_zxfer "$STATE_DIR" -j 2 -V -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "-j -V must replicate the tree; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	assertEquals "the delta summary must count exactly the missing snapshots" \
+		"Recursive snapshot delta summary: source_missing_snapshots=3 destination_extra_snapshots=0 source_datasets=3 destination_extra_datasets=0" \
+		"$(grep '^Recursive snapshot delta summary' "$CASE_DIR/zxfer.stdout")"
+	assertEquals "-v must name every queued dataset" \
+		"Recursive source datasets queued for transfer:
+  $ZXFER_MOCKBIN_SOURCE_ROOT
+  $ZXFER_MOCKBIN_SOURCE_ROOT/child1
+  $ZXFER_MOCKBIN_SOURCE_ROOT/child2" \
+		"$(sed -n '/^Recursive source datasets queued/,/^  .*child2$/p' "$CASE_DIR/zxfer.stdout")"
+	for l_verbose_heading in \
+		"====== Snapshots present in source but missing in destination ======" \
+		"====== Extra Destination snapshots not in source ======"; do
+		assertTrue "-V must dump the delta under: $l_verbose_heading" \
+			"grep -Fqx '$l_verbose_heading' '$CASE_DIR/zxfer.stdout'"
+	done
+	for l_verbose_counter in source_snapshot_list_commands=2 \
+		source_snapshot_list_parallel_commands=1 bucket_source_inspection=1; do
+		assertTrue "-V must report $l_verbose_counter; stderr: $(grep '^zxfer profile: ' "$CASE_DIR/zxfer.stderr")" \
+			"grep -Fqx 'zxfer profile: $l_verbose_counter' '$CASE_DIR/zxfer.stderr'"
+	done
+	assertEquals "parallel must run once, with the job count, line buffering and the bare zfs runner" \
+		"-j 2 --line-buffer -- '$MOCKBIN_DIR/zfs' 'list' '-H' '-o' 'name,guid' '-s' 'creation' '-d' '1' '-t' 'snapshot' {}" \
+		"$(cat "$PARALLEL_ARGV_LOG")"
+	planning_assert_no_mutations
+	planning_assert_no_parallel_job_leftovers
+}
+
+# Invariant (full discovery's destination listing, run here under -N, where
+# the no-op proof does not run): a successful listing passes its warnings on
+# and needs no existence probe. A failed one is classified by an exact probe
+# of the root whatever its stderr names: a missing child in that stderr is
+# not a missing root, so the run fails closed and shows the stderr. A local
+# listing that exits 255 is probed too; only an ssh failure under -T skips
+# the probe.
+test_nonrecursive_destination_listing_diagnostics_are_passed_on() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" nonrecursive_listing
+	l_listing_key="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	l_probe_line="list -H $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+
+	planning_fail_canned_zfs_after_output "$l_listing_key" 0 \
+		"zfs: warning: listing is from a degraded pool"
+	planning_run_zxfer "$STATE_DIR" -N \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "a listing with a warning must succeed; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	assertContains "a successful listing must pass its warning on" \
+		"$(cat "$CASE_DIR/zxfer.stderr")" "zfs: warning: listing is from a degraded pool"
+	assertFalse "a successful listing needs no existence probe" \
+		"grep -Fqx '$l_probe_line' '$ZFS_LOG'"
+	planning_assert_log_has_line "receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+
+	for l_listing_case in \
+		"cannot open '$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1': dataset does not exist|1" \
+		"|255"; do
+		l_listing_stderr=${l_listing_case%|*}
+		rm -rf "$CASE_DIR/fail_calls"
+		mkdir "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
+		: >"$ZFS_LOG"
+		(
+			MOCK_FAIL_TOOL=zfs
+			MOCK_FAIL_CALL=1
+			MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
+			MOCK_FAIL_MATCH=$l_listing_key
+			MOCK_FAIL_STATUS=${l_listing_case##*|}
+			export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
+				MOCK_FAIL_STATUS
+			if [ -n "$l_listing_stderr" ]; then
+				MOCK_FAIL_STDERR=$l_listing_stderr
+				export MOCK_FAIL_STDERR
+			fi
+			planning_run_zxfer "$STATE_DIR" -N \
+				"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		)
+		assertEquals "a failed listing must keep its status [status:${l_listing_case##*|}]" \
+			"${l_listing_case##*|}" $?
+		planning_assert_log_has_line "$l_probe_line"
+		planning_assert_failure_report "snapshot discovery" \
+			"Failed to retrieve snapshot list from the destination."
+		if [ -n "$l_listing_stderr" ]; then
+			assertContains "the listing's stderr must reach the operator" \
+				"$(cat "$CASE_DIR/zxfer.stderr")" "$l_listing_stderr"
+		fi
+		planning_assert_no_mutations
+		planning_assert_no_send_receive
+	done
+}
+
+# Invariant (trailing-slash source): "SRC/" replicates SRC's contents into the
+# destination itself, so discovery lists the destination argument rather than
+# a child named after the source, and rewrites its records to source paths: a
+# matching tree is a proven no-op, and -N sends into the destination itself.
+test_trailing_slash_source_maps_onto_the_destination_itself() {
+	planning_setup_env
+
+	planning_run_zxfer "$FIXTURE_DIR/noop" -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT/" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	l_run_status=$?
+	assertEquals "a trailing-slash no-op must succeed; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	planning_assert_log_has_line \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	assertEquals "the proof must cost exactly the two identity listings; zfs log: $(cat "$ZFS_LOG")" \
+		2 "$(wc -l <"$ZFS_LOG" | tr -d ' ')"
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+
+	: >"$ZFS_LOG"
+	planning_clone_state "$FIXTURE_DIR/incremental" trailing_slash
+	printf 'list -t filesystem,volume -Hr -o name %s\tdst_datasets.list\t0\n' \
+		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" >>"$STATE_DIR/manifest" ||
+		fail "Unable to append the inventory rule."
+	planning_run_zxfer "$STATE_DIR" -N \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT/" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	l_run_status=$?
+	assertEquals "a trailing-slash -N run must succeed; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+		0 "$l_run_status"
+	planning_assert_log_has_line \
+		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	planning_assert_log_has_line \
+		"send -I $ZXFER_MOCKBIN_SOURCE_ROOT@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT@snap3"
+	planning_assert_log_has_line "receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	assertEquals "-N must receive into the destination itself only" \
+		1 "$(grep -c '^receive ' "$ZFS_LOG")"
+	planning_assert_no_mutations
+}
+
+# Invariant (-x): an exclude pattern awk cannot compile stops the run before
+# any change, whether the no-op proof's filters meet it (-R) or full
+# discovery's filter does before it diffs (-N). Which of the proof's checks
+# reports it depends on awk's exit status, so -R pins only the stage.
+test_invalid_exclude_pattern_fails_closed_before_any_change() {
+	planning_setup_env
+
+	planning_run_zxfer "$FIXTURE_DIR/incremental" -x '[' -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertNotEquals "an invalid pattern must fail the proof" 0 $?
+	planning_assert_failure_report "snapshot discovery" "message: Failed to "
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
+
+	: >"$ZFS_LOG"
+	planning_run_zxfer "$FIXTURE_DIR/incremental" -x '[' -N \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertNotEquals "an invalid pattern must fail full discovery" 0 $?
+	planning_assert_failure_report "snapshot discovery" \
+		"Failed to filter source snapshots against exclude patterns for recursive delta planning."
+	planning_assert_no_mutations
+	planning_assert_no_send_receive
 }
 
 . "$SHUNIT2_BIN"

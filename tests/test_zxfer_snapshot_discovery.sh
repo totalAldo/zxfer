@@ -3,7 +3,10 @@
 # shunit2 entry point for src/zxfer_snapshot_discovery.sh: the fast no-op
 # proof, full discovery, deltas and record files, the source and destination
 # listing commands, parallel discovery, staged capture files and
-# destination-list normalization.
+# destination-list normalization. tests/test_contract_planning.sh pins the
+# module's behavior black-box; these fragments keep what only a unit test
+# can reach: helper edge cases, failures the fault injector cannot cause,
+# and producer process edges.
 #
 # Test definitions live in the behavior fragments below. Each fragment has a
 # "zxfer-test-fragment" marker, a source line and a path in suite(); keep the

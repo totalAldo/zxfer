@@ -56,12 +56,37 @@ dependencies_test_make_tools() {
 	done
 }
 
-test_zxfer_refresh_secure_path_state_defaults_to_allowlist() {
-	zxfer_refresh_secure_path_state
+# Each row: ZXFER_SECURE_PATH|ZXFER_SECURE_PATH_APPEND|built-in default (the
+# module's own, or empty)|secure PATH. Only absolute entries survive, and a
+# list left empty falls back to the built-in allowlist.
+test_zxfer_refresh_secure_path_state_keeps_only_absolute_entries() {
+	result=$(
+		(
+			l_builtin=$ZXFER_DEFAULT_SECURE_PATH
+			while IFS='|' read -r l_secure l_append l_default l_expected; do
+				ZXFER_SECURE_PATH=$l_secure
+				ZXFER_SECURE_PATH_APPEND=$l_append
+				ZXFER_DEFAULT_SECURE_PATH=$l_builtin
+				[ "$l_default" = builtin ] || ZXFER_DEFAULT_SECURE_PATH=""
+				zxfer_refresh_secure_path_state
+				l_status=$?
+				[ "$l_status:$g_zxfer_secure_path" = "0:$l_expected" ] ||
+					printf 'row <%s|%s|%s>: status=%s secure=%s\n' "$l_secure" \
+						"$l_append" "$l_default" "$l_status" "$g_zxfer_secure_path"
+			done <<'EOF'
+||builtin|/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+/opt/zfs/bin:/usr/sbin|/custom/bin|builtin|/opt/zfs/bin:/usr/sbin:/custom/bin
+./bin:/tmp/bin:relative:/usr/sbin||builtin|/tmp/bin:/usr/sbin
+/sbin:/bin|:/opt/zfs/bin:./malicious|builtin|/sbin:/bin:/opt/zfs/bin
+|/opt/trusted/bin|empty|/opt/trusted/bin
+relative:.:./bin|also-relative:./still-bad|builtin|/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+EOF
+			printf 'path=%s\n' "$PATH"
+		)
+	)
 
-	assertEquals "The default secure PATH should use the built-in allowlist." \
-		"/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin" \
-		"$g_zxfer_secure_path"
+	assertEquals "Every row should publish its secure PATH and leave the live PATH alone until zxfer_apply_secure_path." \
+		"path=$TEST_ORIGINAL_PATH" "$result"
 }
 
 test_zxfer_refresh_secure_path_state_preserves_custom_ifs_and_enabled_globbing() {
@@ -90,34 +115,11 @@ test_zxfer_refresh_secure_path_state_preserves_custom_ifs_and_enabled_globbing()
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "globbing=enabled"
 }
 
-test_zxfer_refresh_secure_path_state_preserves_unset_ifs_and_disabled_globbing() {
-	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
-	zxfer_test_capture_subshell '
-		unset IFS
-		set -f
-		ZXFER_SECURE_PATH="/opt/zfs/bin:/usr/bin"
-		zxfer_refresh_secure_path_state >/dev/null
-		if [ "${IFS+set}" = "set" ]; then
-			printf "%s\n" "ifs=set"
-		else
-			printf "%s\n" "ifs=unset"
-		fi
-		case $- in
-		*f*) printf "%s\n" "globbing=disabled" ;;
-		*) printf "%s\n" "globbing=enabled" ;;
-		esac
-	'
-
-	assertContains "Secure PATH parsing should restore an originally unset IFS." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ifs=unset"
-	assertContains "Secure PATH parsing should preserve a caller's disabled-globbing state." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "globbing=disabled"
-}
-
 test_zxfer_refresh_secure_path_state_rejects_control_whitespace_without_mutating_shell_state() {
 	control_rejection_result=$(
 		IFS="|"
 		set -f
+		g_zxfer_secure_path=/kept/secure/path
 		ZXFER_SECURE_PATH=$(printf "/opt/trusted/bin\n/opt/translated/bin")
 		if zxfer_refresh_secure_path_state; then
 			path_status=0
@@ -145,65 +147,14 @@ test_zxfer_refresh_secure_path_state_rejects_control_whitespace_without_mutating
 
 	assertContains "Newline-bearing secure-PATH entries must fail closed before remote rendering can translate them." \
 		"$control_rejection_result" "path-status=1"
-	assertContains "Rejected secure-PATH input must not publish a partial path." \
-		"$control_rejection_result" "path-result=<>"
+	assertContains "Rejected secure-PATH input must keep the previous secure PATH, never publish a partial one." \
+		"$control_rejection_result" "path-result=</kept/secure/path>"
 	assertContains "Secure-PATH rejection should preserve a caller-defined IFS." \
 		"$control_rejection_result" "ifs=<|>"
 	assertContains "Secure-PATH rejection should preserve disabled globbing." \
 		"$control_rejection_result" "globbing=disabled"
 	assertContains "Control whitespace in ZXFER_SECURE_PATH_APPEND must also fail closed." \
 		"$control_rejection_result" "append-status=1"
-}
-
-test_zxfer_refresh_secure_path_state_publishes_only_the_secure_path() {
-	result=$(
-		(
-			ZXFER_SECURE_PATH="/opt/zfs/bin:/usr/sbin"
-			ZXFER_SECURE_PATH_APPEND="/custom/bin"
-			zxfer_refresh_secure_path_state
-			printf 'status=%s\n' "$?"
-			printf 'secure=%s\n' "$g_zxfer_secure_path"
-			printf 'path=%s\n' "$PATH"
-		)
-	)
-
-	assertContains "Refreshing should succeed for a single-line secure PATH." \
-		"$result" "status=0"
-	assertContains "Refreshing should publish the configured secure PATH." \
-		"$result" "secure=/opt/zfs/bin:/usr/sbin:/custom/bin"
-	assertContains "Refreshing should leave the live PATH alone until zxfer_apply_secure_path." \
-		"$result" "path=$TEST_ORIGINAL_PATH"
-}
-
-test_zxfer_refresh_secure_path_state_fails_closed_through_the_rejection_owner() {
-	result=$(
-		(
-			g_zxfer_secure_path="/kept/secure/path"
-			ZXFER_SECURE_PATH=$(printf '/opt/trusted/bin\n/opt/translated/bin')
-			zxfer_set_failure_context_if_empty() {
-				printf 'context=%s:%s\n' "$1" "$2"
-			}
-			zxfer_throw_error() {
-				printf 'message=%s\n' "$1"
-				exit "${2:-1}"
-			}
-			zxfer_refresh_secure_path_state
-			printf 'refresh=%s secure=%s\n' "$?" "$g_zxfer_secure_path"
-			zxfer_reject_invalid_secure_path_configuration
-			printf '%s\n' "not reached"
-		)
-	)
-	status=$?
-
-	assertEquals "Rejecting a control-whitespace-bearing secure PATH should fail closed." \
-		1 "$status"
-	assertContains "A rejected refresh should keep the previous secure PATH." \
-		"$result" "refresh=1 secure=/kept/secure/path"
-	assertContains "The secure-PATH owner should classify rejected configuration before throwing." \
-		"$result" "context=dependency:secure PATH validation"
-	assertContains "The secure-PATH owner should preserve the stable rejection diagnostic." \
-		"$result" "single-line absolute path without control whitespace"
-	assertNotContains "The rejection should stop the run." "$result" "not reached"
 }
 
 test_zxfer_apply_secure_path_exports_the_secure_path() {
@@ -286,111 +237,40 @@ test_zxfer_find_tool_in_path_checks_slash_paths_as_given_and_misses_cleanly() {
 		"0:$tools/exec/mocktool" "$?:$g_zxfer_tool_path_result"
 }
 
-test_zxfer_validate_resolved_tool_path_rejects_relative_path() {
-	zxfer_validate_resolved_tool_path "awk" "awk"
+# command -v quoting (OmniOS) and the trailing newlines of remote probe output
+# are normalized away, never evaluated; anything but one absolute line is
+# refused with the reason, naming the host scope when there is one.
+test_zxfer_validate_resolved_tool_path_publishes_one_absolute_line_or_the_refusal() {
+	tab=$(printf '\t')
 
-	assertEquals "Relative tool paths should be rejected." 1 "$?"
-	assertContains "Relative path rejection should require an absolute path." \
-		"$g_zxfer_required_tool_result" "requires an absolute path"
-}
+	zxfer_validate_resolved_tool_path "'/tmp/mocktool.\$(touch marker)'" mocktool
+	assertEquals "A single-quoted absolute path should be unquoted." \
+		"0:/tmp/mocktool.\$(touch marker)" "$?:$g_zxfer_required_tool_result"
+	zxfer_validate_resolved_tool_path "\"/tmp/mocktool.\$(touch marker)\"" mocktool
+	assertEquals "A double-quoted absolute path should be unquoted." \
+		"0:/tmp/mocktool.\$(touch marker)" "$?:$g_zxfer_required_tool_result"
+	zxfer_validate_resolved_tool_path "/opt/bin/mocktool$ZXFER_LF$ZXFER_LF" mocktool \
+		>"$TEST_TMPDIR/validate.out"
+	assertEquals "Trailing newlines should be dropped." \
+		"0:/opt/bin/mocktool" "$?:$g_zxfer_required_tool_result"
+	assertEquals "Validation should print nothing." "" "$(cat "$TEST_TMPDIR/validate.out")"
 
-test_zxfer_validate_resolved_tool_path_accepts_shell_quoted_absolute_path() {
-	quoted_path="'/tmp/mocktool.\$(touch marker)'"
-
-	zxfer_validate_resolved_tool_path "$quoted_path" "mocktool"
-	status=$?
-
-	assertEquals "Shell-quoted absolute paths from command -v should remain valid after normalization." 0 "$status"
-	assertEquals "Shell-quoted absolute paths from command -v should be normalized before validation." \
-		"/tmp/mocktool.\$(touch marker)" "$g_zxfer_required_tool_result"
-}
-
-test_zxfer_validate_resolved_tool_path_accepts_double_quoted_absolute_path() {
-	quoted_path="\"/tmp/mocktool.\$(touch marker)\""
-
-	zxfer_validate_resolved_tool_path "$quoted_path" "mocktool"
-	status=$?
-
-	assertEquals "Double-quoted absolute paths from command -v should remain valid after normalization." 0 "$status"
-	assertEquals "Double-quoted absolute paths from command -v should be normalized before validation." \
-		"/tmp/mocktool.\$(touch marker)" "$g_zxfer_required_tool_result"
-}
-
-test_zxfer_validate_resolved_tool_path_drops_trailing_newlines_and_publishes_the_result() {
-	zxfer_validate_resolved_tool_path "/opt/bin/mocktool
-
-" "mocktool" >"$TEST_TMPDIR/validate.out"
-	status=$?
-
-	assertEquals "Trailing newlines, as remote probe output carries, should not fail validation." \
-		0 "$status"
-	assertEquals "Validation should publish the path without its trailing newlines." \
-		"/opt/bin/mocktool" "$g_zxfer_required_tool_result"
-	assertEquals "Validation should print nothing." \
-		"" "$(cat "$TEST_TMPDIR/validate.out")"
-
-	zxfer_validate_resolved_tool_path "/opt/bin/mock
-tool" "mocktool" >/dev/null
-	assertEquals "An embedded newline should still be rejected." 1 "$?"
-	assertEquals "The rejection should be published." \
-		"Required dependency \"mocktool\" resolved to \"/opt/bin/mock
-tool\", but zxfer requires a single-line absolute path without control whitespace." \
-		"$g_zxfer_required_tool_result"
-}
-
-test_zxfer_require_tool_publishes_the_absolute_path() {
-	tools="$TEST_TMPDIR/require_tool"
-	dependencies_test_make_tools "$tools" mocktool
-	g_zxfer_secure_path="relative:$tools"
-
-	zxfer_require_tool mocktool
-
-	assertEquals "A found helper should be published as its absolute path." \
-		"$tools/mocktool" "$g_zxfer_required_tool_result"
-}
-
-test_zxfer_require_tool_throws_a_dependency_failure_when_missing() {
-	mkdir -p "$TEST_TMPDIR/require_empty"
-
-	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
-	zxfer_test_capture_subshell '
-		g_zxfer_secure_path="$TEST_TMPDIR/require_empty"
-		zxfer_throw_error() {
-			printf "class=%s message=%s\n" "$g_zxfer_failure_class" "$1"
-			exit 1
-		}
-		zxfer_require_tool mocktool "mock tool"
-		printf "%s\n" "not reached"
-	'
-
-	assertEquals "A missing helper should stop the run." 1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "A missing helper should be a dependency failure with the secure-PATH guidance." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "class=dependency message=Required dependency \"mock tool\" not found in secure PATH ($TEST_TMPDIR/require_empty). Set ZXFER_SECURE_PATH or install the binary."
-	assertNotContains "The failure should not return to the caller." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "not reached"
-}
-
-test_zxfer_resolve_cli_command_safe_rejects_quoted_token_strings() {
-	zxfer_resolve_cli_command_safe "" '"/opt/zstd dir/zstd" -3' "compression command"
-	status=$?
-
-	assertEquals "CLI command resolution should fail closed when the configured command relies on shell quoting." \
-		1 "$status"
-	assertEquals "Rejected CLI commands should explain the literal-token requirement." \
-		"compression command must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported." \
-		"$g_zxfer_resolved_cli_command_result"
-}
-
-test_zxfer_resolve_cli_command_safe_requotes_the_local_head_and_keeps_arguments() {
-	tools="$TEST_TMPDIR/cli_resolve"
-	dependencies_test_make_tools "$tools" zstd
-	g_zxfer_secure_path=$tools
-
-	zxfer_resolve_cli_command_safe "" "zstd  -T0 -9;x" "compression command"
-
-	assertEquals "A local CLI command should resolve its head on the secure PATH." 0 "$?"
-	assertEquals "The requoted command should keep every argument as one quoted token." \
-		"'$tools/zstd' '-T0' '-9;' 'x'" "$g_zxfer_resolved_cli_command_result"
+	zxfer_validate_resolved_tool_path awk awk
+	assertEquals "A relative path should be refused." \
+		"1:Required dependency \"awk\" resolved to \"awk\", but zxfer requires an absolute path." \
+		"$?:$g_zxfer_required_tool_result"
+	zxfer_validate_resolved_tool_path "'/tmp/it's'" mocktool
+	assertEquals "A quote inside a quoted path should keep the quotes, and so be refused." \
+		"1:Required dependency \"mocktool\" resolved to \"'/tmp/it's'\", but zxfer requires an absolute path." \
+		"$?:$g_zxfer_required_tool_result"
+	zxfer_validate_resolved_tool_path "/opt/bin/mock${ZXFER_LF}tool" mocktool
+	assertEquals "An embedded newline should be refused." \
+		"1:Required dependency \"mocktool\" resolved to \"/opt/bin/mock${ZXFER_LF}tool\", but zxfer requires a single-line absolute path without control whitespace." \
+		"$?:$g_zxfer_required_tool_result"
+	zxfer_validate_resolved_tool_path "/tmp/mock${tab}tool" mocktool "host origin.example"
+	assertEquals "A tab should be refused, naming the host scope." \
+		"1:Required dependency \"mocktool\" on host origin.example resolved to \"/tmp/mock${tab}tool\", but zxfer requires a single-line absolute path without control whitespace." \
+		"$?:$g_zxfer_required_tool_result"
 }
 
 test_zxfer_reset_dependency_state_drops_inherited_commands_and_secure_path() {
@@ -487,79 +367,11 @@ test_zxfer_init_dependency_tool_defaults_resolves_helpers_on_the_secure_path() {
 		"$result" "optional=$tools/parallel"
 }
 
-test_zxfer_init_dependency_tool_defaults_reports_a_missing_zfs() {
-	tools="$TEST_TMPDIR/tool_defaults_no_zfs"
-	dependencies_test_make_tools "$tools" awk ps
-
-	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
-	zxfer_test_capture_subshell '
-		g_zxfer_secure_path="$tools"
-		zxfer_throw_error() {
-			printf "class=%s message=%s\n" "$g_zxfer_failure_class" "$1"
-			exit 1
-		}
-		zxfer_init_dependency_tool_defaults
-	'
-
-	assertEquals "A missing zfs should stop startup." 1 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "A missing zfs should keep its dependency classification and message." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "class=dependency message=Required dependency \"zfs\" not found in secure PATH ($tools). Set ZXFER_SECURE_PATH or install the binary."
-}
-
-test_zxfer_refresh_secure_path_state_filters_relative_entries() {
-	result=$(
-		ZXFER_SECURE_PATH="./bin:/tmp/bin:relative:/usr/sbin"
-		ZXFER_SECURE_PATH_APPEND=""
-		zxfer_refresh_secure_path_state
-		printf '%s\n' "$g_zxfer_secure_path"
-	)
-
-	assertEquals "Relative path segments must be dropped from the secure PATH." "/tmp/bin:/usr/sbin" "$result"
-}
-
-test_zxfer_refresh_secure_path_state_appends_extra_entries() {
-	result=$(
-		ZXFER_SECURE_PATH="/sbin:/bin"
-		ZXFER_SECURE_PATH_APPEND=":/opt/zfs/bin:./malicious"
-		zxfer_refresh_secure_path_state
-		printf '%s\n' "$g_zxfer_secure_path"
-	)
-
-	assertEquals "ZXFER_SECURE_PATH_APPEND should only add absolute directories to the allowlist." "/sbin:/bin:/opt/zfs/bin" "$result"
-}
-
-test_zxfer_refresh_secure_path_state_uses_append_when_default_is_empty() {
-	result=$(
-		ZXFER_DEFAULT_SECURE_PATH=""
-		ZXFER_SECURE_PATH=""
-		ZXFER_SECURE_PATH_APPEND="/opt/trusted/bin"
-		zxfer_refresh_secure_path_state
-		printf '%s\n' "$g_zxfer_secure_path"
-	)
-
-	assertEquals "Append-only secure-path configuration should still work when the built-in allowlist is empty." \
-		"/opt/trusted/bin" "$result"
-}
-
-test_zxfer_refresh_secure_path_state_falls_back_to_default_when_all_entries_are_filtered() {
-	result=$(
-		ZXFER_SECURE_PATH="relative:.:./bin"
-		ZXFER_SECURE_PATH_APPEND="also-relative:./still-bad"
-		zxfer_refresh_secure_path_state
-		printf '%s\n' "$g_zxfer_secure_path"
-	)
-
-	assertEquals "When every configured secure-PATH entry is filtered out, zxfer should fall back to the built-in allowlist." \
-		"$ZXFER_DEFAULT_SECURE_PATH" "$result"
-}
-
-test_refresh_compression_commands_tokenizes_custom_pipeline() {
+test_refresh_compression_commands_resolves_each_head_and_quotes_every_token() {
 	# A -Z command is resolved and quoted token by token, so the shell never
-	# runs the raw string.
+	# runs the raw string; the decompressor resolves the same way.
 	zstd_dir="$TEST_TMPDIR/custom_pipeline_bin"
-	mkdir -p "$zstd_dir"
-	printf '#!/bin/sh\nexit 0\n' >"$zstd_dir/zstd"
-	chmod 755 "$zstd_dir/zstd"
+	dependencies_test_make_tools "$zstd_dir" zstd
 
 	result=$(
 		g_zxfer_secure_path=$zstd_dir
@@ -567,11 +379,13 @@ test_refresh_compression_commands_tokenizes_custom_pipeline() {
 		g_cmd_compress="zstd -3;touch /tmp/pwn"
 		g_cmd_decompress="zstd -d"
 		zxfer_refresh_compression_commands
-		printf '%s\n' "$g_cmd_compress_safe"
+		printf 'compress=%s\n' "$g_cmd_compress_safe"
+		printf 'decompress=%s\n' "$g_cmd_decompress_safe"
 	)
 
-	assertEquals "Compression command tokens should be quoted." \
-		"'$zstd_dir/zstd' '-3;' 'touch' '/tmp/pwn'" "$result"
+	assertEquals "Both heads should resolve on the secure PATH, and every token should be quoted." \
+		"compress='$zstd_dir/zstd' '-3;' 'touch' '/tmp/pwn'
+decompress='$zstd_dir/zstd' '-d'" "$result"
 }
 
 # zxfer-test-fragment: suites/zxfer_dependencies_tool_resolution_tests.sh

@@ -1,11 +1,15 @@
 #!/bin/sh
 #
 # shunit2 tests for the session composition root in src/zxfer_session.sh:
-# startup order, zxfer_main, remote connection preparation and trap exit.
+# startup, zxfer_session_run's exit status, remote connection preparation,
+# endpoint initialization and the EXIT trap. Its black-box behavior (signal
+# exit statuses, one failure report, the run root and socket directory
+# removed, dry runs contacting no host, migration service restarts) is pinned
+# by the contract suites; these cases pin what those cannot reach.
 #
-# The fragments keep the fixture they were written for: the exec fixture for
-# the main-path cases, the remote-host fixture for the remote cases and the
-# runtime fixture for the lifecycle cases. The cases in this file use none.
+# The fragments keep the fixture they were written for: the remote-host
+# fixture for the remote cases and the runtime fixture for the lifecycle
+# cases. The cases in this file use neither.
 #
 # shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -14,8 +18,6 @@ TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
-# shellcheck source=tests/helpers/exec_fixtures.sh
-. "$TESTS_DIR/helpers/exec_fixtures.sh"
 # shellcheck source=tests/helpers/remote_host_fixtures.sh
 . "$TESTS_DIR/helpers/remote_host_fixtures.sh"
 # shellcheck source=tests/helpers/runtime_fixtures.sh
@@ -23,20 +25,18 @@ TEST_ORIGINAL_PATH=$PATH
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_session"
-	zxfer_test_exec_fixture_one_time_setup
 	zxfer_test_remote_host_fixture_one_time_setup
 }
 
 oneTimeTearDown() {
 	zxfer_test_remote_host_fixture_one_time_teardown
-	relax_test_tmpdir_permissions
+	# A failed case may leave a directory read-only.
+	chmod -R u+rwx "$TEST_TMPDIR" >/dev/null 2>&1 || :
 	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
-	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_main_tests.sh"; then
-		zxfer_test_exec_fixture_setup
-	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"; then
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"; then
 		zxfer_test_remote_host_fixture_setup
 	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"; then
 		zxfer_test_runtime_fixture_setup
@@ -44,9 +44,7 @@ setUp() {
 }
 
 tearDown() {
-	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_main_tests.sh"; then
-		relax_test_tmpdir_permissions
-	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"; then
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"; then
 		zxfer_test_remote_host_fixture_teardown
 	elif zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"; then
 		zxfer_test_runtime_fixture_teardown
@@ -93,42 +91,6 @@ test_session_environment_creates_the_run_root_between_secure_path_and_path_narro
 		"$valid_entries" "zxfer."
 	assertEquals "Startup should narrow PATH to the secure PATH after creating the run root." \
 		"$secure_dir" "$narrowed_path"
-}
-
-test_zxfer_session_initialize_preserves_bootstrap_and_trap_order() {
-	output=$(
-		(
-			zxfer_reset_session_state() {
-				printf '%s\n' reset
-				trap
-			}
-			zxfer_initialize_dependency_reporting_defaults() {
-				printf '%s\n' reporting-awk
-				trap
-			}
-			zxfer_init_session_environment() {
-				printf '%s\n' environment
-				trap
-			}
-
-			zxfer_session_initialize
-			trap - EXIT HUP INT QUIT TERM
-		) | awk '
-			/zxfer_trap_exit/ {
-				if (!(marker in listed)) print marker " with-traps"
-				listed[marker] = 1
-				next
-			}
-			/^trap/ { next }
-			{ marker = $0; print }
-		'
-	)
-
-	assertEquals "Session bootstrap should reset state and secure awk before installing traps, then prepare the environment." \
-		'reset
-reporting-awk
-environment
-environment with-traps' "$output"
 }
 
 test_zxfer_session_initialize_discards_inherited_cleanup_handles_before_early_failure_trap() {
@@ -196,43 +158,6 @@ test_zxfer_session_initialize_discards_inherited_cleanup_handles_before_early_fa
 		"[ -f '$external_root/sentinel' ]"
 	assertTrue "Early-failure cleanup must not remove anything from an inherited socket-directory handle." \
 		"[ -f '$external_socket_dir/ssh-origin.sock' ]"
-}
-
-test_zxfer_session_initialize_replaces_inherited_awk_before_early_failure_reporting() {
-	marker="$TEST_TMPDIR/inherited-awk-executed"
-	fake_awk="$TEST_TMPDIR/inherited-awk"
-	cat >"$fake_awk" <<EOF
-#!/bin/sh
-: >"$marker"
-exit 99
-EOF
-	chmod +x "$fake_awk"
-	rm -f "$marker"
-
-	(
-		unset ZXFER_SECURE_PATH ZXFER_SECURE_PATH_APPEND
-		g_zxfer_secure_path=""
-		g_cmd_awk=$fake_awk
-		zxfer_init_session_environment() { exit 73; }
-		zxfer_abort_all_send_jobs() { return 0; }
-		zxfer_kill_registered_cleanup_pids() { return 0; }
-		zxfer_close_all_ssh_control_sockets() { return 0; }
-		zxfer_remove_ssh_control_socket_dir() { return 0; }
-		zxfer_remove_run_tmp_root() { return 0; }
-		g_option_V_very_verbose=0
-		zxfer_echoV() { :; }
-		zxfer_profile_emit_summary() { :; }
-		zxfer_emit_failure_report() {
-			zxfer_escape_report_value "early initialization failure" >/dev/null
-		}
-
-		zxfer_session_initialize
-	) >/dev/null 2>&1
-	status=$?
-
-	assertEquals "An early initialization failure should preserve its original status." 73 "$status"
-	assertFalse "Early failure reporting must not execute an inherited internal awk command." \
-		"[ -e '$marker' ]"
 }
 
 test_zxfer_session_run_does_not_promote_optional_beep_failure() {
@@ -330,111 +255,6 @@ test_zxfer_session_run_requires_local_parallel_for_jobs_before_any_helper_starts
 connect origin=operator@origin" "$(cat "$log")"
 }
 
-test_zxfer_trap_exit_promotes_migration_restore_failure_and_finishes_reporting() {
-	shutdown_log="$TEST_TMPDIR/session-migration-shutdown.log"
-	: >"$shutdown_log"
-	output=$(
-		(
-			trap - EXIT INT TERM HUP QUIT
-			g_services_need_relaunch=1
-			g_services_relaunch_in_progress=0
-			g_option_V_very_verbose=0
-			zxfer_abort_all_send_jobs() { return 0; }
-			zxfer_kill_registered_cleanup_pids() { return 0; }
-			zxfer_close_all_ssh_control_sockets() { return 0; }
-			zxfer_remove_ssh_control_socket_dir() {
-				printf '%s\n' socket-dir-sweep >>"$shutdown_log"
-				return 0
-			}
-			zxfer_remove_run_tmp_root() {
-				printf '%s\n' root-sweep >>"$shutdown_log"
-				return 0
-			}
-			zxfer_restore_migration_services_status_only() {
-				printf '%s\n' restore-attempt
-				g_zxfer_migration_service_restore_failure_message="Couldn't re-enable service svc:/broken:default."
-				return 37
-			}
-			zxfer_relaunch() {
-				printf '%s\n' exiting-relaunch-called
-				exit 91
-			}
-			zxfer_set_failure_context_if_empty() {
-				printf 'failure-context=%s|%s|%s\n' "$1" "$2" "$3"
-			}
-			zxfer_profile_stop_timer() { printf '%s\n' profile-finalized; }
-			zxfer_echoV() { printf 'verbose=%s\n' "$*"; }
-			zxfer_profile_emit_summary() { printf '%s\n' profile-summary; }
-			zxfer_emit_failure_report() { printf 'failure-report=%s\n' "$1"; }
-
-			true
-			zxfer_trap_exit
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Trap cleanup should promote a migration-service restore failure over an otherwise successful exit." \
-		37 "$status"
-	assertContains "Trap cleanup should call the status-only migration owner operation." \
-		"$output" "restore-attempt"
-	assertContains "Trap cleanup should record the migration restoration failure in structured context." \
-		"$output" "failure-context=runtime|trap cleanup|Couldn't re-enable service svc:/broken:default."
-	assertContains "Trap cleanup should continue through profile rendering after migration restoration fails." \
-		"$output" "profile-summary"
-	assertContains "Trap cleanup should continue through structured failure reporting with the promoted status." \
-		"$output" "failure-report=37"
-	assertNotContains "Trap cleanup must not call the exiting ordinary relaunch API." \
-		"$output" "exiting-relaunch-called"
-	assertEquals "Trap cleanup should remove the ssh socket directory once, before the report." \
-		1 "$(grep -c '^socket-dir-sweep$' "$shutdown_log")"
-	assertEquals "Trap cleanup should run both the pre-report and final run-root sweeps." \
-		2 "$(grep -c '^root-sweep$' "$shutdown_log")"
-}
-
-test_zxfer_trap_exit_warns_when_migration_restore_fails_after_primary_failure() {
-	output=$(
-		(
-			trap - EXIT INT TERM HUP QUIT
-			g_services_need_relaunch=1
-			g_services_relaunch_in_progress=0
-			g_zxfer_failure_class=runtime
-			g_zxfer_failure_stage=replication
-			g_zxfer_failure_message="primary replication failure"
-			g_option_V_very_verbose=0
-			zxfer_abort_all_send_jobs() { return 0; }
-			zxfer_kill_registered_cleanup_pids() { return 0; }
-			zxfer_close_all_ssh_control_sockets() { return 0; }
-			zxfer_remove_ssh_control_socket_dir() { return 0; }
-			zxfer_remove_run_tmp_root() { return 0; }
-			zxfer_restore_migration_services_status_only() {
-				g_zxfer_migration_service_restore_failure_message="Couldn't re-enable service svc:/broken:default."
-				return 37
-			}
-			zxfer_warn_stderr() { printf 'warning=%s\n' "$*" >&2; }
-			zxfer_echoV() { :; }
-			zxfer_profile_emit_summary() { :; }
-			zxfer_emit_failure_report() {
-				printf 'report=%s|%s|%s|%s\n' \
-					"$1" "$g_zxfer_failure_class" \
-					"$g_zxfer_failure_stage" "$g_zxfer_failure_message"
-			}
-
-			(exit 23)
-			zxfer_trap_exit
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "A secondary migration restore failure must preserve the primary exit status." \
-		23 "$status"
-	assertContains "A failed service restart must remain operator-visible beside the primary failure." \
-		"$output" "warning=Couldn't re-enable service svc:/broken:default."
-	assertContains "The primary structured failure context must remain unchanged." \
-		"$output" "report=23|runtime|replication|primary replication failure"
-	assertEquals "The failed service restart should be warned about exactly once." \
-		1 "$(printf '%s\n' "$output" | grep -c '^warning=')"
-}
-
 test_zxfer_note_trap_cleanup_failure_promotes_only_a_clean_exit_and_keeps_the_first_message() {
 	output=$(
 		(
@@ -456,100 +276,6 @@ first=17 <runtime|trap cleanup|first cleanup failure>
 second=17 <first cleanup failure>" "$output"
 }
 
-# A failed ssh close fills an empty report message only when it is the run's
-# first failure; every other cleanup step fills it whenever it is empty.
-test_zxfer_trap_exit_keeps_a_failed_ssh_close_out_of_an_earlier_failures_report() {
-	output=$(
-		(
-			trap - EXIT INT TERM HUP QUIT
-			zxfer_reset_failure_context "unit"
-			g_option_V_very_verbose=0
-			zxfer_abort_all_send_jobs() { return 0; }
-			zxfer_kill_registered_cleanup_pids() { return 0; }
-			zxfer_close_all_ssh_control_sockets() { return 19; }
-			zxfer_remove_ssh_control_socket_dir() { return 0; }
-			zxfer_remove_run_tmp_root() { return 0; }
-			zxfer_echoV() { :; }
-			zxfer_profile_emit_summary() { :; }
-			zxfer_emit_failure_report() {
-				printf 'report=%s|%s|<%s>\n' "$1" "${g_zxfer_failure_stage:-}" \
-					"${g_zxfer_failure_message:-}"
-			}
-			(exit 5)
-			zxfer_trap_exit
-		) 2>&1
-	)
-	status=$?
-
-	assertEquals "An earlier failure keeps its exit status." 5 "$status"
-	assertEquals "A failed ssh close must not fill the report of an earlier failure." \
-		"report=5|unit|<>" "$output"
-}
-
-# Purpose: Send one signal to a background subshell that installed the
-# session traps and sits in a sleep loop, like zxfer's -j poll, so the last
-# command status is 0 when the trap runs.
-# Usage: zxfer_session_test_signal_trapped_subshell <signal>; returns the
-# subshell's exit status and leaves its stderr in $TEST_TMPDIR/signal.stderr.
-zxfer_session_test_signal_trapped_subshell() {
-	l_signal_ready="$TEST_TMPDIR/signal.ready"
-	rm -f "$l_signal_ready"
-	(
-		zxfer_init_session_environment() { :; }
-		zxfer_session_initialize
-		: >"$l_signal_ready"
-		l_signal_polls=0
-		while [ "$l_signal_polls" -lt 30 ]; do
-			l_signal_polls=$((l_signal_polls + 1))
-			sleep 1
-		done
-	) >/dev/null 2>"$TEST_TMPDIR/signal.stderr" &
-	l_signal_pid=$!
-
-	l_signal_tries=0
-	while [ ! -e "$l_signal_ready" ] && [ "$l_signal_tries" -lt 100 ]; do
-		l_signal_tries=$((l_signal_tries + 1))
-		sleep 0.1 2>/dev/null || sleep 1
-	done
-	kill -s "$1" "$l_signal_pid" 2>/dev/null
-	wait "$l_signal_pid"
-}
-
-# Purpose: Assert one exit status and exactly one structured signal failure
-# report in $TEST_TMPDIR/signal.stderr.
-# Usage: zxfer_session_test_assert_signal_exit <actual-status> <expected-status>
-zxfer_session_test_assert_signal_exit() {
-	assertEquals "A signal should exit with status 128+signo." "$2" "$1"
-	assertEquals "A signal should emit exactly one structured failure report." \
-		1 "$(grep -c '^zxfer: failure report begin$' "$TEST_TMPDIR/signal.stderr")"
-	assertTrue "The report should name the signal stage." \
-		"grep -Fqx 'failure_stage: signal' '$TEST_TMPDIR/signal.stderr'"
-	assertTrue "The report should carry the signal exit status." \
-		"grep -Fqx 'message: zxfer was interrupted by a signal (exit status $2).' '$TEST_TMPDIR/signal.stderr'"
-}
-
-# A signal used to exit with the interrupted command's status: 0 after a
-# poll sleep, with no report. The handler now exits 128+signo and reports.
-test_zxfer_trap_exit_term_exits_143_with_one_signal_report() {
-	zxfer_session_test_signal_trapped_subshell TERM
-	zxfer_session_test_assert_signal_exit "$?" 143
-}
-
-# The INT trap runs `zxfer_trap_exit 130`. It is called directly because the
-# runner starts suites as async lists, which inherit INT ignored on some shells
-# (bash 3.2), and a non-interactive shell cannot trap a signal ignored on entry.
-test_zxfer_trap_exit_int_status_exits_130_with_one_signal_report() {
-	(
-		trap - EXIT INT TERM HUP QUIT
-		true
-		zxfer_trap_exit 130
-	) >/dev/null 2>"$TEST_TMPDIR/signal.stderr"
-	zxfer_session_test_assert_signal_exit "$?" 130
-}
-
-# zxfer-test-fragment: suites/zxfer_session_main_tests.sh
-# shellcheck source=tests/suites/zxfer_session_main_tests.sh
-. "$TESTS_DIR/suites/zxfer_session_main_tests.sh"
 # zxfer-test-fragment: suites/zxfer_session_remote_tests.sh
 # shellcheck source=tests/suites/zxfer_session_remote_tests.sh
 . "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"
@@ -560,7 +286,6 @@ test_zxfer_trap_exit_int_status_exits_130_with_one_signal_report() {
 suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_session.sh" \
-		"$TESTS_DIR/suites/zxfer_session_main_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_session_remote_tests.sh" \
 		"$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"
 }
