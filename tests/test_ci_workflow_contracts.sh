@@ -12,6 +12,7 @@ LINT_WORKFLOW_FILE="$ZXFER_ROOT/.github/workflows/lint.yml"
 COVERAGE_WORKFLOW_FILE="$ZXFER_ROOT/.github/workflows/coverage.yml"
 UNIT_WORKFLOW_FILE="$ZXFER_ROOT/.github/workflows/tests.yml"
 PERF_WORKFLOW_FILE="$ZXFER_ROOT/.github/workflows/perf.yml"
+PACKAGING_WORKFLOW_FILE="$ZXFER_ROOT/.github/workflows/packaging.yml"
 RUN_LINT_BIN="$ZXFER_ROOT/tests/run_lint.sh"
 CHECKOUT_PIN="actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
 
@@ -227,6 +228,28 @@ test_perf_workflow_reports_an_advisory_ab_with_full_history() {
 	assertEquals "The perf workflow should cancel superseded runs like the other workflows." \
 		"$(workflow_top_level_block "$UNIT_WORKFLOW_FILE" concurrency)" \
 		"$(workflow_top_level_block "$PERF_WORKFLOW_FILE" concurrency)"
+}
+
+# Nothing else builds packaging/zxfer.spec, so the packaging job must build it
+# from a source archive named as its Source0, run the packaged launcher, and
+# fail CI when either step fails.
+# shellcheck disable=SC2016,SC2317,SC2329  # Literal workflow expression; invoked indirectly by shunit2.
+test_packaging_workflow_builds_and_runs_the_rpm() {
+	packaging_job=$(workflow_job_body "$PACKAGING_WORKFLOW_FILE" rpm)
+
+	assertContains "The packaging job should build the spec with rpmbuild." \
+		"$packaging_job" 'rpmbuild -bb --define "_topdir $topdir" packaging/zxfer.spec'
+	assertContains "The packaging job should build from a source archive named as the spec's Source0." \
+		"$packaging_job" '--output="$topdir/SOURCES/v$version.tar.gz" HEAD'
+	assertContains "The packaging job should check that the packaged launcher reports the spec's version." \
+		"$packaging_job" 'grep -qxF "zxfer_version: $version" "$RUNNER_TEMP/report.txt"'
+	assertNotContains "A packaging failure must fail CI." "$packaging_job" "continue-on-error"
+	assertEquals "The packaging workflow should run on every push like the other workflows." \
+		"$(workflow_top_level_block "$UNIT_WORKFLOW_FILE" on)" \
+		"$(workflow_top_level_block "$PACKAGING_WORKFLOW_FILE" on)"
+	assertEquals "The packaging workflow should cancel superseded runs like the other workflows." \
+		"$(workflow_top_level_block "$UNIT_WORKFLOW_FILE" concurrency)" \
+		"$(workflow_top_level_block "$PACKAGING_WORKFLOW_FILE" concurrency)"
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.

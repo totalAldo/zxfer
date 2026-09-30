@@ -95,6 +95,6 @@ CHANGELOG.txt	-	-	-	CHANGELOG.txt	Release-note changes need operator-facing accu
 docs/*	-	-	-	docs/README.md,docs/testing.md	Documentation changes need link, spelling, and surface-consistency review.
 man/*	tests/test_generate_solaris_manpage.sh	-	-	man/zxfer.8,man/zxfer.1m	Man-page changes must preserve the canonical section 8 page and reproducible Solaris rendering.
 examples/*	-	-	-	examples/README.md,README.md	Example changes need CLI and safety consistency review.
-packaging/*	-	get_os_detection_test	-	packaging/README.txt,docs/external-tools.md	Packaging changes need install-path and dependency review.
+packaging/*	tests/test_contract_cli_golden.sh	get_os_detection_test	-	packaging/README.txt,docs/external-tools.md,CONTRIBUTING.md	Packaging changes need install-path and dependency review; the golden suite checks the spec's Version, and the Packaging workflow builds the spec with rpmbuild.
 .agents/*	-	-	-	AGENTS.md,CONTRIBUTING.md	Agent-workflow changes need contributor-guidance review.
 *	-	-	-	-	No focused mapping exists; run the full host-safe profile before merge.

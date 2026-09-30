@@ -225,6 +225,12 @@ It then bootstraps and runs these pinned tools:
 These are developer or CI dependencies, not runtime dependencies of the
 installed command.
 
+### Packaging Check
+
+The `packaging.yml` workflow installs Ubuntu's `rpm`, `rpm2cpio` and `cpio`
+packages to build `packaging/zxfer.spec` with `rpmbuild` and unpack the result;
+it also uses `git archive` for the source tarball. These are CI-only tools.
+
 ### VS Code / Codespaces Devcontainer
 
 The repository also ships `.devcontainer/` for GitHub Codespaces and local

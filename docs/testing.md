@@ -423,6 +423,7 @@ need root.
 | `coverage.yml` | Report-only bash-xtrace coverage (summary in the job summary, report as an artifact) and a non-blocking kcov pass over the contract and module suites in the digest-pinned `kcov/kcov` image with `procps` and `openssh-client` added (zxfer requires `ps`; the remote backup cases resolve `ssh`). |
 | `perf.yml` | The advisory `perf-advisory` job: `run_perf_ab.sh` against `origin/upstream-compat-final`, then against the code the push replaces (the merge base with `origin/main`, or `HEAD~1` on `main`) with `props`, plus the micro-bench TOTAL and ssh rows; never gates. |
 | `integration.yml` | The direct-host harness on ubuntu-26.04 (`sudo`, preserved workdir), and FreeBSD and OmniOS `vmactions` guests that run the harness in-guest (OmniOS under `/usr/xpg4/bin/sh`), copy failure artifacts back and restore the guest status in a host-side step. |
+| `packaging.yml` | The `rpm` job on ubuntu-26.04: `rpmbuild -bb` of `packaging/zxfer.spec` from a `git archive` tarball named as the spec's `Source0`, a check that the package holds the wrapper, the launcher, every `src/` module and the man page, and a run of the packaged launcher from its libexec tree (`-h`, then a failure report that must name the spec's version). Nothing is installed on the runner. |
 
 Every workflow cancels superseded runs for the same ref. The macOS lanes do
 not install ZFS: they are `/bin/sh` and BSD-userland portability gates. The

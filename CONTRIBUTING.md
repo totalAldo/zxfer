@@ -237,6 +237,19 @@ When behavior changes, update the relevant docs:
   features, ensure the corresponding Mermaid diagrams in `architecture.md` and
   `README.md` are updated to reflect the new control flow.
 
+## Versioning
+
+A zxfer version is `MAJOR.MINOR.YYYYMMDD`: the build date in the last field,
+with MAJOR or MINOR raised only for a deliberate milestone. One string names a
+build everywhere: `g_zxfer_version` in `src/zxfer_session.sh` (the
+`zxfer_version` field of failure reports and the `#version` line of `-k`
+backup metadata), `Version:` and the `%changelog` entry in
+`packaging/zxfer.spec`, and the `v<version>` tag the spec's `Source0` fetches.
+`tests/test_contract_cli_golden.sh` checks that the spec's `Version:` has this
+form and that a failure report names it, and the Packaging workflow builds the
+spec with `rpmbuild` on every push. This form replaced `2.0.0-YYYYMMDD` with
+2.0.20260930, because `rpmbuild` rejects a `-` in `Version:`.
+
 ## Filing Issues
 
 Use the GitHub issue forms for bug reports, feature requests, and

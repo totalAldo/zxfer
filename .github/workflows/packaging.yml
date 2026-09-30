@@ -1,0 +1,95 @@
+# Build packaging/zxfer.spec with rpmbuild the way a downstream packager
+# would, then run the packaged launcher from its libexec tree. Nothing else
+# builds the spec, so this is what catches a Version that rpmbuild rejects, a
+# module the package leaves out, or an install layout the launcher cannot run
+# from. Nothing is installed on the runner: the package is built and unpacked
+# under RUNNER_TEMP.
+name: Packaging
+
+on:
+  push:
+
+concurrency:
+  # Cancel superseded runs for the same pushed ref.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rpm:
+    name: rpmbuild (ubuntu-26.04)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install rpmbuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm rpm2cpio cpio
+      - name: Build the RPM from a source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^Version:[[:space:]]*//p' packaging/zxfer.spec)
+          topdir="$RUNNER_TEMP/rpmbuild"
+          mkdir -p "$topdir/SOURCES"
+          # Source0 is v<version>.tar.gz, which %autosetup unpacks into
+          # zxfer-<version>/, as GitHub's tag archive does.
+          git archive --format=tar.gz --prefix="zxfer-$version/" \
+            --output="$topdir/SOURCES/v$version.tar.gz" HEAD
+          rpmbuild -bb --define "_topdir $topdir" packaging/zxfer.spec
+          find "$topdir/RPMS" -name "zxfer-$version-*.noarch.rpm" >"$RUNNER_TEMP/rpm-file"
+          if [ "$(wc -l <"$RUNNER_TEMP/rpm-file")" -ne 1 ]; then
+            echo "::error::expected one zxfer-$version noarch RPM under $topdir/RPMS"
+            exit 1
+          fi
+      - name: Check the package and run the packaged launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^Version:[[:space:]]*//p' packaging/zxfer.spec)
+          rpm_file=$(cat "$RUNNER_TEMP/rpm-file")
+          bindir=$(rpm --eval '%{_bindir}')
+          libexecdir=$(rpm --eval '%{_libexecdir}')/zxfer
+          mandir=$(rpm --eval '%{_mandir}')
+
+          # The package holds the wrapper, the launcher, every module and the
+          # man page (compressed or not).
+          rpm -qlp "$rpm_file" | sort >"$RUNNER_TEMP/rpm-files"
+          {
+            printf '%s\n' "$bindir/zxfer" "$libexecdir/zxfer"
+            git ls-files 'src/*.sh' | sed "s|^|$libexecdir/|"
+          } | sort >"$RUNNER_TEMP/expected-files"
+          missing=$(comm -23 "$RUNNER_TEMP/expected-files" "$RUNNER_TEMP/rpm-files")
+          if [ -n "$missing" ]; then
+            echo "::error::missing from the package: $missing"
+            exit 1
+          fi
+          grep -q "^$mandir/man8/zxfer\.8" "$RUNNER_TEMP/rpm-files"
+
+          root="$RUNNER_TEMP/rpm-root"
+          mkdir -p "$root"
+          (cd "$root" && rpm2cpio "$rpm_file" | cpio -idm --quiet)
+          # The wrapper runs the launcher in the private libexec tree.
+          grep -qxF "exec $libexecdir/zxfer \"\$@\"" "$root$bindir/zxfer"
+
+          # -h prints the usage before any module loads.
+          "$root$libexecdir/zxfer" -h >"$RUNNER_TEMP/usage.txt"
+          grep -q '^usage:' "$RUNNER_TEMP/usage.txt"
+          # A run with no destination loads every module and stops with a
+          # failure report (a usage error, or a dependency failure when the
+          # runner has no zfs) that names the packaged version.
+          status=0
+          "$root$libexecdir/zxfer" -R tank/src 2>"$RUNNER_TEMP/report.txt" || status=$?
+          cat "$RUNNER_TEMP/report.txt"
+          case $status in
+          1 | 2) ;;
+          *)
+            echo "::error::the packaged launcher exited $status"
+            exit 1
+            ;;
+          esac
+          grep -qxF "zxfer_version: $version" "$RUNNER_TEMP/report.txt"

@@ -19,3 +19,19 @@ For the complete command reference, install the man page and run:
     man zxfer
 
 	or read man/zxfer.8 / man/zxfer.1m directly from this repository.
+
+Building the RPM
+----------------
+
+packaging/zxfer.spec is a starting point for downstream packages, and CI
+builds it on every push (.github/workflows/packaging.yml). To build it by hand
+from a checkout, with rpmbuild installed:
+
+    version=$(sed -n 's/^Version:[[:space:]]*//p' packaging/zxfer.spec)
+    mkdir -p ~/rpmbuild/SOURCES
+    git archive --format=tar.gz --prefix="zxfer-$version/" \
+        --output="$HOME/rpmbuild/SOURCES/v$version.tar.gz" HEAD
+    rpmbuild -bb packaging/zxfer.spec
+
+The version is MAJOR.MINOR.YYYYMMDD (see CONTRIBUTING.md); rpmbuild rejects a
+"-" in Version.

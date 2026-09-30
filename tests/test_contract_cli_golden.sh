@@ -574,5 +574,18 @@ test_failure_report_names_the_packaged_release_version() {
 		"$(grep '^zxfer_version: ' "$g_golden_stderr_file")"
 }
 
+# A version is MAJOR.MINOR.YYYYMMDD, one string for the code, the spec and
+# the tag: rpmbuild rejects a Version with a "-", as the older
+# 2.0.0-YYYYMMDD form had, and the test above ties the code's version to the
+# spec's.
+test_packaged_version_is_major_minor_and_build_date() {
+	l_spec_version=$(sed -n 's/^Version:[[:space:]]*//p' "$ZXFER_ROOT/packaging/zxfer.spec")
+	l_version_shape=$(printf '%s\n' "$l_spec_version" |
+		awk '/^[0-9]+\.[0-9]+\.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$/ { print "ok" }')
+
+	assertEquals "packaging/zxfer.spec's Version must be MAJOR.MINOR.YYYYMMDD: $l_spec_version" \
+		"ok" "$l_version_shape"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

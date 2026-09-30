@@ -89,7 +89,7 @@ zxfer_reset_session_state() {
 	zxfer_reset_property_read_state
 	zxfer_reset_remote_host_state
 
-	g_zxfer_version="2.0.0-20260928"
+	g_zxfer_version="2.0.20260930"
 	g_zxfer_local_os=""
 	g_backup_file_extension=".zxfer_backup_info"
 }
