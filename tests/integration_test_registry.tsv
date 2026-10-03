@@ -10,6 +10,7 @@ generate_tests_replication	group	no
 idempotent_replication_test	test	no
 auto_snapshot_replication_test	test	no
 auto_snapshot_nonrecursive_test	test	no
+auto_snapshot_yield_test	test	no
 trailing_slash_destination_test	test	no
 exclude_filter_test	test	no
 missing_destination_error_test	test	no
@@ -80,6 +81,7 @@ remote_parallel_rendered_failure_origin_test	test	no
 managed_ssh_policy_test	test	no
 parallel_jobs_listing_test	test	no
 migration_service_success_test	test	no
+migration_yield_test	test	no
 migration_service_failure_test	test	no
 get_os_detection_test	test	no
 verbose_debug_logging_test	test	no

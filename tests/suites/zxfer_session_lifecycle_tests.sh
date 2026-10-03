@@ -24,6 +24,7 @@ test_zxfer_reset_session_state_clears_each_owners_inherited_state() {
 			g_zxfer_services_to_restart=stale
 			g_zxfer_profile_source_zfs_calls=9
 			g_zxfer_new_snapshot_name=stale
+			g_zxfer_new_snapshot_taken=1
 			g_zxfer_wrapped_command_result=stale
 			g_destination_existence_cache=stale
 			g_zxfer_live_destination_listing_file=stale
@@ -51,7 +52,7 @@ test_zxfer_reset_session_state_clears_each_owners_inherited_state() {
 				"ssh transport: origin socket=<$g_ssh_origin_control_socket>" \
 				"migration: restart=<$g_zxfer_services_to_restart>" \
 				"profile: source zfs calls=$g_zxfer_profile_source_zfs_calls" \
-				"replication: snapshot name=<$g_zxfer_new_snapshot_name>" \
+				"replication: snapshot name=<$g_zxfer_new_snapshot_name> taken=<$g_zxfer_new_snapshot_taken>" \
 				"send/receive: wrapped=<$g_zxfer_wrapped_command_result>" \
 				"destination existence: <$g_destination_existence_cache>" \
 				"destination listing: <$g_zxfer_live_destination_listing_file>" \
@@ -79,7 +80,7 @@ exec: spawn mode=<>
 ssh transport: origin socket=<>
 migration: restart=<>
 profile: source zfs calls=0
-replication: snapshot name=<>
+replication: snapshot name=<> taken=<0>
 send/receive: wrapped=<>
 destination existence: <>
 destination listing: <>

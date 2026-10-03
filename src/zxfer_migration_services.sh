@@ -100,8 +100,8 @@ EOF
 
 # Purpose: Stop the -c services, unmount every source dataset and take the -m
 # snapshot.
-# Usage: zxfer_prepare_migration_services, after discovery; under -n only
-# previews the commands.
+# Usage: zxfer_prepare_migration_services, after the first pass's discovery;
+# under -n only previews the commands.
 zxfer_prepare_migration_services() {
 	[ "$g_option_m_migrate" -eq 1 ] || return
 	zxfer_set_failure_stage "migration service handling"

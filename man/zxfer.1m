@@ -788,6 +788,14 @@ and
 (i.e. remote transfers) are not supported with this option enabled.
 .sp
 With
+[\fB\-Y\fR],
+only the first iteration stops the
+[\fB\-c\fR]
+services, checks and unmounts the source filesystems and takes the snapshot,
+and the services are started again at that iteration's end; later iterations
+only send what is still missing.
+.sp
+With
 \fB\-n\fR,
 these migration preflight steps are previewed only.
 .TP 8n
@@ -932,6 +940,10 @@ The snapshot is named
 \fIzxfer_<pid>_<YYYYmmddHHMMSS>\fR
 and is recursive with
 [\fB\-R\fR].
+With
+[\fB\-Y\fR],
+only the first iteration takes it; later iterations send what is still
+missing.
 .sp
 With
 \fB\-n\fR,
@@ -1019,6 +1031,13 @@ uses zfs ra(w) send mode
 have been performed, whichever comes first. Each iteration lists the source
 and destination afresh, so a destination that another tool changed after one
 iteration's discovery is seen by the next.
+Only the first iteration takes the
+[\fB\-s\fR]
+or
+[\fB\-m\fR]
+snapshot and runs the
+[\fB\-m\fR]
+service stops and unmounts, so a run takes one snapshot.
 .TP 8n
 \fB\-z\fR
 Pipe the send stream through zstd -3 compression and then decode it on the

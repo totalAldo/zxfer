@@ -1303,6 +1303,41 @@ svcadm enable $CONTRACT_SVC_TWO" "$(contract_migration_steps)"
 		3 "$(grep -c '^unmount ' "$ZFS_LOG")"
 }
 
+# -m -c -Y prepares the migration once per run (2026-09-30): only the first
+# pass stops the services, checks and unmounts every dataset and takes the
+# snapshot, and each service starts once at that pass's end. A later pass
+# only sends; the canned destination never records a receive, so all 8
+# passes receive every dataset.
+test_migrate_prepares_once_per_run_and_later_yield_passes_only_send() {
+	contract_setup_migration migrate_yield
+	l_src=$ZXFER_MOCKBIN_SOURCE_ROOT
+	l_dst=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT
+
+	contract_run_migration -Y -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
+	l_status=$?
+	contract_migration_steps >"$CASE_DIR/migration.steps"
+
+	assertEquals "-Y -m -c should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_status"
+	assertEquals "the first pass prepares the migration, then starts each service once" \
+		"svcadm disable -st $CONTRACT_SVC_ONE
+svcadm disable -st $CONTRACT_SVC_TWO
+get -Ho value mounted $l_src
+get -Ho value mounted $l_src/child1
+get -Ho value mounted $l_src/child2
+unmount $l_src
+unmount $l_src/child1
+unmount $l_src/child2
+MUTATE snapshot -r $l_src@zxfer_N
+END receive $l_dst
+END receive $l_dst/child1
+END receive $l_dst/child2
+svcadm enable $CONTRACT_SVC_ONE
+svcadm enable $CONTRACT_SVC_TWO" "$(sed 14q "$CASE_DIR/migration.steps")"
+	assertEquals "passes 2 to 8 only receive, three datasets each" \
+		"21 21" "$(sed 1,14d "$CASE_DIR/migration.steps" |
+			awk '/^END receive / { n++ } END { print NR, n + 0 }')"
+}
+
 # -n -m -c previews the service and unmount commands and runs none of them:
 # no svcadm call and no zfs call. The dry run previews only the named source
 # dataset, and its EXIT trap previews starting each stopped service again.

@@ -17,8 +17,9 @@
 #     newer destroyed snapshot with a send pending;
 #   - the pass: -n previews of -s and -m with every skipped live step named,
 #     -s -N sending from the rediscovery, -m taking one snapshot after every
-#     unmount, and -Y re-reading properties, keeping the newest -k rows, and
-#     counting sends under -V;
+#     unmount, -s -Y taking its snapshot on the first pass only, and -Y
+#     re-reading properties, keeping the newest -k rows, and counting sends
+#     under -V;
 #   - the post-seed property pass after every receive (-j 1, -j 2 and -T),
 #     and remote runs over an ssh that reads its stdin;
 #   - -j: a descendant waits only for its own ancestor within the job limit,
@@ -579,6 +580,40 @@ test_migrate_takes_one_snapshot_after_every_unmount_and_replicates_every_dataset
 	done
 	assertEquals "the source is rediscovered after the snapshot" \
 		2 "$(grep -cFx "list -Hr -o name,guid -s creation -t snapshot $S" "$ZFS_LOG")"
+}
+
+# Invariant (2026-09-30): -s takes one snapshot per run. Only the first -Y
+# pass takes it and rediscovers after it; every later pass sends from its own
+# discovery and takes none. The canned destination never records a receive,
+# so all 8 passes send, and a second snapshot fails here the way zfs refuses
+# a snapshot name that already exists.
+test_yield_passes_take_the_snapshot_option_once_per_run() {
+	planning_setup_env
+	mkdir -p "$CASE_DIR/snapshot_calls" || fail "Unable to create the fault counter."
+
+	(
+		MOCK_FAIL_TOOL=zfs
+		MOCK_FAIL_CALL=2
+		MOCK_FAIL_DIR="$CASE_DIR/snapshot_calls"
+		MOCK_FAIL_MATCH="snapshot *"
+		MOCK_FAIL_STDERR="cannot create snapshot: dataset already exists"
+		export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH \
+			MOCK_FAIL_STDERR
+		planning_run_zxfer "$FIXTURE_DIR/incremental" -Y -s -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
+	)
+	l_run_status=$?
+	assertEquals "-Y -s should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	grep '^MUTATE ' "$ZFS_LOG" >"$CASE_DIR/mutations"
+	sendrecv_assert_one_snapshot_line "$CASE_DIR/mutations" "MUTATE snapshot -r $S@" ""
+	assertEquals "the snapshot is the only change" 1 "$(wc -l <"$CASE_DIR/mutations" | tr -d ' ')"
+	assertEquals "all 8 passes send the root" \
+		8 "$(grep -cFx "send -I $S@snap2 $S@snap3" "$ZFS_LOG")"
+	assertEquals "the first pass discovers before and after its snapshot, each later pass once" \
+		9 "$(grep -cFx "list -Hr -o name,guid -s creation -t snapshot $S" "$ZFS_LOG")"
+	l_snapshot_at=$(awk '/^MUTATE snapshot / { print NR; exit }' "$ZFS_LOG")
+	l_send_at=$(awk '/^send / { print NR; exit }' "$ZFS_LOG")
+	assertTrue "the snapshot must come before the first send (snapshot ${l_snapshot_at:-none}, send ${l_send_at:-none})" \
+		"[ '${l_snapshot_at:-99999}' -lt '${l_send_at:-0}' ]"
 }
 
 # Invariant: each -Y pass reads the properties afresh, the -k rows of all

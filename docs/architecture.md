@@ -127,7 +127,9 @@ module or a chain of setters.
   writer of the published plan; a seed receive records its new anchor
   through it
 - [../src/zxfer_replication.sh](../src/zxfer_replication.sh): the pass roots,
-  the `-s`/`-m` snapshot, the numbered dataset iteration list, the `-g`
+  the `-s`/`-m` snapshot (and the flag that keeps later `-Y` passes from
+  taking it or repeating the `-m` preparation), the numbered dataset
+  iteration list, the `-g`
   pre-pass, the rollback, seed and send of each dataset, its failure stage,
   the post-seed property pass, the per-pass send/destroy marker used by `-Y`,
   and orchestration across discovery, planning, and transfer
@@ -505,7 +507,8 @@ one item per argument, so no byte in a property value can become an extra
 10. Once the send jobs finish, reconcile the properties of datasets that were
     seeded into empty destinations; `-k` rows are published after that pass
     and at run end.
-11. Repeat when `-Y` is enabled.
+11. Repeat when `-Y` is enabled; a later pass takes no `-s` snapshot and
+    repeats no `-m` preparation.
 12. Emit structured failure reporting on non-zero exit.
 
 ## Execution Lifecycle Diagrams
@@ -556,7 +559,7 @@ flowchart TD
     P --> Q["Run zxfer_get_zfs_list() to cache source and destination state"]
     Q --> Q1["Source snapshot listing runs as a tracked background helper and later waits by PID"]
     Q1 --> R["Optional unsupported-property probing when -U has later work to filter"]
-    R --> S["Optional preflight snapshot via -s or migration prep via -m"]
+    R --> S["First pass only: optional preflight snapshot via -s or migration prep via -m"]
     S --> T["-g pre-pass: plan every dataset and refuse divergence; with -d apply -g to planned deletes before copy"]
     T --> U["Run zxfer_copy_filesystems()"]
     N --> V{"Repeat pass?"}

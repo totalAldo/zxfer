@@ -604,6 +604,100 @@ EOF
 	log "Migration service success test passed"
 }
 
+migration_yield_test() {
+	log "Starting migration yield test"
+
+	mock_path="$WORKDIR/mock_svcadm_yield"
+	prepare_mock_bin_dir "$mock_path" zfs
+	cat >"$mock_path/svcadm" <<'EOF'
+#!/bin/sh
+log=${MOCK_SVCADM_LOG:-}
+cmd=$1
+shift
+service=""
+if [ "$cmd" = "disable" ]; then
+	if [ "$1" = "-st" ]; then
+		service=$2
+	else
+		service=$1
+	fi
+	[ -n "$log" ] && printf 'disable:%s\n' "$service" >>"$log"
+	exit 0
+fi
+if [ "$cmd" = "enable" ]; then
+	service=$1
+	[ -n "$log" ] && printf 'enable:%s\n' "$service" >>"$log"
+	exit 0
+fi
+exit 0
+EOF
+	chmod +x "$mock_path/svcadm"
+	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	svc_log="$WORKDIR/svcadm_yield.log"
+	safe_rm_f "$svc_log"
+
+	src_dataset="$SRC_POOL/migrate_yield_src"
+	dest_root="$DEST_POOL/migrate_yield_dest"
+	dest_dataset="$dest_root/${src_dataset##*/}"
+	mount_dir="$WORKDIR/migrate_yield_mount"
+
+	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
+	safe_rm_rf "$mount_dir"
+
+	zfs create "$src_dataset"
+	zfs create "$dest_root"
+	mkdir -p "$mount_dir"
+	zfs set mountpoint="$mount_dir" "$src_dataset"
+	append_data_to_dataset "$src_dataset" "file.txt" "migrate"
+	zfs snap -r "$src_dataset@mig1"
+
+	# The first pass migrates and sends the -m snapshot, so a second pass
+	# runs. It must stop no service, unmount nothing and take no snapshot,
+	# and with nothing left to send it ends the loop.
+	set +e
+	output=$(ZXFER_SECURE_PATH="$secure_path" MOCK_SVCADM_LOG="$svc_log" \
+		run_zxfer -v -Y -m -c svc:/system/filesystem/local -R "$src_dataset" "$dest_root" 2>&1)
+	status=$?
+	set -e
+
+	if [ "$status" -ne 0 ]; then
+		fail "Expected zxfer -Y -m -c to exit successfully. Output: $output"
+	fi
+
+	iter_count=$(printf '%s\n' "$output" | awk '/Begin Iteration/ { n++ } END { print n + 0 }')
+	if [ "$iter_count" -ne 2 ]; then
+		fail "Expected two iterations under -Y -m, the second with nothing to send; found $iter_count. Output: $output"
+	fi
+
+	svc_calls=$(cat "$svc_log")
+	if [ "$svc_calls" != "disable:svc:/system/filesystem/local
+enable:svc:/system/filesystem/local" ]; then
+		fail "Expected the service stopped and started once per run; svcadm calls: $svc_calls"
+	fi
+
+	snap_count=$(list_exact_snapshot_names_for_dataset "$src_dataset" |
+		awk '/@zxfer_/ { n++ } END { print n + 0 }')
+	if [ "$snap_count" -ne 1 ]; then
+		fail "Expected one -m snapshot of $src_dataset per run; found $snap_count."
+	fi
+
+	src_mounted=$(zfs get -H -o value mounted "$src_dataset")
+	dest_mounted=$(zfs get -H -o value mounted "$dest_dataset")
+	dest_mountpoint=$(zfs get -H -o value mountpoint "$dest_dataset")
+
+	if [ "$src_mounted" != "no" ]; then
+		fail "Source dataset $src_dataset should remain unmounted after migration; mounted=$src_mounted."
+	fi
+	if [ "$dest_mounted" != "yes" ]; then
+		fail "Destination dataset $dest_dataset should be mounted after migration; mounted=$dest_mounted."
+	fi
+	if [ "$dest_mountpoint" != "$mount_dir" ]; then
+		fail "Destination mountpoint expected $mount_dir, got $dest_mountpoint."
+	fi
+
+	log "Migration yield test passed"
+}
+
 migration_service_failure_test() {
 	log "Starting migration service failure test"
 

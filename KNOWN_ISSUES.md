@@ -16,18 +16,6 @@ suites.
 
 ## Correctness And Portability
 
-### Medium: `-s` with `-Y` reuses the snapshot name on later passes
-
-`zxfer_stamp_new_snapshot_name` in `src/zxfer_replication.sh` names the `-s`
-snapshot `zxfer_<pid>_<YYYYmmddHHMMSS>` once per run, and every `-Y` pass's
-`zxfer_newsnap` reuses that name. Because the first pass always sends the new
-snapshot, a `-s -Y` run always starts a second pass, whose
-`zfs snapshot -r SOURCE@<same name>` fails on real ZFS with "dataset already
-exists", so the run exits non-zero after the first pass already replicated. Nothing is destroyed. The canned-zfs
-black-box harness shows the repeated name (one `snapshot -r` per pass with the
-same name) but does not model the failure. Choosing either one snapshot per
-run or a fresh name per pass is an interface decision still to be made.
-
 ### Low: a dataset recreated during a recursive property read can take forged property values
 
 With `-R` and `-P` or `-o`, each side's properties are read with two

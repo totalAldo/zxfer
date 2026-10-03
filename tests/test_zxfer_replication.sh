@@ -9,11 +9,11 @@
 # sweep in tests/test_contract_failures.sh.
 #
 # Pinned here: operand validation, the -U probe decision and the iteration
-# list's order (one table each); the -s/-m snapshot name; the guard that
-# never sends a snapshot incrementally to itself; and fail-closed branches no
-# mock can reach (a discovery or backup preflight that fails without
-# throwing, awk, sort and record-split failures) plus the post-seed queue's
-# dedupe and sort.
+# list's order (one table each); the -s/-m snapshot name and the gate that
+# takes it once per run; the guard that never sends a snapshot incrementally
+# to itself; and fail-closed branches no mock can reach (a discovery or
+# backup preflight that fails without throwing, awk, sort and record-split
+# failures) plus the post-seed queue's dedupe and sort.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -262,6 +262,39 @@ test_run_zfs_mode_fails_closed_before_migration_when_discovery_returns_failure()
 		"$output" "throw=Failed to retrieve the snapshot lists for [tank/src] and [backup/target]. status=1"
 	assertEquals "No -m unmount, snapshot, or send may follow a failed discovery." \
 		"" "$(cat "$STUB_ZFS_CMD_LOG")$(cat "$STUB_NEW_SNAP_LOG")"
+}
+
+# Row: g_zxfer_new_snapshot_taken|steps. Only an exact 1 (a snapshot an
+# earlier -Y pass of the run took) skips the -s snapshot and the -m
+# preparation; any other value, even a malformed one, takes both. Every row
+# must still reach the copy step.
+test_run_zfs_mode_skips_the_snapshot_steps_only_after_the_run_took_its_snapshot() {
+	g_option_s_make_snapshot=1
+	while IFS='|' read -r row_taken row_steps; do
+		: >"$STUB_NEW_SNAP_LOG"
+		(
+			g_zxfer_new_snapshot_taken=$row_taken
+			zxfer_prepare_zfs_mode_roots() { g_initial_source="tank/src"; }
+			zxfer_check_backup_storage_dir_if_needed() { :; }
+			zxfer_initialize_replication_context() { :; }
+			zxfer_refresh_dataset_iteration_state() { :; }
+			zxfer_prepare_migration_services() {
+				printf 'prepare migration\n' >>"$STUB_NEW_SNAP_LOG"
+			}
+			zxfer_perform_grandfather_protection_checks() { :; }
+			zxfer_copy_filesystems() {
+				printf 'copy filesystems\n' >>"$STUB_NEW_SNAP_LOG"
+			}
+			zxfer_run_zfs_mode
+		) >/dev/null 2>&1
+		assertEquals "snapshot steps with taken=[$row_taken]" \
+			"$(printf '%b' "$row_steps")" "$(cat "$STUB_NEW_SNAP_LOG")"
+	done <<'EOF'
+1|copy filesystems
+0|tank/src\nprepare migration\ncopy filesystems
+|tank/src\nprepare migration\ncopy filesystems
+stale|tank/src\nprepare migration\ncopy filesystems
+EOF
 }
 
 test_copy_filesystems_rethrows_iteration_list_dedupe_failures() {

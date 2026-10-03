@@ -216,6 +216,7 @@ generate_tests_replication
 idempotent_replication_test
 auto_snapshot_replication_test
 auto_snapshot_nonrecursive_test
+auto_snapshot_yield_test
 trailing_slash_destination_test
 exclude_filter_test
 missing_destination_error_test
@@ -286,6 +287,7 @@ remote_parallel_rendered_failure_origin_test
 managed_ssh_policy_test
 parallel_jobs_listing_test
 migration_service_success_test
+migration_yield_test
 migration_service_failure_test
 get_os_detection_test
 verbose_debug_logging_test
@@ -302,7 +304,7 @@ hostile_property_backup_restore_test
 hostile_property_record_shaped_value_test
 hostile_property_dash_name_test'
 
-	assertEquals "The registry should preserve all 96 integration tests and groups in their existing order." \
+	assertEquals "The registry should preserve all 98 integration tests and groups in their existing order." \
 		"$expected" "$actual"
 	assertEquals "usage_error_tests should remain the sole pre-pool check and still appear in the main sequence." \
 		"usage_error_tests" "$(zxfer_integration_registry_pre_pool_names)"
@@ -344,10 +346,10 @@ integration/snapshot_replication_tests.sh'
 
 	assertEquals "Every integration/*_tests.sh fragment should load, in C sort order." \
 		"$expected_paths" "$actual_paths"
-	assertEquals "Every one of the 96 registered tests and groups should have one fragment definition." \
-		96 "$definition_count"
+	assertEquals "Every one of the 98 registered tests and groups should have one fragment definition." \
+		98 "$definition_count"
 	assertEquals "Integration function definitions should remain unique across fragments." \
-		96 "$unique_definition_count"
+		98 "$unique_definition_count"
 	assertEquals "The runner definition scan should complete successfully." \
 		0 "$runner_definition_status"
 	assertEquals "The registered-definition intersection should complete successfully." \
