@@ -144,6 +144,7 @@ zxfer_property_test_set() {
 test_destination_property_commands_render_instead_of_running_on_dry_runs() {
 	(
 		g_option_n_dryrun=1
+		g_option_R_recursive="tank/src"
 		g_option_T_target_host=""
 		g_cmd_zfs="/sbin/zfs"
 		zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=0; }
@@ -157,7 +158,9 @@ test_destination_property_commands_render_instead_of_running_on_dry_runs() {
 		zxfer_run_zfs_create_with_properties no filesystem "" "compression=lz4,quota=1G" "backup/dst"
 		zxfer_property_test_set quota=1G backup/dst
 		zxfer_property_test_inherit quota backup/dst
-	) >"$TEST_TMPDIR/dry_run_local.out"
+	) >"$TEST_TMPDIR/dry_run_local.out" 2>"$TEST_TMPDIR/dry_run_local.err"
+	assertFalse "dry-run property creation must not print a creation-attempt notice" \
+		"[ -s '$TEST_TMPDIR/dry_run_local.err' ]"
 	assertEquals "'/sbin/zfs' 'create' '-p' 'backup/dst'
 '/sbin/zfs' 'create' '-o' 'compression=lz4' 'backup/dst/child'
 list=<>
@@ -343,7 +346,14 @@ test_property_transfer_helpers_preserve_caller_ifs_and_globbing() {
 	result=$(zxfer_property_test_apply "backup/dst/child" 0 "" "compression=lz4,atime=off" "checksum=sha256")
 	zxfer_plan_property_changes "compression=lz4=local,atime=off=local" "" 1 filesystem "" "" "" \
 		"compression=off=local"
-	l_initial_set=$g_zxfer_plan_initial_set_result
+	{
+		IFS= read -r l_unused_override
+		IFS= read -r l_unused_creation
+		IFS= read -r l_unused_dest
+		IFS= read -r l_initial_set
+	} <<EOF
+$g_zxfer_property_plan_result
+EOF
 	l_unsupported=$(
 		zxfer_probe_destination_existence() { g_zxfer_destination_exists_result=1; }
 		zxfer_run_source_zfs_cmd() { zxfer_property_test_fake_unsupported_scan source "$@"; }

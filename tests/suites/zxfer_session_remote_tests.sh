@@ -146,7 +146,7 @@ test_init_variables_resolves_each_endpoint_on_its_own_host() {
 			g_cmd_decompress="zstd -d"
 			zxfer_init_variables
 			printf '%s\n' "local=$g_zxfer_local_os" \
-				"source=$g_source_operating_system|$g_origin_cmd_zfs|$g_origin_cmd_compress_safe" \
+				"source=$g_origin_cmd_zfs|$g_origin_cmd_compress_safe" \
 				"destination=$g_destination_operating_system|$g_target_cmd_zfs|$g_target_cmd_decompress_safe" \
 				"cat=$g_cmd_cat"
 		)
@@ -154,7 +154,7 @@ test_init_variables_resolves_each_endpoint_on_its_own_host() {
 
 	assertEquals "Each endpoint should be resolved on its own host." \
 		"local=LocalOS
-source=OS of origin.example pfexec|zfs on origin.example pfexec|zstd -T0 -9 on origin.example pfexec
+source=zfs on origin.example pfexec|zstd -T0 -9 on origin.example pfexec
 destination=OS of target.example doas|zfs on target.example doas|zstd -d on target.example doas
 cat=cat on origin.example pfexec" "$result"
 }

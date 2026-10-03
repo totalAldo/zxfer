@@ -1,8 +1,12 @@
 ### prelude-with-symlink-guard
-PATH='/secure/bin:/usr/bin';
+'set' '--' '/secure/bin:/usr/bin' 'target.example doas' '/var/db/zxfer/tank/src/backup.meta' 'metadata' '98' 'id' 'ls' 'awk';
+PATH=$1;
 export PATH;
-
-l_required_host='target.example doas';
+l_required_host=$2;
+l_scan_path=$3;
+l_scan_kind=$4;
+l_scan_status=$5;
+shift 5;
 zxfer_require_remote_backup_tool() {
   l_required_tool=$1;
   if command -v "$l_required_tool" >/dev/null 2>&1; then
@@ -11,11 +15,10 @@ zxfer_require_remote_backup_tool() {
   printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
   exit 99;
 };
-for l_required_tool in 'id' 'ls' 'awk'; do
+for l_required_tool in "$@"; do
   zxfer_require_remote_backup_tool "$l_required_tool";
 done;
 
-l_scan_path='/var/db/zxfer/tank/src/backup.meta';
 l_scan_rest=$l_scan_path;
 l_scan_candidate='';
 case "$l_scan_rest" in
@@ -38,18 +41,32 @@ while [ -n "$l_scan_rest" ]; do
   /*/*) ;;
   /*) continue ;;
   esac;
-  if [ "$l_scan_candidate" = "$l_scan_path" ]; then
+  case "$l_scan_kind:$l_scan_candidate" in
+  directory:"$l_scan_path")
+    echo 'Refusing to use symlinked zxfer backup directory.' >&2;
+    ;;
+  metadata:"$l_scan_path")
     echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
-  else
-    echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
-  fi;
-  exit 98;
+    ;;
+  *)
+    if [ "$l_scan_kind" = directory ]; then
+      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    else
+      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    fi;
+    ;;
+  esac;
+  exit "$l_scan_status";
 done;
 ### directory-prepare
-PATH='/secure/bin:/usr/bin';
+'set' '--' '/secure/bin:/usr/bin' 'target.example doas' '/var/db/zxfer/tank/src' 'directory' '92' 'mkdir' 'chmod' 'id' 'ls' 'awk';
+PATH=$1;
 export PATH;
-
-l_required_host='target.example doas';
+l_required_host=$2;
+l_scan_path=$3;
+l_scan_kind=$4;
+l_scan_status=$5;
+shift 5;
 zxfer_require_remote_backup_tool() {
   l_required_tool=$1;
   if command -v "$l_required_tool" >/dev/null 2>&1; then
@@ -58,11 +75,10 @@ zxfer_require_remote_backup_tool() {
   printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
   exit 99;
 };
-for l_required_tool in 'mkdir' 'chmod' 'id' 'ls' 'awk'; do
+for l_required_tool in "$@"; do
   zxfer_require_remote_backup_tool "$l_required_tool";
 done;
 
-l_scan_path='/var/db/zxfer/tank/src';
 l_scan_rest=$l_scan_path;
 l_scan_candidate='';
 case "$l_scan_rest" in
@@ -85,28 +101,40 @@ while [ -n "$l_scan_rest" ]; do
   /*/*) ;;
   /*) continue ;;
   esac;
-  if [ "$l_scan_candidate" = "$l_scan_path" ]; then
+  case "$l_scan_kind:$l_scan_candidate" in
+  directory:"$l_scan_path")
     echo 'Refusing to use symlinked zxfer backup directory.' >&2;
-  else
-    echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
-  fi;
-  exit 92;
+    ;;
+  metadata:"$l_scan_path")
+    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    ;;
+  *)
+    if [ "$l_scan_kind" = directory ]; then
+      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    else
+      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    fi;
+    ;;
+  esac;
+  exit "$l_scan_status";
 done;
-
-if [ -e '/var/db/zxfer/tank/src' ] && [ ! -d '/var/db/zxfer/tank/src' ]; then
+'set' '--' '/var/db/zxfer/tank/src' '/var/db/zxfer/tank/src';
+l_prepare_dir=$1;
+l_prepare_ls_path=$2;
+if [ -e "$l_prepare_dir" ] && [ ! -d "$l_prepare_dir" ]; then
   echo 'Backup path exists but is not a directory.' >&2;
   exit 92;
 fi;
 umask 077;
-if ! mkdir -p '/var/db/zxfer/tank/src'; then
+if ! mkdir -p "$l_prepare_dir"; then
   echo 'Error creating secure backup directory.' >&2;
   exit 92;
 fi;
-if ! chmod 700 '/var/db/zxfer/tank/src'; then
+if ! chmod 700 "$l_prepare_dir"; then
   echo 'Error securing backup directory.' >&2;
   exit 92;
 fi;
-l_dir_uid=$(ls -ldn '/var/db/zxfer/tank/src' 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
+l_dir_uid=$(ls -ldn "$l_prepare_ls_path" 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
 if [ "$l_dir_uid" = '' ]; then
   echo 'Unable to determine backup directory owner.' >&2;
   exit 92;
@@ -116,10 +144,14 @@ if [ "$l_dir_uid" != 0 ] && [ "$l_dir_uid" != "$(id -u)" ]; then
   exit 92;
 fi;
 ### write
-PATH='/secure/bin:/usr/bin';
+'set' '--' '/secure/bin:/usr/bin' 'target.example doas' '/var/db/zxfer/tank/src' 'directory' '92' 'mkdir' 'chmod' 'id' 'ls' 'awk' 'mktemp' 'mv' 'rm';
+PATH=$1;
 export PATH;
-
-l_required_host='target.example doas';
+l_required_host=$2;
+l_scan_path=$3;
+l_scan_kind=$4;
+l_scan_status=$5;
+shift 5;
 zxfer_require_remote_backup_tool() {
   l_required_tool=$1;
   if command -v "$l_required_tool" >/dev/null 2>&1; then
@@ -128,11 +160,10 @@ zxfer_require_remote_backup_tool() {
   printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
   exit 99;
 };
-for l_required_tool in 'mkdir' 'chmod' 'id' 'ls' 'awk' 'mktemp' 'mv' 'rm'; do
+for l_required_tool in "$@"; do
   zxfer_require_remote_backup_tool "$l_required_tool";
 done;
 
-l_scan_path='/var/db/zxfer/tank/src';
 l_scan_rest=$l_scan_path;
 l_scan_candidate='';
 case "$l_scan_rest" in
@@ -155,28 +186,40 @@ while [ -n "$l_scan_rest" ]; do
   /*/*) ;;
   /*) continue ;;
   esac;
-  if [ "$l_scan_candidate" = "$l_scan_path" ]; then
+  case "$l_scan_kind:$l_scan_candidate" in
+  directory:"$l_scan_path")
     echo 'Refusing to use symlinked zxfer backup directory.' >&2;
-  else
-    echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
-  fi;
-  exit 92;
+    ;;
+  metadata:"$l_scan_path")
+    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    ;;
+  *)
+    if [ "$l_scan_kind" = directory ]; then
+      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    else
+      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    fi;
+    ;;
+  esac;
+  exit "$l_scan_status";
 done;
-
-if [ -e '/var/db/zxfer/tank/src' ] && [ ! -d '/var/db/zxfer/tank/src' ]; then
+'set' '--' '/var/db/zxfer/tank/src' '/var/db/zxfer/tank/src';
+l_prepare_dir=$1;
+l_prepare_ls_path=$2;
+if [ -e "$l_prepare_dir" ] && [ ! -d "$l_prepare_dir" ]; then
   echo 'Backup path exists but is not a directory.' >&2;
   exit 92;
 fi;
 umask 077;
-if ! mkdir -p '/var/db/zxfer/tank/src'; then
+if ! mkdir -p "$l_prepare_dir"; then
   echo 'Error creating secure backup directory.' >&2;
   exit 92;
 fi;
-if ! chmod 700 '/var/db/zxfer/tank/src'; then
+if ! chmod 700 "$l_prepare_dir"; then
   echo 'Error securing backup directory.' >&2;
   exit 92;
 fi;
-l_dir_uid=$(ls -ldn '/var/db/zxfer/tank/src' 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
+l_dir_uid=$(ls -ldn "$l_prepare_ls_path" 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
 if [ "$l_dir_uid" = '' ]; then
   echo 'Unable to determine backup directory owner.' >&2;
   exit 92;
@@ -185,10 +228,14 @@ if [ "$l_dir_uid" != 0 ] && [ "$l_dir_uid" != "$(id -u)" ]; then
   echo 'Backup directory must be owned by root or the ssh user.' >&2;
   exit 92;
 fi;
-PATH='/secure/bin:/usr/bin';
+'set' '--' '/secure/bin:/usr/bin' 'target.example doas' '/var/db/zxfer/backup/dst' 'directory' '92' 'mkdir' 'chmod' 'id' 'ls' 'awk' 'mktemp' 'mv' 'rm';
+PATH=$1;
 export PATH;
-
-l_required_host='target.example doas';
+l_required_host=$2;
+l_scan_path=$3;
+l_scan_kind=$4;
+l_scan_status=$5;
+shift 5;
 zxfer_require_remote_backup_tool() {
   l_required_tool=$1;
   if command -v "$l_required_tool" >/dev/null 2>&1; then
@@ -197,11 +244,10 @@ zxfer_require_remote_backup_tool() {
   printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
   exit 99;
 };
-for l_required_tool in 'mkdir' 'chmod' 'id' 'ls' 'awk' 'mktemp' 'mv' 'rm'; do
+for l_required_tool in "$@"; do
   zxfer_require_remote_backup_tool "$l_required_tool";
 done;
 
-l_scan_path='/var/db/zxfer/backup/dst';
 l_scan_rest=$l_scan_path;
 l_scan_candidate='';
 case "$l_scan_rest" in
@@ -224,28 +270,40 @@ while [ -n "$l_scan_rest" ]; do
   /*/*) ;;
   /*) continue ;;
   esac;
-  if [ "$l_scan_candidate" = "$l_scan_path" ]; then
+  case "$l_scan_kind:$l_scan_candidate" in
+  directory:"$l_scan_path")
     echo 'Refusing to use symlinked zxfer backup directory.' >&2;
-  else
-    echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
-  fi;
-  exit 92;
+    ;;
+  metadata:"$l_scan_path")
+    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    ;;
+  *)
+    if [ "$l_scan_kind" = directory ]; then
+      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    else
+      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    fi;
+    ;;
+  esac;
+  exit "$l_scan_status";
 done;
-
-if [ -e '/var/db/zxfer/backup/dst' ] && [ ! -d '/var/db/zxfer/backup/dst' ]; then
+'set' '--' '/var/db/zxfer/backup/dst' '/var/db/zxfer/backup/dst';
+l_prepare_dir=$1;
+l_prepare_ls_path=$2;
+if [ -e "$l_prepare_dir" ] && [ ! -d "$l_prepare_dir" ]; then
   echo 'Backup path exists but is not a directory.' >&2;
   exit 92;
 fi;
 umask 077;
-if ! mkdir -p '/var/db/zxfer/backup/dst'; then
+if ! mkdir -p "$l_prepare_dir"; then
   echo 'Error creating secure backup directory.' >&2;
   exit 92;
 fi;
-if ! chmod 700 '/var/db/zxfer/backup/dst'; then
+if ! chmod 700 "$l_prepare_dir"; then
   echo 'Error securing backup directory.' >&2;
   exit 92;
 fi;
-l_dir_uid=$(ls -ldn '/var/db/zxfer/backup/dst' 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
+l_dir_uid=$(ls -ldn "$l_prepare_ls_path" 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
 if [ "$l_dir_uid" = '' ]; then
   echo 'Unable to determine backup directory owner.' >&2;
   exit 92;
@@ -255,6 +313,7 @@ if [ "$l_dir_uid" != 0 ] && [ "$l_dir_uid" != "$(id -u)" ]; then
   exit 92;
 fi;
 'set' '--' '/var/db/zxfer/tank/src/backup.meta' '/var/db/zxfer/backup/dst/backup.meta' 'backup/dst';
+l_pair_cat=cat;
 l_pair_primary=$1;
 l_pair_forwarded=$2;
 l_pair_root=$3;
@@ -300,7 +359,7 @@ for l_pair_target in "$l_pair_primary" "$l_pair_forwarded"; do
   fi;
 done;
 l_pair_stage=$(mktemp "${l_pair_primary%/*}/.zxfer-backup-write.XXXXXX") || exit 92;
-cat >"$l_pair_stage" && chmod 600 "$l_pair_stage" || exit 92;
+"$l_pair_cat" >"$l_pair_stage" && chmod 600 "$l_pair_stage" || exit 92;
 if [ "$l_pair_primary" = "$l_pair_forwarded" ]; then
   [ ! -L "$l_pair_primary" ] && mv -f "$l_pair_stage" "$l_pair_primary" || exit 92;
   exit 0;
@@ -312,7 +371,7 @@ ZXFER_BACKUP_FORWARD_ROOT=$l_pair_root awk '
 ' "$l_pair_stage" >"$l_pair_forwarded_stage" && chmod 600 "$l_pair_forwarded_stage" || exit 92;
 if [ -e "$l_pair_primary" ]; then
   l_pair_recovery=$(mktemp "${l_pair_primary%/*}/.zxfer-backup-recovery.XXXXXX") || exit 92;
-  cat "$l_pair_primary" >"$l_pair_recovery" && chmod 600 "$l_pair_recovery" || exit 92;
+  "$l_pair_cat" "$l_pair_primary" >"$l_pair_recovery" && chmod 600 "$l_pair_recovery" || exit 92;
 fi;
 l_pair_signal=0;
 trap 'l_pair_signal=129' HUP;
@@ -325,10 +384,14 @@ l_pair_published=1;
 l_pair_published=0;
 [ "$l_pair_signal" -eq 0 ] || exit "$l_pair_signal";
 ### read
-PATH='/secure/bin:/usr/bin';
+'set' '--' '/secure/bin:/usr/bin' 'origin.example doas' '/var/db/zxfer/tank/src/backup.meta' 'metadata' '98' 'id' 'ls' 'awk';
+PATH=$1;
 export PATH;
-
-l_required_host='origin.example doas';
+l_required_host=$2;
+l_scan_path=$3;
+l_scan_kind=$4;
+l_scan_status=$5;
+shift 5;
 zxfer_require_remote_backup_tool() {
   l_required_tool=$1;
   if command -v "$l_required_tool" >/dev/null 2>&1; then
@@ -337,11 +400,10 @@ zxfer_require_remote_backup_tool() {
   printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
   exit 99;
 };
-for l_required_tool in 'id' 'ls' 'awk'; do
+for l_required_tool in "$@"; do
   zxfer_require_remote_backup_tool "$l_required_tool";
 done;
 
-l_scan_path='/var/db/zxfer/tank/src/backup.meta';
 l_scan_rest=$l_scan_path;
 l_scan_candidate='';
 case "$l_scan_rest" in
@@ -364,20 +426,34 @@ while [ -n "$l_scan_rest" ]; do
   /*/*) ;;
   /*) continue ;;
   esac;
-  if [ "$l_scan_candidate" = "$l_scan_path" ]; then
+  case "$l_scan_kind:$l_scan_candidate" in
+  directory:"$l_scan_path")
+    echo 'Refusing to use symlinked zxfer backup directory.' >&2;
+    ;;
+  metadata:"$l_scan_path")
     echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
-  else
-    echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
-  fi;
-  exit 98;
+    ;;
+  *)
+    if [ "$l_scan_kind" = directory ]; then
+      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    else
+      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    fi;
+    ;;
+  esac;
+  exit "$l_scan_status";
 done;
-
-if [ ! -f '/var/db/zxfer/tank/src/backup.meta' ]; then
+'set' '--' '/var/db/zxfer/tank/src/backup.meta' '/var/db/zxfer/tank/src/backup.meta' '/var/db/zxfer/tank/src' '/bin/cat';
+l_read_cmd_path=$1;
+l_read_cmd_ls_path=$2;
+l_read_cmd_parent=$3;
+l_read_cmd_cat=$4;
+if [ ! -f "$l_read_cmd_path" ]; then
   exit 94;
 fi;
 l_expected_uid=$(id -u 2>/dev/null | awk '/^[0-9]+$/');
 [ "$l_expected_uid" != '' ] || exit 97;
-l_parent_line=$(ls -ldn '/var/db/zxfer/tank/src' 2>/dev/null) || exit 97;
+l_parent_line=$(ls -ldn "$l_read_cmd_parent" 2>/dev/null) || exit 97;
 l_parent_uid=$(printf '%s\n' "$l_parent_line" | awk '$3 ~ /^[0-9]+$/ { print $3 }');
 [ "$l_parent_uid" != '' ] || exit 97;
 if [ "$l_parent_uid" != 0 ] && [ "$l_parent_uid" != "$l_expected_uid" ]; then
@@ -391,7 +467,7 @@ case "$l_parent_line" in
   esac;
   ;;
 esac;
-l_file_line=$(ls -ldn '/var/db/zxfer/tank/src/backup.meta' 2>/dev/null) || exit 97;
+l_file_line=$(ls -ldn "$l_read_cmd_ls_path" 2>/dev/null) || exit 97;
 l_file_uid=$(printf '%s\n' "$l_file_line" | awk '$3 ~ /^[0-9]+$/ { print $3 }');
 [ "$l_file_uid" != '' ] || exit 97;
 if [ "$l_file_uid" != 0 ] && [ "$l_file_uid" != "$l_expected_uid" ]; then
@@ -401,12 +477,16 @@ case "$l_file_line" in
 -rw-------*) ;;
 *) exit 96 ;;
 esac;
-'/bin/cat' '/var/db/zxfer/tank/src/backup.meta';
+"$l_read_cmd_cat" "$l_read_cmd_path";
 ### storage-listing
-PATH='/secure/bin:/usr/bin';
+'set' '--' '/secure/bin:/usr/bin' 'origin.example doas' '/var/db/zxfer/tank/src' 'directory' '92';
+PATH=$1;
 export PATH;
-
-l_required_host='origin.example doas';
+l_required_host=$2;
+l_scan_path=$3;
+l_scan_kind=$4;
+l_scan_status=$5;
+shift 5;
 zxfer_require_remote_backup_tool() {
   l_required_tool=$1;
   if command -v "$l_required_tool" >/dev/null 2>&1; then
@@ -415,8 +495,10 @@ zxfer_require_remote_backup_tool() {
   printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
   exit 99;
 };
+for l_required_tool in "$@"; do
+  zxfer_require_remote_backup_tool "$l_required_tool";
+done;
 
-l_scan_path='/var/db/zxfer/tank/src';
 l_scan_rest=$l_scan_path;
 l_scan_candidate='';
 case "$l_scan_rest" in
@@ -439,24 +521,37 @@ while [ -n "$l_scan_rest" ]; do
   /*/*) ;;
   /*) continue ;;
   esac;
-  if [ "$l_scan_candidate" = "$l_scan_path" ]; then
+  case "$l_scan_kind:$l_scan_candidate" in
+  directory:"$l_scan_path")
     echo 'Refusing to use symlinked zxfer backup directory.' >&2;
-  else
-    echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
-  fi;
-  exit 92;
+    ;;
+  metadata:"$l_scan_path")
+    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    ;;
+  *)
+    if [ "$l_scan_kind" = directory ]; then
+      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    else
+      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+    fi;
+    ;;
+  esac;
+  exit "$l_scan_status";
 done;
-
-if [ ! -d '/var/db/zxfer' ]; then
+'set' '--' '/var/db/zxfer' 'tank/src' 'tank' 'tank/src';
+l_listing_store=$1;
+l_listing_root=$2;
+shift 2;
+if [ ! -d "$l_listing_store" ]; then
   exit 0;
 fi;
-cd '/var/db/zxfer' || exit 97;
-for l_listing_dir in 'tank' 'tank/src'; do
+cd "$l_listing_store" || exit 97;
+for l_listing_dir in "$@"; do
   if [ -d "$l_listing_dir" ] || [ -L "$l_listing_dir" ]; then
     printf '%s\n' "$l_listing_dir";
   fi;
 done;
-if [ -d 'tank/src' ]; then
+if [ -d "$l_listing_root" ]; then
   zxfer_require_remote_backup_tool 'find';
-  find 'tank/src' -name '.zxfer_backup_info*' -prune -o \( -type d -o -type l \) -print || exit 97;
+  find "$l_listing_root" -name '.zxfer_backup_info*' -prune -o \( -type d -o -type l \) -print || exit 97;
 fi;

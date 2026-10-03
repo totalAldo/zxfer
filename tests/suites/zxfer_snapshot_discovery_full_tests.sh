@@ -546,7 +546,7 @@ test_get_zfs_list_throws_on_stage_failures_that_did_not_throw() {
 			zxfer_try_fast_recursive_noop_discovery() {
 				return 58
 			}
-			zxfer_start_full_source_snapshot_discovery() {
+			zxfer_write_source_snapshot_list_to_file() {
 				printf '%s\n' "unexpected full discovery"
 			}
 			zxfer_throw_error() {
@@ -560,7 +560,7 @@ test_get_zfs_list_throws_on_stage_failures_that_did_not_throw() {
 			zxfer_try_fast_recursive_noop_discovery() {
 				return 1
 			}
-			zxfer_start_full_source_snapshot_discovery() {
+			zxfer_write_source_snapshot_list_to_file() {
 				:
 			}
 			zxfer_collect_full_destination_snapshot_discovery() {
@@ -651,4 +651,124 @@ test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
 		"$output" "destination_ms=400"
 	assertContains "Very-verbose snapshot discovery should accumulate diff/sort timings." \
 		"$output" "diff_ms=550"
+}
+
+# Status is a completed-producer result, consumed by both raw-list handoff and
+# proof validation. A second parse would make their view of one operation differ.
+test_fast_recursive_noop_reads_destination_status_once() {
+	output=$(
+		(
+			g_option_R_recursive="-R"
+			status_reads=0
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			read() {
+				if [ "$*" = '-r l_fast_noop_list_status l_fast_noop_normalize_status l_fast_noop_sort_status' ]; then
+					status_reads=$((status_reads + 1))
+				fi
+				# shellcheck disable=SC2162 # Forward the production read arguments.
+				command read "$@"
+			}
+			zxfer_try_fast_recursive_noop_discovery >/dev/null
+			printf 'status=%s reads=%s\n' "$?" "$status_reads"
+		)
+	)
+	assertEquals "A successful proof consumes one completed status record." \
+		"status=0 reads=1" "$output"
+}
+
+# The operation owner must retain the failure status and diagnostic before it
+# clears staged state. Cleanup deliberately returns a different status here.
+test_fast_recursive_noop_owner_reports_failure_after_releasing_scratch() {
+	status=0
+	output=$(
+		(
+			g_option_R_recursive="-R"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'original source failure' >&2; exit 37"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=""
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			release_called=0
+			zxfer_cleanup_runtime_artifact_path_list() {
+				release_called=1
+				return 91
+			}
+			zxfer_throw_error() {
+				printf 'status=%s diagnostic=<%s> released=%s\n' \
+					"$2" "$1" "$release_called"
+				exit "$2"
+			}
+			zxfer_try_fast_recursive_noop_discovery
+		)
+	) || status=$?
+	assertEquals "Cleanup cannot overwrite the original failed producer status." 37 "$status"
+	assertEquals "The diagnostic survives scratch reset and is reported afterwards." \
+		"status=37 diagnostic=<Failed to retrieve snapshots from the source: original source failure> released=1" "$output"
+}
+
+# A destination/setup failure can reach release before source wait. Keep the
+# unreaped producer's files for the immediate failure throw's ordered EXIT trap.
+test_full_discovery_release_preserves_unreaped_producer_files() {
+	zxfer_create_temp_file_group 2
+	{
+		IFS= read -r source_file
+		IFS= read -r error_file
+	} <<-EOF
+		$g_zxfer_temp_file_group_result
+	EOF
+	# Use an ownership marker instead of an extra child for the release decision.
+	g_source_snapshot_list_pid=12345
+	zxfer_cleanup_full_snapshot_discovery_operation_state 29 "$source_file" "$error_file" "" "" ""
+	assertTrue "An unreaped producer keeps its source stage until trap teardown." \
+		"[ -f '$source_file' ] && [ -f '$error_file' ]"
+	g_source_snapshot_list_pid=""
+	zxfer_cleanup_full_snapshot_discovery_operation_state 29 "$source_file" "$error_file" "" "" ""
+	assertFalse "A completed producer's stages are released." "[ -f '$source_file' ]"
+}
+
+# Helper scratch and shared allocator result channels must not become the
+# operation's file registry: stages can overwrite them without losing ownership.
+test_full_discovery_keeps_owned_paths_across_helper_scratch_mutation() {
+	output=$(
+		(
+			zxfer_write_source_snapshot_list_to_file() {
+				source_seen=$1
+				error_seen=$2
+				sorted_seen=$3
+				printf 'tank/src@snapA\n' >"$1"
+				: >"$2"
+				printf 'tank/src@snapA\n' >"$3"
+				l_full_operation_source_file=clobbered
+				l_full_operation_sorted_file=clobbered
+				g_zxfer_temp_file_group_result=clobbered
+			}
+			zxfer_collect_full_destination_snapshot_discovery() {
+				destination_seen=$1
+				destination_sorted_seen=$2
+				: >"$1"
+				: >"$2"
+				g_zxfer_temp_file_result=clobbered
+			}
+			zxfer_publish_full_snapshot_discovery_results() {
+				[ "$1" = "$source_seen" ] && [ "$2" = "$sorted_seen" ] &&
+					[ "$3" = "$destination_seen" ] && [ "$4" = "$destination_sorted_seen" ] || return 73
+			}
+			zxfer_run_full_snapshot_discovery
+			printf 'status=%s\n' "$?"
+			for owned_path in "$source_seen" "$error_seen" "$sorted_seen" \
+				"$destination_seen" "$destination_sorted_seen"; do
+				[ ! -e "$owned_path" ] || printf 'unreleased=%s\n' "$owned_path"
+			done
+		)
+	)
+	assertEquals "The owner retains and releases its real paths after helpers mutate scratch." \
+		"status=0" "$output"
 }

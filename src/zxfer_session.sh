@@ -337,6 +337,7 @@ zxfer_init_variables() {
 	zxfer_refresh_remote_zfs_commands
 	zxfer_init_restore_property_helpers
 	zxfer_init_local_awk_compatibility
+	zxfer_prepare_readonly_property_policy
 }
 
 # Purpose: Start one zxfer session: reset state, install the traps, then

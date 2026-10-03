@@ -171,6 +171,10 @@ excludes `tank/projects/build-tmp`; anchor it, as above, to match exact names.
 ./zxfer -v -d -R tank/data backup/data
 ```
 
+Recursive cleanup applies to datasets present on the source. Datasets found
+only on the destination and their snapshots are preserved; zxfer prints a
+notice for skipped cleanup work and continues synchronizing the source tree.
+
 ### `-g days` Protect older destination snapshots from deletion
 
 ```sh

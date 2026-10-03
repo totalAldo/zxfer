@@ -164,9 +164,9 @@ test_set_g_recursive_source_list_reports_snapshot_compare_failures() {
 # discovery with its own status wherever it happens. zxfer_get_temp_file
 # throws on its own failures, so only a stub reaches these ladders.
 test_get_zfs_list_keeps_the_status_of_each_failed_temp_file_allocation() {
-	# call:status for the source stage's two files, the destination's two,
+	# call:status for the source stage's three files, the destination's two,
 	# the delta stage's group, the inventory's group and the record file.
-	for l_temp_case in 1:9 2:11 3:12 4:13 5:23 11:24 13:37; do
+	for l_temp_case in 1:9 2:11 3:12 4:13 5:23 11:24 12:37; do
 		(
 			FAIL_AT=${l_temp_case%:*}
 			FAIL_STATUS=${l_temp_case#*:}

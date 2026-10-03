@@ -251,38 +251,52 @@ sendrecv_fail_destination_child_probe() {
 # once a live `zfs list -H` confirms it is still missing (discovery may be
 # minutes old); an existing empty one gets a full receive with -F that no
 # later receive inherits. A single pending snapshot is seeded and never sent
-# incrementally to itself.
+# incrementally to itself. Only the missing child gets a creation-attempt
+# notice on stderr, with or without -v; the later child still synchronizes.
 test_missing_and_empty_destination_children_are_seeded_before_incrementals() {
 	planning_setup_env
-	planning_clone_state "$FIXTURE_DIR/noop" seeds
-	sendrecv_keep_only_first_source_snapshot 1
-	sendrecv_make_destination_child_missing 1
-	sendrecv_make_destination_child_empty 2
+	for l_seed_verbose in "" -v; do
+		: >"$ZFS_LOG"
+		planning_clone_state "$FIXTURE_DIR/noop" "seeds$l_seed_verbose"
+		sendrecv_keep_only_first_source_snapshot 1
+		sendrecv_make_destination_child_missing 1
+		sendrecv_make_destination_child_empty 2
 
-	planning_run_zxfer "$STATE_DIR" -v -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
-	l_run_status=$?
-	assertEquals "the seeding run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
-		0 "$l_run_status"
-	assertEquals "each child is seeded with its oldest snapshot, and only child2 then gets an incremental" \
-		"send $S/child1@snap1
+		set -- -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
+		[ -z "$l_seed_verbose" ] || set -- "$l_seed_verbose" "$@"
+		planning_run_zxfer "$STATE_DIR" "$@"
+		l_run_status=$?
+		assertEquals "the seeding run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+			0 "$l_run_status"
+		assertEquals "each child is seeded with its oldest snapshot, and only child2 then gets an incremental" \
+			"send $S/child1@snap1
 send $S/child2@snap1
 send -I $S/child2@snap1 $S/child2@snap3" "$(sendrecv_log_lines send)"
-	assertEquals "the missing child gets a plain full receive, the empty one -F, which no later receive inherits" \
-		"receive $D/child1
+		assertEquals "the missing child gets a plain full receive, the empty one -F, which no later receive inherits" \
+			"receive $D/child1
 receive -F $D/child2
 receive $D/child2" "$(sendrecv_log_lines receive)"
-	planning_assert_no_mutations
-	assertEquals "the missing child is probed live exactly once" \
-		1 "$(grep -cFx "list -H $D/child1" "$ZFS_LOG")"
-	assertTrue "the live probe must precede the full receive" \
-		"[ '$(planning_log_line_number "list -H $D/child1")' -lt '$(planning_log_line_number "send $S/child1@snap1")' ]"
-	assertFalse "no seeded child is listed again" "grep -q '^list -H -d 1 ' '$ZFS_LOG'"
-	for l_seed_line in \
-		"Destination dataset does not exist [$D/child1]. Sending first snapshot [$S/child1@snap1]" \
-		"Destination dataset [$D/child2] exists but has no snapshots. Seeding with [$S/child2@snap1]" \
-		"Temporarily enabling receive-side -F to seed existing empty destination dataset [$D/child2]."; do
-		assertTrue "-v should explain the seed: $l_seed_line" \
-			"grep -Fqx '$l_seed_line' '$CASE_DIR/zxfer.stdout'"
+		planning_assert_no_mutations
+		assertEquals "the missing child is probed live exactly once" \
+			1 "$(grep -cFx "list -H $D/child1" "$ZFS_LOG")"
+		assertTrue "the live probe must precede the full receive" \
+			"[ '$(planning_log_line_number "list -H $D/child1")' -lt '$(planning_log_line_number "send $S/child1@snap1")' ]"
+		assertFalse "no seeded child is listed again" "grep -q '^list -H -d 1 ' '$ZFS_LOG'"
+		assertEquals "only the missing child gets a stderr notice, even without -v" \
+			"zxfer: destination dataset [$D/child1] is missing; attempting creation before continuing recursive replication." \
+			"$(cat "$CASE_DIR/zxfer.stderr")"
+		if [ -z "$l_seed_verbose" ]; then
+			assertFalse "the creation-attempt notice must not add quiet-run stdout" \
+				"[ -s '$CASE_DIR/zxfer.stdout' ]"
+			continue
+		fi
+		for l_seed_line in \
+			"Destination dataset does not exist [$D/child1]. Sending first snapshot [$S/child1@snap1]" \
+			"Destination dataset [$D/child2] exists but has no snapshots. Seeding with [$S/child2@snap1]" \
+			"Temporarily enabling receive-side -F to seed existing empty destination dataset [$D/child2]."; do
+			assertTrue "-v should explain the seed: $l_seed_line" \
+				"grep -Fqx '$l_seed_line' '$CASE_DIR/zxfer.stdout'"
+		done
 	done
 }
 

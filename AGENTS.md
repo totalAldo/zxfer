@@ -53,12 +53,12 @@ A change is complete only when it:
 - Lead the final handoff with the outcome, then validation performed, checks not
   run, compatibility impact, and residual risk.
 
-## Codex and GPT-5.6 Guidance
+## Codex Agent Guidance
 
 - Keep this file focused on durable repository facts. Put richer repeatable
   workflows in `.agents/skills/`, temporary task constraints in the prompt,
   and intentional project-wide Codex settings in `.codex/config.toml`.
-- Write instructions for GPT-5.6-class agents in terms of the outcome, relevant
+- Write instructions for coding agents in terms of the outcome, relevant
   context, hard constraints, success criteria, and stop conditions. State each
   invariant once, avoid contradictory or ceremonial process rules, and leave
   implementation-path choices to the agent when safety does not prescribe one.
@@ -71,6 +71,8 @@ A change is complete only when it:
 - When Codex behavior, OpenAI model behavior, or configuration semantics matter,
   consult current official OpenAI/Codex documentation instead of relying on
   remembered release details.
+- When evaluating skill or model changes, use the representative prompts and
+  observable expectations in `docs/agent-skill-evaluations.md`.
 
 ## Context and Tool Routing
 

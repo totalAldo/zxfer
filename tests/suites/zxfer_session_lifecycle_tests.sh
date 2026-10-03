@@ -35,7 +35,7 @@ test_zxfer_reset_session_state_clears_each_owners_inherited_state() {
 			g_zxfer_unsupported_filesystem_properties=stale
 			g_zxfer_source_property_table=stale
 			g_zxfer_property_error_result=stale
-			g_zxfer_remote_capability_response_result=stale
+			g_zxfer_remote_capability_slot_result=stale
 			g_zxfer_local_os=stale
 
 			zxfer_reset_session_state
@@ -63,7 +63,7 @@ test_zxfer_reset_session_state_clears_each_owners_inherited_state() {
 				"property transfer: unsupported=<$g_zxfer_unsupported_filesystem_properties>" \
 				"property caches: source table=<$g_zxfer_source_property_table>" \
 				"property reads: error=<$g_zxfer_property_error_result>" \
-				"remote hosts: capabilities=<$g_zxfer_remote_capability_response_result>" \
+				"remote hosts: capabilities=<$g_zxfer_remote_capability_slot_result>" \
 				"session: local os=<$g_zxfer_local_os>"
 		)
 	)

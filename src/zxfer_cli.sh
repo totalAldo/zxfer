@@ -39,7 +39,7 @@
 # owns globals: g_option_* parse results and g_destination.
 # reads globals: OPTARG and ZXFER_MAX_YIELD_ITERATIONS; -Z writes the
 #   dependency-owned g_cmd_compress, and the -o check publishes the property
-#   transfer module's g_zxfer_override_properties_result.
+#   transfer module's g_zxfer_override_properties_result and prepared policy.
 # mutates caches: none.
 # returns via stdout: none; -h prints usage and exits.
 
@@ -203,4 +203,5 @@ zxfer_consistency_check() {
 	# A malformed -o item or a property named twice stops the run before any
 	# zfs command; the property transfer module owns the -o syntax.
 	zxfer_read_override_properties "$g_option_o_override_property"
+	g_zxfer_property_override_policy=$g_zxfer_override_properties_result
 }

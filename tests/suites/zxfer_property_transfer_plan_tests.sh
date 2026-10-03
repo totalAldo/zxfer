@@ -117,14 +117,38 @@ status: 2" "$(zxfer_property_test_check_override "compression=lz4=local" 'a\,b=1
 
 # A plan that awk cannot run, or that ends before its marker, fails closed
 # with none of its results published (the fault injector cannot fail awk).
+test_property_plan_batch_keeps_encoded_values_and_replaces_every_list() {
+	zxfer_plan_property_changes 'compression=lz4=local,user:note=x%0Ay=local' "" 1 filesystem "" "" "" \
+		'compression=off=local'
+	{
+		IFS= read -r override
+		IFS= read -r creation
+		IFS= read -r destination
+		IFS= read -r initial_set
+		IFS= read -r child_set
+		IFS= read -r inherit
+		IFS= read -r marker
+	} <<EOF
+$g_zxfer_property_plan_result
+EOF
+	assertEquals 'compression=lz4=local,user:note=x%0Ay=local' "$override"
+	assertEquals 'compression=lz4,user:note=x%0Ay' "$initial_set"
+	assertEquals "$initial_set" "$child_set"
+	assertEquals "__ZXFER_PROPERTY_PLAN__" "$marker"
+	zxfer_plan_property_changes "" "" 0 volume "" "" ""
+	assertEquals "A new empty plan replaces all six prior lists." \
+		"$ZXFER_LF$ZXFER_LF$ZXFER_LF$ZXFER_LF$ZXFER_LF${ZXFER_LF}__ZXFER_PROPERTY_PLAN__" \
+		"$g_zxfer_property_plan_result"
+}
+
 test_plan_property_changes_publishes_nothing_when_awk_fails_or_stops_short() {
 	set +e
 	output=$(
 		(
-			g_zxfer_plan_override_pvs_result="stale"
+			g_zxfer_property_plan_result="stale"
 			g_cmd_awk="$TEST_TMPDIR/missing-awk"
 			zxfer_throw_error() {
-				printf '%s|override=<%s>\n' "$1" "$g_zxfer_plan_override_pvs_result"
+				printf '%s|batch=<%s>\n' "$1" "$g_zxfer_property_plan_result"
 				exit 1
 			}
 			zxfer_plan_property_changes "compression=lz4=local" "" 1 filesystem "" "" "" 2>/dev/null
@@ -132,7 +156,7 @@ test_plan_property_changes_publishes_nothing_when_awk_fails_or_stops_short() {
 	)
 	status=$?
 	assertEquals 1 "$status"
-	assertEquals "Failed to plan dataset properties.|override=<>" "$output"
+	assertEquals "Failed to plan dataset properties.|batch=<>" "$output"
 
 	l_cut_short_awk="$TEST_TMPDIR/cut-short-awk"
 	cat >"$l_cut_short_awk" <<'EOF'
@@ -144,8 +168,8 @@ EOF
 		(
 			g_cmd_awk=$l_cut_short_awk
 			zxfer_throw_error() {
-				printf '%s|override=<%s>|inherit=<%s>\n' "$1" \
-					"$g_zxfer_plan_override_pvs_result" "$g_zxfer_plan_inherit_result"
+				printf '%s|batch=<%s>\n' "$1" \
+					"$g_zxfer_property_plan_result"
 				exit 1
 			}
 			zxfer_plan_property_changes "compression=lz4=local" "" 1 filesystem "" "" "" \
@@ -155,5 +179,5 @@ EOF
 	status=$?
 	assertEquals 1 "$status"
 	assertEquals "An awk that exits 0 without the end marker must not publish a partial plan." \
-		"Failed to plan dataset properties.|override=<>|inherit=<>" "$output"
+		"Failed to plan dataset properties.|batch=<>" "$output"
 }

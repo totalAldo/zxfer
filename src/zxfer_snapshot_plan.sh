@@ -96,7 +96,6 @@ zxfer_reset_snapshot_plan_state() {
 	g_zxfer_plan_diverged_records=""
 	g_zxfer_plan_delete_snapshots=""
 	g_zxfer_plan_source_count=0
-	g_zxfer_plan_destination_records=""
 	# Per-dataset divergence scratch and the run-level "diverged and
 	# converged this run" markers read by post-receive verification.
 	g_zxfer_diverged_snapshot_count=0
@@ -286,13 +285,14 @@ zxfer_select_snapshot_slice() {
 # side=source SOURCE_FILE"; rows are "dataset@snapshot<TAB>guid" and the
 # source rows are newest first. A snapshot is common only when name AND guid
 # match; a same-named snapshot with another guid is divergence. The dataset's
-# destination rows go to stdout; the plan goes to ENVIRON["ZXFER_AWK_PLAN_FILE"]:
+# plan goes to ENVIRON["ZXFER_AWK_PLAN_FILE"] (nothing goes to stdout):
 #   common<TAB>record         newest source record also on the destination
 #   diverged<TAB>name<TAB>source_guid<TAB>destination_guid   (source order)
 #   send<TAB>record           each source record newer than common, oldest
 #                             first (every source record when none is common)
 #   delete<TAB>path           destination snapshot whose name and guid are not
 #                             on the source (destination order)
+#   destination_present<TAB>0|1   validated destination snapshot presence
 #   sources<TAB>count         always last; proves the plan is complete
 # A matching row without a snapshot name or guid exits 3 (fail closed).
 # shellcheck disable=SC2016  # awk program should see literal $0/$1/$2.
@@ -309,7 +309,6 @@ $1 != (side == "destination" ? destination_dataset : source_dataset) { next }
 	guid = substr($2, tab + 1)
 }
 side == "destination" {
-	print
 	destination_count++
 	destination_path[destination_count] = $1 "@" name
 	destination_id[destination_count] = name "\t" guid
@@ -339,6 +338,7 @@ END {
 	for (i = 1; i <= destination_count; i++)
 		if (!(destination_id[i] in source_ids))
 			print "delete\t" destination_path[i] > plan_file
+	print "destination_present\t" (destination_count > 0 ? 1 : 0) > plan_file
 	print "sources\t" source_count + 0 > plan_file
 }'
 
@@ -352,9 +352,9 @@ END {
 # they were cut from the current record files. Publishes
 # g_zxfer_plan_common_snapshot, g_zxfer_plan_transfer_list (oldest first),
 # g_zxfer_plan_dest_has_snapshots, g_zxfer_plan_diverged_records,
-# g_zxfer_plan_delete_snapshots (paths), g_zxfer_plan_source_count, and
-# g_zxfer_plan_destination_records. Callers publish the plan themselves, so a
-# post-receive check never clobbers the current dataset's plan. Aborts on
+# g_zxfer_plan_delete_snapshots (paths), and g_zxfer_plan_source_count.
+# Callers publish the plan themselves, so a post-receive check never clobbers
+# the current dataset's plan. Aborts on
 # unreadable input or a guid-less record.
 zxfer_plan_dataset_snapshots() {
 	l_plan_source=$1
@@ -379,10 +379,10 @@ zxfer_plan_dataset_snapshots() {
 	g_zxfer_snapshot_plan_file=$g_zxfer_snapshot_scratch_file_result
 
 	l_plan_status=0
-	g_zxfer_plan_destination_records=$(ZXFER_AWK_PLAN_FILE=$g_zxfer_snapshot_plan_file \
+	ZXFER_AWK_PLAN_FILE=$g_zxfer_snapshot_plan_file \
 		"${g_cmd_awk:-awk}" -F@ -v source_dataset="$l_plan_source" \
 		-v destination_dataset="$l_plan_dest" "$ZXFER_PLAN_DATASET_SNAPSHOTS_AWK" \
-		side=destination "$l_plan_dest_file" side=source "$l_plan_source_file") ||
+		side=destination "$l_plan_dest_file" side=source "$l_plan_source_file" ||
 		l_plan_status=$?
 
 	g_zxfer_plan_common_snapshot=""
@@ -390,6 +390,7 @@ zxfer_plan_dataset_snapshots() {
 	g_zxfer_plan_diverged_records=""
 	g_zxfer_plan_delete_snapshots=""
 	g_zxfer_plan_source_count=""
+	g_zxfer_plan_dest_has_snapshots=""
 	if [ "$l_plan_status" -eq 0 ]; then
 		while IFS= read -r l_plan_row; do
 			case $l_plan_row in
@@ -408,17 +409,22 @@ zxfer_plan_dataset_snapshots() {
 			"sources	"*)
 				g_zxfer_plan_source_count=${l_plan_row#sources	}
 				;;
+			"destination_present	"*)
+				g_zxfer_plan_dest_has_snapshots=${l_plan_row#destination_present	}
+				case $g_zxfer_plan_dest_has_snapshots in
+				0 | 1) ;;
+				*) l_plan_status=1 ;;
+				esac
+				;;
 			esac
 		done <"$g_zxfer_snapshot_plan_file"
 		# The count row comes last; without it the plan is incomplete.
-		[ -n "$g_zxfer_plan_source_count" ] || l_plan_status=1
+		zxfer_is_uint "$g_zxfer_plan_source_count" &&
+			[ -n "$g_zxfer_plan_dest_has_snapshots" ] || l_plan_status=1
 	fi
 	if [ "$l_plan_status" -ne 0 ]; then
 		zxfer_throw_error "Failed to determine the last common snapshot for [$l_plan_source] and [$l_plan_dest]." "$l_plan_status"
 	fi
-
-	g_zxfer_plan_dest_has_snapshots=0
-	[ -z "$g_zxfer_plan_destination_records" ] || g_zxfer_plan_dest_has_snapshots=1
 }
 
 # Purpose: Recheck the source live before deleting every destination

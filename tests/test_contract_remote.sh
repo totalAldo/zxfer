@@ -800,15 +800,11 @@ test_remote_hosts_ignore_inherited_transport_and_capability_state() {
 		g_origin_remote_capabilities_host=localhost
 		g_origin_remote_capabilities_tools=zfs
 		g_origin_remote_capabilities_os=PlantedOS
-		g_origin_remote_capabilities_zfs_status=0
 		g_origin_remote_capabilities_tool_records=$l_records
-		g_origin_remote_capabilities_response=planted
 		g_target_remote_capabilities_host=127.0.0.1
 		g_target_remote_capabilities_tools=zfs
 		g_target_remote_capabilities_os=PlantedOS
-		g_target_remote_capabilities_zfs_status=0
 		g_target_remote_capabilities_tool_records=$l_records
-		g_target_remote_capabilities_response=planted
 		g_origin_cmd_zfs=/planted/zfs
 		g_target_cmd_zfs=/planted/zfs
 		export g_zxfer_ssh_origin_spec g_zxfer_ssh_origin_host \
@@ -817,13 +813,12 @@ test_remote_hosts_ignore_inherited_transport_and_capability_state() {
 			g_zxfer_ssh_target_wrapper g_ssh_target_control_socket \
 			g_zxfer_ssh_transport_ready g_zxfer_ssh_policy_options \
 			g_origin_remote_capabilities_host g_origin_remote_capabilities_tools \
-			g_origin_remote_capabilities_os g_origin_remote_capabilities_zfs_status \
+			g_origin_remote_capabilities_os \
 			g_origin_remote_capabilities_tool_records \
-			g_origin_remote_capabilities_response \
 			g_target_remote_capabilities_host g_target_remote_capabilities_tools \
-			g_target_remote_capabilities_os g_target_remote_capabilities_zfs_status \
+			g_target_remote_capabilities_os \
 			g_target_remote_capabilities_tool_records \
-			g_target_remote_capabilities_response g_origin_cmd_zfs g_target_cmd_zfs
+			g_origin_cmd_zfs g_target_cmd_zfs
 		planning_run_remote_zxfer "$FIXTURE_DIR/noop" -O localhost -T 127.0.0.1 \
 			-R "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	)

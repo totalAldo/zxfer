@@ -130,6 +130,34 @@ test_zfs_role_commands_run_each_role_where_its_zfs_lives() {
 		1 "$l_sideless_ssh"
 }
 
+test_zfs_dispatch_preserves_run_status_and_render_does_not_record_a_call() {
+	output=$(
+		(
+			g_cmd_zfs=/bin/sh
+			g_cmd_ssh=$FAKE_SSH_BIN
+			g_option_V_very_verbose=1
+			g_option_O_origin_host=""
+			g_zxfer_profile_source_zfs_calls=0
+			zxfer_run_source_zfs_cmd -c 'exit 23' >/dev/null
+			printf 'local=%s\n' "$?"
+			g_option_O_origin_host='origin.example doas'
+			FAKE_SSH_EXIT_STATUS=37
+			FAKE_SSH_SUPPRESS_STDOUT=1
+			export FAKE_SSH_EXIT_STATUS FAKE_SSH_SUPPRESS_STDOUT
+			zxfer_run_source_zfs_cmd list tank/src >/dev/null 2>/dev/null
+			printf 'remote=%s calls=%s\n' "$?" "$g_zxfer_profile_source_zfs_calls"
+			zxfer_render_zfs_command_for_role source list tank/src
+			printf 'render=%s calls=%s\n' "$?" "$g_zxfer_profile_source_zfs_calls"
+		)
+	)
+	status=$?
+	assertEquals "The dispatch check should complete normally." 0 "$status"
+	assertEquals "Runs preserve local and ssh statuses; rendering adds no recorded call." \
+		"local=23
+remote=37 calls=2
+render=0 calls=2" "$output"
+}
+
 test_ssh_command_modes_fail_closed_before_ssh_runs() {
 	l_ssh_log="$TEST_TMPDIR/fail_closed_ssh.log"
 	: >"$l_ssh_log"

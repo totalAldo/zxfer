@@ -1,9 +1,20 @@
 ---
 name: zxfer-known-issues
-description: Identify newly discovered zxfer risks, bugs, or open compatibility gaps that should be tracked in KNOWN_ISSUES.md, deduplicate them against the existing inventory, add confirmed issues by severity, and assess whether architectural remediation themes should be added or revised to address multiple issues. Use when auditing zxfer changes, test failures, bug reports, review findings, TODOs, or code paths for new known issues.
+description: Assess zxfer risks, bugs, and compatibility gaps against KNOWN_ISSUES.md; update confirmed issues and remediation themes when tracking updates are authorized. Use when auditing changes, test failures, bug reports, review findings, TODOs, or code paths for new known issues. Review-only requests produce findings without edits.
 ---
 
 # zxfer Known Issues
+
+## Scope and Authority
+
+- For requests that only ask for review, audit, diagnosis, or planning, report
+  qualified candidates, duplicates, and proposed inventory changes without
+  editing files.
+- Update `KNOWN_ISSUES.md` only when the user's request or existing session
+  authorization includes tracking updates. Skill activation alone does not
+  authorize edits; follow `AGENTS.md` for scope and authority.
+- Apply the inventory and remediation update steps below only within that
+  authorized scope. Source fixes require implementation authorization.
 
 ## Context to Load
 
@@ -60,4 +71,4 @@ After adding or updating issues, review the full issue inventory, including pre-
 
 - For docs-only inventory updates, run `git diff --check` and manually review heading order with `rg -n '^(##|###) ' KNOWN_ISSUES.md`.
 - If code or tests were changed in the same task, use `zxfer-validation-plan` to select the appropriate targeted and full validation commands.
-- In the final response, list added or updated issue titles with severity, architectural themes added or revised, validation run, and residual risk or unverified evidence.
+- In the final response, distinguish proposed inventory changes from edits actually made. List qualified issue titles with severity, duplicates or rejected candidates, architectural themes proposed or revised, validation run, and residual risk or unverified evidence.

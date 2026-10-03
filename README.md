@@ -52,6 +52,17 @@ Replicate a local recursive dataset tree:
 ./zxfer -v -R tank/data backup/data
 ```
 
+During a live recursive run, zxfer automatically creates confirmed missing
+destination datasets and continues synchronization after successful creation.
+It prints an informational notice to stderr before each creation attempt,
+even without `-v`. Missing pools, failed existence checks, and creation or
+receive errors still stop the run with a nonzero exit status.
+
+Datasets found only on the destination are left untouched, including their
+snapshots when `-d` is used, and do not block recursive synchronization.
+Before recursive snapshot cleanup, zxfer verifies the source dataset
+inventory; a failed query still stops the run.
+
 Pull snapshots from a remote host:
 
 ```sh
@@ -167,6 +178,10 @@ Platform caveats, host layouts, and compatibility notes live in
 [docs/platforms.md](./docs/platforms.md).
 
 ## Operational Notes
+
+Remote backup dry-run previews show an argv-quoted initialization followed by
+the literal helper program. With `-n -v`, the preview remains one SSH command
+line and performs no remote operation or metadata write.
 
 zxfer rebuilds `PATH` from a trusted allowlist and resolves required helpers to
 absolute paths. Remote helpers are resolved per host instead of assuming the

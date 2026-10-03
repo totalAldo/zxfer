@@ -173,7 +173,7 @@ test_write_source_snapshot_list_to_file_throws_the_builder_message_or_a_generic_
 					printf '<%s:%s>' "$1" "$2"
 					exit 1
 				}
-				zxfer_write_source_snapshot_list_to_file "$outfile" "$outfile.err"
+				zxfer_write_source_snapshot_list_to_file "$outfile" "$outfile.err" "$outfile.sorted"
 			)
 		)
 		l_build_message=${l_build_case%|*}
@@ -183,8 +183,8 @@ test_write_source_snapshot_list_to_file_throws_the_builder_message_or_a_generic_
 	done
 }
 
-# A failed launch keeps its status and forgets the sorted copy: when the
-# producer cannot start, and when its first status file cannot be allocated.
+# A failed launch keeps its status; all output paths stay with the operation
+# owner, including when a pipeline status file cannot be allocated.
 test_write_source_snapshot_list_to_file_keeps_the_status_of_a_failed_launch() {
 	outfile="$TEST_TMPDIR/source_launch_failure.out"
 	errfile="$TEST_TMPDIR/source_launch_failure.err"
@@ -197,8 +197,8 @@ test_write_source_snapshot_list_to_file_keeps_the_status_of_a_failed_launch() {
 			zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 				return 32
 			}
-			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
-			printf 'launch=%s sorted=<%s>\n' "$?" "${g_zxfer_full_source_snapshot_sorted_file:-}"
+			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile" "$outfile.sorted"
+			printf 'launch=%s\n' "$?"
 		)
 		(
 			temp_calls=0
@@ -211,15 +211,14 @@ test_write_source_snapshot_list_to_file_keeps_the_status_of_a_failed_launch() {
 			zxfer_build_source_snapshot_list_cmd() {
 				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' snap"
 			}
-			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile"
-			printf 'status file=%s calls=%s sorted=<%s>\n' "$?" "$temp_calls" \
-				"${g_zxfer_full_source_snapshot_sorted_file:-}"
+			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile" "$outfile.sorted"
+			printf 'status file=%s calls=%s\n' "$?" "$temp_calls"
 		)
 	)
 
-	assertEquals "A failed launch should keep its status after the sorted copy is allocated." \
-		"launch=32 sorted=<>
-status file=33 calls=2 sorted=<>" "$output"
+	assertEquals "A failed launch should keep its status with caller-owned output paths." \
+		"launch=32
+status file=33 calls=2" "$output"
 }
 
 # A producer that cannot allocate its status files never starts and keeps

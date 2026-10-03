@@ -280,7 +280,6 @@ test_zxfer_reset_dependency_state_drops_inherited_commands_and_secure_path() {
 			g_cmd_awk=/inherited/awk
 			g_cmd_cat=/inherited/cat
 			g_cmd_parallel=/inherited/parallel
-			g_cmd_ps=/inherited/ps
 			g_cmd_ssh=/inherited/ssh
 			g_cmd_zfs=/inherited/zfs
 			g_cmd_compress="evil -9"
@@ -291,7 +290,7 @@ test_zxfer_reset_dependency_state_drops_inherited_commands_and_secure_path() {
 			g_target_cmd_decompress_safe="'evil'"
 			zxfer_reset_dependency_state
 			printf '<%s>' "$g_zxfer_secure_path" \
-				"$g_cmd_awk" "$g_cmd_cat" "$g_cmd_parallel" "$g_cmd_ps" \
+				"$g_cmd_awk" "$g_cmd_cat" "$g_cmd_parallel" \
 				"$g_cmd_ssh" "$g_cmd_zfs" "$g_cmd_compress_safe" \
 				"$g_cmd_decompress_safe" "$g_origin_cmd_compress_safe" \
 				"$g_target_cmd_decompress_safe"
@@ -300,7 +299,7 @@ test_zxfer_reset_dependency_state_drops_inherited_commands_and_secure_path() {
 	)
 
 	assertContains "The reset should clear the secure PATH and every helper command." \
-		"$result" "<><><><><><><><><><><>"
+		"$result" "<><><><><><><><><><>"
 	assertContains "The reset should restore the default compression commands." \
 		"$result" "compress=zstd -3 decompress=zstd -d"
 }
@@ -353,8 +352,8 @@ test_zxfer_init_dependency_tool_defaults_resolves_helpers_on_the_secure_path() {
 			g_zxfer_secure_path="$tools"
 			g_cmd_parallel="/inherited/parallel"
 			zxfer_init_dependency_tool_defaults
-			printf 'awk=%s zfs=%s ps=%s parallel=<%s>\n' \
-				"$g_cmd_awk" "$g_cmd_zfs" "$g_cmd_ps" "$g_cmd_parallel"
+			printf 'awk=%s zfs=%s validated=%s parallel=<%s>\n' \
+				"$g_cmd_awk" "$g_cmd_zfs" "$g_zxfer_required_tool_result" "$g_cmd_parallel"
 			dependencies_test_make_tools "$tools" parallel
 			zxfer_init_dependency_tool_defaults
 			printf 'optional=%s\n' "$g_cmd_parallel"
@@ -362,9 +361,24 @@ test_zxfer_init_dependency_tool_defaults_resolves_helpers_on_the_secure_path() {
 	)
 
 	assertContains "Dependency defaults should resolve awk, zfs and ps on the secure PATH and leave a missing parallel unset." \
-		"$result" "awk=$tools/awk zfs=$tools/zfs ps=$tools/ps parallel=<>"
+		"$result" "awk=$tools/awk zfs=$tools/zfs validated=$tools/ps parallel=<>"
 	assertContains "Dependency defaults should resolve an optional parallel that is present." \
 		"$result" "optional=$tools/parallel"
+}
+
+test_zxfer_init_dependency_tool_defaults_still_requires_ps_on_secure_path() {
+	tools="$TEST_TMPDIR/tool_defaults_without_ps"
+	dependencies_test_make_tools "$tools" awk zfs
+	result=$(
+		(
+			g_zxfer_secure_path="$tools"
+			zxfer_init_dependency_tool_defaults
+			printf 'initialized\n'
+		) 2>&1
+	)
+	assertEquals "The session must fail without a trusted ps despite ps on the caller's PATH." 1 "$?"
+	assertContains "$result" 'Required dependency "ps" not found'
+	assertNotContains "$result" initialized
 }
 
 test_refresh_compression_commands_resolves_each_head_and_quotes_every_token() {

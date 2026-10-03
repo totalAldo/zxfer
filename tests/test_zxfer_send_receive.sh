@@ -21,7 +21,6 @@ TESTS_DIR=$(dirname "$0")
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_send_receive"
-	TEST_PS_PATH=$(command -v ps 2>/dev/null || printf '%s\n' ps)
 }
 
 oneTimeTearDown() {
@@ -33,7 +32,6 @@ setUp() {
 	zxfer_test_reset_all_owner_state || return
 	TMPDIR="$TEST_TMPDIR"
 	g_cmd_zfs="/sbin/zfs"
-	g_cmd_ps=$TEST_PS_PATH
 	# Distinct local and endpoint codecs show which one a rendered pipeline used.
 	g_cmd_compress_safe="gzip"
 	g_cmd_decompress_safe="gunzip"

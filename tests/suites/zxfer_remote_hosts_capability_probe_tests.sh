@@ -98,8 +98,7 @@ end
 		zxfer_parse_remote_capability_response "$answer" "zfs parallel cat" || exit 8
 		[ "${IFS+set}" != set ] || exit 9
 		[ "${-#*f}" != "$-" ] || exit 10
-		printf 'os=%s zfs_status=%s\n' "$g_zxfer_remote_capability_os" \
-			"$g_zxfer_remote_capability_zfs_status"
+		printf 'os=%s\n' "$g_zxfer_remote_capability_os"
 		for l_test_tool in zfs parallel cat weirdtool absent ""; do
 			zxfer_get_parsed_remote_capability_tool_record "$l_test_tool"
 			printf '%s=%s:%s:%s\n' "$l_test_tool" "$?" \
@@ -115,7 +114,7 @@ end
 
 	assertEquals "Parsing must restore an unset IFS and disabled globbing." 0 "$status"
 	assertEquals "Each record should keep its status, and a validated, unquoted path only for status 0." \
-		"os=SunOS zfs_status=0
+		"os=SunOS
 zfs=0:0:/usr/sbin/zfs
 parallel=0:1:
 cat=0:127:
@@ -305,11 +304,14 @@ test_remote_host_capabilities_are_cached_per_host_and_tool_scope() {
 			g_option_O_origin_host=origin.example
 			g_option_T_target_host=target.example
 			g_option_e_restore_property_mode=1
-			# A miss probes and prints the answer; the same host and scope
-			# answer from memory with the same output, and a helper inside the
-			# scope resolves from its record without a direct probe.
+			# A miss selects a validated cache; a hit uses its records directly.
+			# Poison parser scratch to prove lookups do not depend on a copied
+			# active channel or parse the response again.
 			zxfer_ensure_remote_host_capabilities origin.example source >"$TEST_TMPDIR/miss.out" || exit 11
+			g_zxfer_remote_capability_os=PoisonOS
+			g_zxfer_remote_capability_tool_records='malformed scratch'
 			zxfer_ensure_remote_host_capabilities origin.example source >"$TEST_TMPDIR/hit.out" || exit 12
+			zxfer_get_os origin.example source >"$TEST_TMPDIR/cached_os.out" || exit 20
 			zxfer_resolve_remote_required_tool origin.example cat cat source || exit 13
 			printf 'resolved_cat=%s direct_probes=%s\n' "$g_zxfer_required_tool_result" \
 				"$g_zxfer_profile_remote_cli_tool_direct_probes"
@@ -324,10 +326,7 @@ test_remote_host_capabilities_are_cached_per_host_and_tool_scope() {
 			zxfer_ensure_remote_host_capabilities origin.example other >/dev/null && exit 18
 			zxfer_ensure_remote_host_capabilities "" source >/dev/null && exit 19
 			# A failed lookup leaves nothing of the last host in the channel.
-			printf 'channel=<%s|%s|%s|%s>\n' "$g_zxfer_remote_capability_os" \
-				"$g_zxfer_remote_capability_zfs_status" \
-				"$g_zxfer_remote_capability_tool_records" \
-				"$g_zxfer_remote_capability_response_result"
+			printf 'selected_slot=<%s>\n' "$g_zxfer_remote_capability_slot_result"
 			zxfer_publish_endpoint_runtime_context invalid Linux /sbin/zfs
 			printf 'publish_invalid=%s\n' "$?"
 			# A failed probe keeps its status and fills no slot.
@@ -346,21 +345,51 @@ test_remote_host_capabilities_are_cached_per_host_and_tool_scope() {
 	status=$?
 
 	assertEquals "Every lookup should behave as expected." 0 "$status"
-	assertEquals "Four scopes should cost four probes and three memory hits." \
+	assertEquals "Four scopes should cost four probes and four memory hits." \
 		"resolved_cat=/remote/bin/cat direct_probes=0
-channel=<|||>
+selected_slot=<>
 publish_invalid=2
 failed_probe=37 target_slot=target.example
-live=4 memory=3
+live=4 memory=4
 origin_slot=unlisted.example|zfs target_slot=target.example|zfs" "$output"
 	assertEquals "The probe count should match." 4 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
-	assertEquals "A miss and a hit should both print the accepted answer." \
-		"$(fake_remote_capability_response)
-$(fake_remote_capability_response)" "$(cat "$TEST_TMPDIR/miss.out" "$TEST_TMPDIR/hit.out")"
+	assertEquals "Preparation publishes a selected cache without duplicating wire output." \
+		"" "$(cat "$TEST_TMPDIR/miss.out" "$TEST_TMPDIR/hit.out")"
+	assertEquals "A cached OS lookup reads the authoritative validated slot." \
+		"RemoteOS" "$(cat "$TEST_TMPDIR/cached_os.out")"
 	assertContains "The first probe should ask for the whole scope." \
 		"$(sed -n '1p' "$ZXFER_TEST_PROBE_LOG")" "for l_tool in '\\''zfs'\\'' '\\''cat'\\''; do"
 	assertContains "A tool outside the scope should be probed with zfs and that tool only." \
 		"$(sed -n '2p' "$ZXFER_TEST_PROBE_LOG")" "for l_tool in '\\''zfs'\\'' '\\''parallel'\\''; do"
+}
+
+test_shared_host_lookups_read_one_validated_slot_without_reparsing() {
+	zxfer_test_reset_remote_probe_counters
+	output=$(
+		(
+			zxfer_test_stub_remote_probe_capture
+			g_option_O_origin_host=shared.example
+			g_option_T_target_host=shared.example
+			zxfer_ensure_remote_host_capabilities shared.example source || exit 11
+			[ -z "$g_zxfer_remote_capability_os$g_zxfer_remote_capability_tool_records" ] || exit 14
+			# Cached fields are authoritative, even if parser scratch changes.
+			g_zxfer_remote_capability_os=PoisonOS
+			g_zxfer_remote_capability_tool_records='malformed scratch'
+			zxfer_parse_remote_capability_response() { return 29; }
+			zxfer_get_os shared.example destination || exit 12
+			zxfer_resolve_remote_required_tool shared.example zfs zfs destination || exit 13
+			printf 'slot=%s zfs=%s target_cache=<%s>\n' \
+				"$g_zxfer_remote_capability_slot_result" "$g_zxfer_required_tool_result" \
+				"$g_target_remote_capabilities_host"
+		)
+	)
+	status=$?
+	assertEquals "Both roles should read the same validated cache without reparsing." 0 "$status"
+	assertEquals "The selected origin cache supplies the destination OS and tool." \
+		"RemoteOS
+slot=origin zfs=/remote/bin/zfs target_cache=<>" "$output"
+	assertEquals "A shared host and scope should need one live probe." \
+		1 "$(cat "$ZXFER_TEST_PROBE_COUNT_FILE")"
 }
 
 ################################################################################
@@ -400,7 +429,7 @@ EOF
 	zxfer_fetch_remote_host_capabilities_live "backup@example.com" source "zfs" \
 		2>"$stderr_file"
 	status=$?
-	printf '%s\n' "$g_zxfer_remote_capability_response_result" >"$stdout_file"
+	printf '%s\n' "$g_zxfer_remote_probe_stdout" >"$stdout_file"
 
 	unset FAKE_SSH_LOG
 
@@ -581,13 +610,13 @@ test_resolve_remote_required_tool_maps_each_capability_record_status() {
 			set +e
 			g_zxfer_secure_path="/secure/bin"
 			zxfer_fetch_remote_host_capabilities_live() {
-				g_zxfer_remote_capability_response_result='ZXFER_REMOTE_CAPS_V2
+				l_test_response='ZXFER_REMOTE_CAPS_V2
 os	RemoteOS
 tool	zfs	0	/remote/bin/zfs
 tool	parallel	1	-
 tool	cat	2	-
 end'
-				zxfer_parse_remote_capability_response "$g_zxfer_remote_capability_response_result"
+				zxfer_parse_remote_capability_response "$l_test_response"
 			}
 			zxfer_run_remote_probe_script() {
 				printf 'unexpected direct probe\n'

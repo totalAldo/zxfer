@@ -38,10 +38,11 @@
 
 # Module contract:
 # owns globals: one capability slot per role, g_origin_remote_capabilities_*
-#   and g_target_remote_capabilities_* (host, tools, response, os, zfs_status,
-#   tool_records); the active parsed channel g_zxfer_remote_capability_*; the
+#   and g_target_remote_capabilities_* (host, tools, os, tool_records); the
+#   selected slot g_zxfer_remote_capability_slot_result, parser scratch OS and
+#   tool records, and tool lookup results; the
 #   probe results g_zxfer_remote_probe_stdout, _stderr and _capture_failed;
-#   and each endpoint's g_{source,destination}_operating_system and
+#   and the destination's g_destination_operating_system and
 #   g_{origin,target}_cmd_zfs.
 # reads globals: -O/-T and the options that shape the tool scope (-j, -e, -k,
 #   -z with g_cmd_compress/g_cmd_decompress), g_zxfer_secure_path, and the ssh
@@ -50,9 +51,9 @@
 #   a validated live probe; either role's slot answers a lookup with the same
 #   host and scope. Secure PATH and ssh policy are fixed per process, so they
 #   are not part of the key.
-# returns via stdout: the capability response
-#   (zxfer_ensure_remote_host_capabilities), the OS name (zxfer_get_os) and
-#   probe failure messages.
+# returns via stdout: the OS name (zxfer_get_os) and probe failure messages.
+#   Capability preparation publishes a selected validated slot, not a second
+#   copy of its fields or the original wire response.
 
 # Purpose: Reset the capability slots, probe results and endpoint contexts.
 # Usage: Called by zxfer_reset_session_state. g_origin_cmd_zfs and
@@ -61,34 +62,28 @@
 zxfer_reset_remote_host_state() {
 	g_origin_remote_capabilities_host=""
 	g_origin_remote_capabilities_tools=""
-	g_origin_remote_capabilities_response=""
 	g_origin_remote_capabilities_os=""
-	g_origin_remote_capabilities_zfs_status=""
 	g_origin_remote_capabilities_tool_records=""
 	g_target_remote_capabilities_host=""
 	g_target_remote_capabilities_tools=""
-	g_target_remote_capabilities_response=""
 	g_target_remote_capabilities_os=""
-	g_target_remote_capabilities_zfs_status=""
 	g_target_remote_capabilities_tool_records=""
-	g_zxfer_remote_capability_response_result=""
 	g_zxfer_remote_capability_os=""
-	g_zxfer_remote_capability_zfs_status=""
 	g_zxfer_remote_capability_tool_records=""
 	g_zxfer_remote_capability_tool_status_result=""
 	g_zxfer_remote_capability_tool_path_result=""
+	g_zxfer_remote_capability_slot_result=""
 	g_zxfer_remote_capability_requested_tools_result=""
 	g_zxfer_remote_capability_probe_script_result=""
 	g_zxfer_remote_probe_stdout=""
 	g_zxfer_remote_probe_stderr=""
 	g_zxfer_remote_probe_capture_failed=0
-	g_source_operating_system=""
 	g_destination_operating_system=""
 	g_origin_cmd_zfs=$g_cmd_zfs
 	g_target_cmd_zfs=$g_cmd_zfs
 }
 
-# Purpose: Publish one endpoint's resolved operating system and zfs command.
+# Purpose: Publish endpoint zfs commands and the destination OS policy input.
 # Usage: zxfer_publish_endpoint_runtime_context origin|target OS ZFS_COMMAND;
 # returns 2 for any other role.
 zxfer_publish_endpoint_runtime_context() {
@@ -98,7 +93,6 @@ zxfer_publish_endpoint_runtime_context() {
 
 	case "$l_endpoint_role" in
 	origin)
-		g_source_operating_system=$l_endpoint_os
 		g_origin_cmd_zfs=$l_endpoint_zfs_command
 		;;
 	target)
@@ -193,8 +187,8 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 # CAPABILITY PROBE AND PER-ROLE CACHE
 ################################################################################
 
-# Purpose: Look up one tool's record in the active capability channel.
-# Usage: zxfer_get_parsed_remote_capability_tool_record TOOL; publishes
+# Purpose: Look up one tool in validated records or the parser scratch records.
+# Usage: zxfer_get_parsed_remote_capability_tool_record TOOL [RECORDS]; publishes
 # g_zxfer_remote_capability_tool_status_result and
 # g_zxfer_remote_capability_tool_path_result (empty unless the status is 0),
 # or returns 1 when TOOL has no record.
@@ -203,7 +197,7 @@ zxfer_get_parsed_remote_capability_tool_record() {
 	g_zxfer_remote_capability_tool_path_result=""
 	[ -n "$1" ] || return 1
 
-	l_tool_record=$ZXFER_LF${g_zxfer_remote_capability_tool_records:-}$ZXFER_LF
+	l_tool_record=$ZXFER_LF${2-${g_zxfer_remote_capability_tool_records:-}}$ZXFER_LF
 	case $l_tool_record in
 	*"$ZXFER_LF$1$ZXFER_TAB"*) ;;
 	*) return 1 ;;
@@ -218,16 +212,15 @@ zxfer_get_parsed_remote_capability_tool_record() {
 	g_zxfer_remote_capability_tool_path_result=${l_tool_record#*"$ZXFER_TAB"}
 }
 
-# Purpose: Parse and validate one capability response into the active channel.
+# Purpose: Validate one wire response into scratch for a live cache fill.
 # Usage: zxfer_parse_remote_capability_response RESPONSE [TOOLS]; publishes
-# g_zxfer_remote_capability_os, _zfs_status and _tool_records (one
+# g_zxfer_remote_capability_os and _tool_records (one
 # "TOOL<TAB>STATUS<TAB>PATH" line per tool, with PATH validated, or empty when
 # STATUS is not 0). Returns 1 unless RESPONSE is the V2 header, a non-empty os
 # line, well-formed tool records that name each tool once and include zfs and
 # each of the space-separated TOOLS, then a final "end" line.
 zxfer_parse_remote_capability_response() {
 	g_zxfer_remote_capability_os=""
-	g_zxfer_remote_capability_zfs_status=""
 	g_zxfer_remote_capability_tool_records=""
 
 	# Allow one trailing newline, then walk the lines.
@@ -281,10 +274,9 @@ zxfer_parse_remote_capability_response() {
 		# Each tool may appear only once.
 		! zxfer_get_parsed_remote_capability_tool_record "$l_parse_tool" || return 1
 		g_zxfer_remote_capability_tool_records=${g_zxfer_remote_capability_tool_records:+$g_zxfer_remote_capability_tool_records$ZXFER_LF}$l_parse_tool$ZXFER_TAB$l_parse_status$ZXFER_TAB$l_parse_path
-		[ "$l_parse_tool" != zfs ] || g_zxfer_remote_capability_zfs_status=$l_parse_status
 	done
 	[ "$l_parse_end_seen" -eq 1 ] || return 1
-	[ -n "$g_zxfer_remote_capability_zfs_status" ] || return 1
+	zxfer_get_parsed_remote_capability_tool_record zfs || return 1
 
 	# Every requested tool needs a record, so a truncated response fails.
 	zxfer_split_begin
@@ -415,11 +407,10 @@ zxfer_run_remote_probe_script() {
 
 # Purpose: Probe a host live for its capabilities and parse the answer.
 # Usage: zxfer_fetch_remote_host_capabilities_live HOST_SPEC PROFILE_SIDE TOOLS;
-# publishes the parsed channel and g_zxfer_remote_capability_response_result.
+# publishes validated parser scratch OS and tool records.
 # A failed probe prints its stderr and returns 1; a malformed response returns
 # 1 silently.
 zxfer_fetch_remote_host_capabilities_live() {
-	g_zxfer_remote_capability_response_result=""
 	zxfer_build_remote_capability_probe_script "$3" >/dev/null || return 1
 	zxfer_build_remote_sh_c_command \
 		"$g_zxfer_remote_capability_probe_script_result" >/dev/null
@@ -429,48 +420,42 @@ zxfer_fetch_remote_host_capabilities_live() {
 	fi
 	zxfer_parse_remote_capability_response "$g_zxfer_remote_probe_stdout" "$3" ||
 		return 1
-	g_zxfer_remote_capability_response_result=$g_zxfer_remote_probe_stdout
 }
 
-# Purpose: Load one role's capability slot into the active channel when it
-# holds a validated response for HOST and TOOLS.
-# Usage: zxfer_load_remote_capability_slot origin|target HOST TOOLS; returns 1,
-# leaving the channel alone, on a miss.
+# Purpose: Select a validated role slot matching a host and tool scope.
+# Usage: zxfer_load_remote_capability_slot origin|target HOST TOOLS; publishes
+# g_zxfer_remote_capability_slot_result, or returns 1 without changing it.
+# Cached OS and records remain in their owner slot; no reparsing or copying.
 zxfer_load_remote_capability_slot() {
-	if [ "$1" = origin ]; then
+	case $1 in
+	origin)
 		[ "${g_origin_remote_capabilities_host:-}" = "$2" ] &&
 			[ "${g_origin_remote_capabilities_tools:-}" = "$3" ] &&
 			[ -n "${g_origin_remote_capabilities_os:-}" ] || return 1
-		g_zxfer_remote_capability_response_result=$g_origin_remote_capabilities_response
-		g_zxfer_remote_capability_os=$g_origin_remote_capabilities_os
-		g_zxfer_remote_capability_zfs_status=$g_origin_remote_capabilities_zfs_status
-		g_zxfer_remote_capability_tool_records=$g_origin_remote_capabilities_tool_records
-		return 0
-	fi
-	[ "${g_target_remote_capabilities_host:-}" = "$2" ] &&
-		[ "${g_target_remote_capabilities_tools:-}" = "$3" ] &&
-		[ -n "${g_target_remote_capabilities_os:-}" ] || return 1
-	g_zxfer_remote_capability_response_result=$g_target_remote_capabilities_response
-	g_zxfer_remote_capability_os=$g_target_remote_capabilities_os
-	g_zxfer_remote_capability_zfs_status=$g_target_remote_capabilities_zfs_status
-	g_zxfer_remote_capability_tool_records=$g_target_remote_capabilities_tool_records
+		;;
+	target)
+		[ "${g_target_remote_capabilities_host:-}" = "$2" ] &&
+			[ "${g_target_remote_capabilities_tools:-}" = "$3" ] &&
+			[ -n "${g_target_remote_capabilities_os:-}" ] || return 1
+		;;
+	*) return 1 ;;
+	esac
+	g_zxfer_remote_capability_slot_result=$1
 }
 
-# Purpose: Load a host's capabilities into the active channel, probing the host
+# Purpose: Select validated host capabilities, probing the host
 # at most once per host and tool scope.
 # Usage: zxfer_ensure_remote_host_capabilities HOST_SPEC [source|destination]
 # [TOOL]; without a side the host's -O/-T role picks the slot, and the scope
-# comes from zxfer_get_remote_capability_requested_tools_for_host. Prints the
-# response and publishes it in g_zxfer_remote_capability_response_result, or
-# returns non-zero when the probe or its validation fails, so callers probe
-# directly; the channel may then hold part of the failed response, which no
-# caller reads.
+# comes from zxfer_get_remote_capability_requested_tools_for_host. Publishes
+# g_zxfer_remote_capability_slot_result only for a validated cache. Returns
+# non-zero when probing or validation fails, so callers can probe directly.
+# Capability slots retain no raw wire output or duplicate active cache fields.
 zxfer_ensure_remote_host_capabilities() {
 	l_caps_host=$1
 	l_caps_side=${2:-}
-	g_zxfer_remote_capability_response_result=""
+	g_zxfer_remote_capability_slot_result=""
 	g_zxfer_remote_capability_os=""
-	g_zxfer_remote_capability_zfs_status=""
 	g_zxfer_remote_capability_tool_records=""
 	[ -n "$l_caps_host" ] || return 1
 	case $l_caps_side in
@@ -493,7 +478,6 @@ zxfer_ensure_remote_host_capabilities() {
 	if zxfer_load_remote_capability_slot "$l_caps_role" "$l_caps_host" "$l_caps_tools" ||
 		zxfer_load_remote_capability_slot "$l_caps_other_role" "$l_caps_host" "$l_caps_tools"; then
 		g_zxfer_profile_remote_capability_bootstrap_memory=$((g_zxfer_profile_remote_capability_bootstrap_memory + 1))
-		printf '%s\n' "$g_zxfer_remote_capability_response_result"
 		return 0
 	fi
 
@@ -502,20 +486,20 @@ zxfer_ensure_remote_host_capabilities() {
 	if [ "$l_caps_role" = origin ]; then
 		g_origin_remote_capabilities_host=$l_caps_host
 		g_origin_remote_capabilities_tools=$l_caps_tools
-		g_origin_remote_capabilities_response=$g_zxfer_remote_capability_response_result
 		g_origin_remote_capabilities_os=$g_zxfer_remote_capability_os
-		g_origin_remote_capabilities_zfs_status=$g_zxfer_remote_capability_zfs_status
 		g_origin_remote_capabilities_tool_records=$g_zxfer_remote_capability_tool_records
 	else
 		g_target_remote_capabilities_host=$l_caps_host
 		g_target_remote_capabilities_tools=$l_caps_tools
-		g_target_remote_capabilities_response=$g_zxfer_remote_capability_response_result
 		g_target_remote_capabilities_os=$g_zxfer_remote_capability_os
-		g_target_remote_capabilities_zfs_status=$g_zxfer_remote_capability_zfs_status
 		g_target_remote_capabilities_tool_records=$g_zxfer_remote_capability_tool_records
 	fi
+	# The validated slot owns the response now; parser scratch is only for
+	# the live validation handoff, never an active duplicate of the cache.
+	g_zxfer_remote_capability_os=""
+	g_zxfer_remote_capability_tool_records=""
 	g_zxfer_profile_remote_capability_bootstrap_live=$((g_zxfer_profile_remote_capability_bootstrap_live + 1))
-	printf '%s\n' "$g_zxfer_remote_capability_response_result"
+	g_zxfer_remote_capability_slot_result=$l_caps_role
 }
 
 # Purpose: Probe a configured -O or -T host's capabilities during startup.
@@ -543,7 +527,11 @@ zxfer_get_os() {
 	if [ -z "$1" ]; then
 		g_zxfer_os_result=$(uname) || return
 	elif zxfer_ensure_remote_host_capabilities "$1" "${2:-}" >/dev/null; then
-		g_zxfer_os_result=$g_zxfer_remote_capability_os
+		case $g_zxfer_remote_capability_slot_result in
+		origin) g_zxfer_os_result=$g_origin_remote_capabilities_os ;;
+		target) g_zxfer_os_result=$g_target_remote_capabilities_os ;;
+		*) return 1 ;;
+		esac
 	elif zxfer_run_remote_probe_script "$1" "${2:-}" "uname 2>/dev/null"; then
 		g_zxfer_os_result=${g_zxfer_remote_probe_stdout%%"$ZXFER_LF"*}
 		[ -n "$g_zxfer_os_result" ] || return 1
@@ -568,8 +556,19 @@ zxfer_resolve_remote_required_tool() {
 	[ -n "$l_tool_host" ] || return 1
 
 	if zxfer_ensure_remote_host_capabilities "$l_tool_host" "$l_tool_side" \
-		"$l_tool_name" >/dev/null &&
-		zxfer_get_parsed_remote_capability_tool_record "$l_tool_name"; then
+		"$l_tool_name" >/dev/null && {
+		case $g_zxfer_remote_capability_slot_result in
+		origin)
+			zxfer_get_parsed_remote_capability_tool_record "$l_tool_name" \
+				"$g_origin_remote_capabilities_tool_records"
+			;;
+		target)
+			zxfer_get_parsed_remote_capability_tool_record "$l_tool_name" \
+				"$g_target_remote_capabilities_tool_records"
+			;;
+		*) false ;;
+		esac
+	} then
 		l_tool_status=$g_zxfer_remote_capability_tool_status_result
 	else
 		g_zxfer_profile_remote_cli_tool_direct_probes=$((g_zxfer_profile_remote_cli_tool_direct_probes + 1))

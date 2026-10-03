@@ -1,5 +1,13 @@
 # Contributing
 
+## Start Here
+
+Read the [developer walkthrough](./docs/developer-walkthrough.md) to follow one
+replication operation, then the [data formats guide](./docs/data-formats.md) to
+understand the records passed between modules. Keep
+[architecture.md](./docs/architecture.md) nearby as the ownership reference;
+you do not need to read every module before making a focused contribution.
+
 ## Principles
 
 zxfer manipulates real ZFS datasets and is used in production. Contributions

@@ -7,6 +7,8 @@ with operator and contributor reference material.
 
 - [../README.md](../README.md): project overview and quick start
 - [../CONTRIBUTING.md](../CONTRIBUTING.md): contributor workflow and validation profiles
+- [developer-walkthrough.md](./developer-walkthrough.md): follow one replication operation through the source and offline tests
+- [data-formats.md](./data-formats.md): snapshot identities, dataset mappings, property rows, plans, and backup metadata
 - [../man/zxfer.8](../man/zxfer.8): canonical command reference
 - [../man/zxfer.1m](../man/zxfer.1m): generated Solaris/illumos rendering
 
@@ -18,6 +20,7 @@ with operator and contributor reference material.
 - [cli-examples.md](./cli-examples.md): one-page CLI example reference covering every current option
 - [testing.md](./testing.md): validation profiles, unit and contract suites, fuzz, performance tools, coverage, VM matrix, integration harness, and CI
 - [coding-style.md](./coding-style.md): project-specific shell and module style guide
+- [agent-skill-evaluations.md](./agent-skill-evaluations.md): manual skill-selection, authorization, and safety evaluation cases for coding agents
 - [troubleshooting.md](./troubleshooting.md): common failures and debugging hints
 - [architecture.md](./architecture.md): module layout, high-level execution flow, and Mermaid lifecycle diagrams
 - [roadmap.md](./roadmap.md): planned feature work, compatibility-floor direction, and remaining refactors

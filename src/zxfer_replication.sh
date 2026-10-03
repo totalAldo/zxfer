@@ -111,7 +111,8 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 # snapshot.
 # Usage: zxfer_seed_destination_for_snapshot_transfer FIRST_RECORD FIRST_PATH;
 # refuses a full receive into a destination whose planned snapshots share no
-# guid with the source.
+# guid with the source. Live recursive runs announce missing-dataset creation
+# attempts on stderr, even without -v.
 zxfer_seed_destination_for_snapshot_transfer() {
 	l_seed_record=$1
 	l_seed_path=$2
@@ -135,6 +136,9 @@ zxfer_seed_destination_for_snapshot_transfer() {
 	fi
 	if [ "$l_seed_dest_exists" -eq 0 ]; then
 		zxfer_echov "Destination dataset does not exist [$g_actual_dest]. Sending first snapshot [$l_seed_path]"
+		if [ -n "${g_option_R_recursive:-}" ] && [ "$g_option_n_dryrun" -eq 0 ]; then
+			zxfer_warn_stderr "zxfer: destination dataset [$g_actual_dest] is missing; attempting creation before continuing recursive replication."
+		fi
 		zxfer_zfs_send_receive "" "$l_seed_path" "$g_actual_dest" "0"
 	elif [ "$g_dest_has_snapshots" -eq 0 ]; then
 		zxfer_echov "Destination dataset [$g_actual_dest] exists but has no snapshots. Seeding with [$l_seed_path]"

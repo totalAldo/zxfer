@@ -433,9 +433,48 @@ backup/dst/c1@s9	39"
 		"tank/src@s2	2" "$g_zxfer_plan_transfer_list"
 	assertEquals "Rows of other destination datasets must never be deleted." \
 		"" "$g_zxfer_plan_delete_snapshots"
-	assertEquals "Only the dataset's own destination rows should be published." \
-		"backup/dst@s1	1" "$g_zxfer_plan_destination_records"
+	assertEquals "The plan should report presence for the exact destination dataset." \
+		1 "$g_zxfer_plan_dest_has_snapshots"
 	assertEquals "Only the dataset's own source rows should be counted." 2 "$g_zxfer_plan_source_count"
+}
+
+test_plan_dataset_snapshots_destination_presence_resets_for_each_exact_dataset() {
+	stage_plan_record_files "tank/src@s2	2" "backup/dst@s1	1
+backup/dst@s0	0
+backup/dst1@s1	11
+backup/dst/child@s1	31"
+	zxfer_plan_dataset_snapshots tank/src backup/dst >"$TEST_TMPDIR/plan.stdout"
+	assertEquals "Validated destination records should remain in the input file, with no planner stdout copy." \
+		"" "$(cat "$TEST_TMPDIR/plan.stdout")"
+	assertEquals "Multiple validated snapshots still publish one presence value." \
+		1 "$g_zxfer_plan_dest_has_snapshots"
+	zxfer_plan_dataset_snapshots tank/src backup/missing
+	assertEquals "A new plan without exact destination rows must discard the preceding presence." \
+		0 "$g_zxfer_plan_dest_has_snapshots"
+}
+
+test_plan_dataset_snapshots_rejects_incomplete_or_invalid_summary_rows() {
+	stage_plan_record_files "tank/src@s1	1" "backup/dst@s1	1"
+	for count_rows in "sources	1" "destination_present	1" "destination_present	broken
+sources	1" "destination_present	2
+sources	1" "destination_present	0
+sources	broken"; do
+		output=$(
+			(
+				# Replace only the plan program; its normal file redirection
+				# and owner-side validation remain in use.
+				ZXFER_PLAN_DATASET_SNAPSHOTS_AWK='
+BEGIN { print ENVIRON["ZXFER_TEST_PLAN_ROWS"] > ENVIRON["ZXFER_AWK_PLAN_FILE"]; exit }'
+				ZXFER_TEST_PLAN_ROWS=$count_rows
+				export ZXFER_TEST_PLAN_ROWS
+				zxfer_plan_dataset_snapshots tank/src backup/dst
+				printf 'planned\n'
+			) 2>&1
+		)
+		assertEquals "Incomplete or invalid summary rows must fail closed [$count_rows]." 1 "$?"
+		assertContains "$output" "Failed to determine the last common snapshot"
+		assertNotContains "$output" planned
+	done
 }
 
 test_plan_dataset_snapshots_deletes_destination_only_and_guid_mismatched_rows_in_destination_order() {

@@ -10,22 +10,41 @@
 # READONLY LIST
 ################################################################################
 
-test_resolve_readonly_properties_follows_the_platform_and_migration_on_every_call() {
-	zxfer_resolve_readonly_properties
-	assertEquals "readonly,mountpoint" "$g_zxfer_readonly_properties_result"
+test_prepare_readonly_property_policy_uses_the_destination_platform_and_migration_mode() {
+	zxfer_prepare_readonly_property_policy
+	assertEquals "readonly,mountpoint" "$g_zxfer_property_readonly_policy"
 	g_destination_operating_system="FreeBSD"
-	zxfer_resolve_readonly_properties
+	zxfer_prepare_readonly_property_policy
 	assertEquals "FreeBSD appends its list." "readonly,mountpoint,aclmode" \
-		"$g_zxfer_readonly_properties_result"
+		"$g_zxfer_property_readonly_policy"
 	g_destination_operating_system="SunOS"
-	zxfer_resolve_readonly_properties
-	assertEquals "The list is resolved per call, not memoized." \
-		"readonly,mountpoint" "$g_zxfer_readonly_properties_result"
+	zxfer_prepare_readonly_property_policy
+	assertEquals "A newly prepared policy replaces the previous platform's list." \
+		"readonly,mountpoint" "$g_zxfer_property_readonly_policy"
 	g_option_m_migrate=1
-	zxfer_resolve_readonly_properties
+	zxfer_prepare_readonly_property_policy
 	g_option_m_migrate=0
 	assertEquals "-m leaves mountpoint out, so it moves." "readonly" \
-		"$g_zxfer_readonly_properties_result"
+		"$g_zxfer_property_readonly_policy"
+}
+
+test_prepared_property_policy_survives_scratch_reads_and_support_scans_until_session_reset() {
+	g_option_o_override_property='user:note=a=b\,c;%,compression=lz4'
+	g_destination_operating_system="FreeBSD"
+	zxfer_consistency_check
+	zxfer_prepare_readonly_property_policy
+	zxfer_read_override_properties 'compression=gzip'
+	g_initial_source=""
+	g_recursive_source_list=""
+	zxfer_calculate_unsupported_properties
+	assertEquals "Scratch parsing must not replace the validated session overrides." \
+		'user:note=a%3Db%2Cc%3B%25=override,compression=lz4=override' \
+		"$g_zxfer_property_override_policy"
+	assertEquals "A support scan must not reset readonly policy." \
+		"readonly,mountpoint,aclmode" "$g_zxfer_property_readonly_policy"
+	zxfer_reset_session_state
+	assertEquals "A new session must discard both old or inherited policies." \
+		":" "$g_zxfer_property_readonly_policy:$g_zxfer_property_override_policy"
 }
 
 ################################################################################

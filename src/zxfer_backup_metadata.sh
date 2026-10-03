@@ -39,8 +39,8 @@
 # Module contract:
 # owns globals: g_backup_storage_root (validated once per session), the
 #   buffered -k rows in g_backup_file_contents ("<source-relative path>TAB
-#   <properties>" lines), the -e file g_restored_backup_file_contents with
-#   its roots and row index (g_zxfer_backup_restore_*), the forwarded
+#   <properties>" lines), the -e roots and row index
+#   (g_zxfer_backup_restore_*), the forwarded
 #   provenance memo g_zxfer_backup_forwarded_*, and the read, candidate,
 #   restore and dry-run result channels.
 # reads globals: backup options, source and destination roots, -O/-T host
@@ -121,7 +121,6 @@ zxfer_init_backup_storage_root() {
 # Usage: zxfer_reset_backup_metadata_state, from session bootstrap.
 zxfer_reset_backup_metadata_state() {
 	g_backup_file_contents=""
-	g_restored_backup_file_contents=""
 	g_zxfer_backup_restore_index=""
 	g_zxfer_backup_restore_source_root=""
 	g_zxfer_backup_restore_destination_root=""
@@ -249,12 +248,11 @@ zxfer_append_backup_metadata_record() {
 
 # Purpose: Buffer the backup row of a dataset whose property pass succeeded.
 # Usage: zxfer_capture_backup_metadata_for_completed_transfer SOURCE
-# LIVE_PROPERTIES [SKIP]; a forwarded provenance row from an earlier -k hop
+# LIVE_PROPERTIES; a forwarded provenance row from an earlier -k hop
 # replaces the live properties. Nothing is written until
 # zxfer_write_backup_properties runs.
 zxfer_capture_backup_metadata_for_completed_transfer() {
 	[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] || return 0
-	[ "${3:-0}" -eq 0 ] || return 0
 
 	if zxfer_resolve_forwarded_backup_metadata "$1"; then
 		zxfer_append_backup_metadata_record "$1" "$g_zxfer_backup_forwarded_properties"
@@ -510,8 +508,8 @@ zxfer_get_backup_properties() {
 		"$g_initial_source" "$l_restore_destination_root" "$g_option_O_origin_host" source ||
 		l_restore_status=$?
 	if [ "$l_restore_status" -eq 0 ]; then
-		g_restored_backup_file_contents=$g_zxfer_backup_restore_candidate_contents_result
-		zxfer_load_backup_restore_rows || l_restore_status=5
+		zxfer_load_backup_restore_rows "$g_zxfer_backup_restore_candidate_contents_result" ||
+			l_restore_status=5
 	fi
 	[ "$l_restore_status" -eq 0 ] ||
 		zxfer_throw_backup_candidate_failure "$l_restore_status" \
@@ -522,8 +520,8 @@ zxfer_get_backup_properties() {
 # Purpose: Store the rows of the validated -e file in the row store, as r
 # files, with one index line per relative key; a key with more than one row
 # gets the tombstone "-" instead.
-# Usage: zxfer_load_backup_restore_rows, right after the candidate lookup
-# validated g_restored_backup_file_contents. Publishes
+# Usage: zxfer_load_backup_restore_rows CONTENTS, right after the candidate
+# lookup validated the whole file. Publishes
 # g_zxfer_backup_restore_source_root, g_zxfer_backup_restore_destination_root
 # and g_zxfer_backup_restore_index, or clears them and returns non-zero.
 zxfer_load_backup_restore_rows() {
@@ -535,7 +533,7 @@ zxfer_load_backup_restore_rows() {
 	# Prints the two roots, then the index lines. The rows restart at r1:
 	# the index they replace is the only one that names r files.
 	# shellcheck disable=SC2016  # awk program should see literal field references.
-	l_load_output=$(printf '%s\n' "$g_restored_backup_file_contents" |
+	l_load_output=$(printf '%s\n' "$1" |
 		ZXFER_AWK_ROW_DIR=$g_zxfer_property_row_dir ZXFER_AWK_ROW_PREFIX=r \
 			ZXFER_AWK_ROW_BASE=0 "${g_cmd_awk:-awk}" "$ZXFER_PROPERTY_AWK_LIB"'
 index($0, "#source_root:") == 1 {
@@ -987,88 +985,78 @@ zxfer_build_remote_backup_script_prelude() {
 	shift 3
 
 	case $l_prelude_guard_kind in
-	directory)
-		l_prelude_guard_status=92
-		l_prelude_guard_exact="echo 'Refusing to use symlinked zxfer backup directory.' >&2"
-		l_prelude_guard_component="echo \"Refusing to use backup directory \$l_scan_path because path component \$l_scan_candidate is a symlink.\" >&2"
-		;;
-	metadata)
-		l_prelude_guard_status=98
-		l_prelude_guard_exact="echo \"Refusing to use backup metadata \$l_scan_path because it is a symlink.\" >&2"
-		l_prelude_guard_component="echo \"Refusing to use backup metadata \$l_scan_path because path component \$l_scan_candidate is a symlink.\" >&2"
-		;;
+	directory) l_prelude_guard_status=92 ;;
+	metadata) l_prelude_guard_status=98 ;;
 	*) return 1 ;;
 	esac
-	zxfer_escape_single_quotes_into_result "$g_zxfer_secure_path"
-	l_prelude_secure_path_single=$g_zxfer_escaped_single_quotes_result
-	zxfer_escape_single_quotes_into_result "$l_prelude_host"
-	l_prelude_host_single=$g_zxfer_escaped_single_quotes_result
-	zxfer_escape_single_quotes_into_result "$l_prelude_guard_path"
-	l_prelude_guard_path_single=$g_zxfer_escaped_single_quotes_result
-	l_prelude_tools=""
-	for l_prelude_tool in "$@"; do
-		zxfer_escape_single_quotes_into_result "$l_prelude_tool"
-		l_prelude_tools="$l_prelude_tools '$g_zxfer_escaped_single_quotes_result'"
-	done
-
+	zxfer_render_shell_command_from_argv set -- "$g_zxfer_secure_path" \
+		"$l_prelude_host" "$l_prelude_guard_path" "$l_prelude_guard_kind" \
+		"$l_prelude_guard_status" "$@"
+	printf '%s;\n' "$g_zxfer_shell_command_result"
+	# The quoted body runs on the backup host. Only the argv prefix above
+	# contains caller values; read/printf emits it without spawning cat.
+	# The walk trusts symlinks directly under /: only root can create them,
+	# and macOS keeps /var and /tmp there.
 	while IFS= read -r l_prelude_line || [ -n "$l_prelude_line" ]; do
 		printf '%s\n' "$l_prelude_line"
-	done <<-EOF
-		PATH='$l_prelude_secure_path_single';
+	done <<-'EOF'
+		PATH=$1;
 		export PATH;
-
-		l_required_host='$l_prelude_host_single';
+		l_required_host=$2;
+		l_scan_path=$3;
+		l_scan_kind=$4;
+		l_scan_status=$5;
+		shift 5;
 		zxfer_require_remote_backup_tool() {
-		  l_required_tool=\$1;
-		  if command -v "\$l_required_tool" >/dev/null 2>&1; then
+		  l_required_tool=$1;
+		  if command -v "$l_required_tool" >/dev/null 2>&1; then
 		    return 0;
 		  fi;
-		  printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "\$l_required_tool" "\$l_required_host" "\$PATH" >&2;
+		  printf 'Required dependency "%s" not found on host %s in secure PATH (%s). Set ZXFER_SECURE_PATH/ZXFER_SECURE_PATH_APPEND for the remote host or install the binary.\n' "$l_required_tool" "$l_required_host" "$PATH" >&2;
 		  exit 99;
 		};
-	EOF
-	if [ -n "$l_prelude_tools" ]; then
-		# shellcheck disable=SC2016  # the remote shell expands $l_required_tool.
-		printf '%s\n' "for l_required_tool in$l_prelude_tools; do" \
-			'  zxfer_require_remote_backup_tool "$l_required_tool";' 'done;'
-	fi
+		for l_required_tool in "$@"; do
+		  zxfer_require_remote_backup_tool "$l_required_tool";
+		done;
 
-	# Walk every component; a symlink is refused unless it sits directly
-	# under / (only root can create entries there, and macOS keeps /var and
-	# /tmp as such links).
-	while IFS= read -r l_prelude_line || [ -n "$l_prelude_line" ]; do
-		printf '%s\n' "$l_prelude_line"
-	done <<-EOF
-
-		l_scan_path='$l_prelude_guard_path_single';
-		l_scan_rest=\$l_scan_path;
+		l_scan_rest=$l_scan_path;
 		l_scan_candidate='';
-		case "\$l_scan_rest" in
-		/*) l_scan_candidate=/; l_scan_rest=\${l_scan_rest#/} ;;
+		case "$l_scan_rest" in
+		/*) l_scan_candidate=/; l_scan_rest=${l_scan_rest#/} ;;
 		esac;
-		while [ -n "\$l_scan_rest" ]; do
-		  l_scan_component=\${l_scan_rest%%/*};
-		  case "\$l_scan_rest" in
-		  */*) l_scan_rest=\${l_scan_rest#*/} ;;
+		while [ -n "$l_scan_rest" ]; do
+		  l_scan_component=${l_scan_rest%%/*};
+		  case "$l_scan_rest" in
+		  */*) l_scan_rest=${l_scan_rest#*/} ;;
 		  *) l_scan_rest='' ;;
 		  esac;
-		  [ -n "\$l_scan_component" ] || continue;
-		  case "\$l_scan_candidate" in
-		  '') l_scan_candidate=\$l_scan_component ;;
-		  /) l_scan_candidate=/\$l_scan_component ;;
-		  *) l_scan_candidate=\$l_scan_candidate/\$l_scan_component ;;
+		  [ -n "$l_scan_component" ] || continue;
+		  case "$l_scan_candidate" in
+		  '') l_scan_candidate=$l_scan_component ;;
+		  /) l_scan_candidate=/$l_scan_component ;;
+		  *) l_scan_candidate=$l_scan_candidate/$l_scan_component ;;
 		  esac;
-		  [ -L "\$l_scan_candidate" ] || continue;
-		  case "\$l_scan_candidate" in
+		  [ -L "$l_scan_candidate" ] || continue;
+		  case "$l_scan_candidate" in
 		  /*/*) ;;
 		  /*) continue ;;
 		  esac;
-		  if [ "\$l_scan_candidate" = "\$l_scan_path" ]; then
-		    $l_prelude_guard_exact;
-		  else
-		    $l_prelude_guard_component;
-		  fi;
-		  exit $l_prelude_guard_status;
+		  case "$l_scan_kind:$l_scan_candidate" in
+		  directory:"$l_scan_path")
+		    echo 'Refusing to use symlinked zxfer backup directory.' >&2;
+		    ;;
+		  metadata:"$l_scan_path")
+		    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+		    ;;
+		  *)
+		    if [ "$l_scan_kind" = directory ]; then
+		      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+		    else
+		      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+		    fi;
+		    ;;
+		  esac;
+		  exit "$l_scan_status";
 		done;
 	EOF
 }
@@ -1083,39 +1071,40 @@ zxfer_build_remote_backup_dir_prepare_cmd() {
 	l_prepare_host=$2
 	shift 2
 
-	zxfer_escape_single_quotes_into_result "$l_prepare_dir"
-	l_prepare_dir_single=$g_zxfer_escaped_single_quotes_result
 	# ls must not read a leading dash as an option.
-	l_prepare_ls_single=$l_prepare_dir_single
+	l_prepare_ls_path=$l_prepare_dir
 	case $l_prepare_dir in
-	-*) l_prepare_ls_single=./$l_prepare_dir_single ;;
+	-*) l_prepare_ls_path=./$l_prepare_dir ;;
 	esac
 	zxfer_build_remote_backup_script_prelude "$l_prepare_host" "$l_prepare_dir" \
 		directory mkdir chmod id ls awk "$@" || return "$?"
 
+	zxfer_render_shell_command_from_argv set -- "$l_prepare_dir" "$l_prepare_ls_path"
+	printf '%s;\n' "$g_zxfer_shell_command_result"
 	while IFS= read -r l_prepare_line || [ -n "$l_prepare_line" ]; do
 		printf '%s\n' "$l_prepare_line"
-	done <<-EOF
-
-		if [ -e '$l_prepare_dir_single' ] && [ ! -d '$l_prepare_dir_single' ]; then
+	done <<-'EOF'
+		l_prepare_dir=$1;
+		l_prepare_ls_path=$2;
+		if [ -e "$l_prepare_dir" ] && [ ! -d "$l_prepare_dir" ]; then
 		  echo 'Backup path exists but is not a directory.' >&2;
 		  exit 92;
 		fi;
 		umask 077;
-		if ! mkdir -p '$l_prepare_dir_single'; then
+		if ! mkdir -p "$l_prepare_dir"; then
 		  echo 'Error creating secure backup directory.' >&2;
 		  exit 92;
 		fi;
-		if ! chmod 700 '$l_prepare_dir_single'; then
+		if ! chmod 700 "$l_prepare_dir"; then
 		  echo 'Error securing backup directory.' >&2;
 		  exit 92;
 		fi;
-		l_dir_uid=\$(ls -ldn '$l_prepare_ls_single' 2>/dev/null | awk '\$3 ~ /^[0-9]+\$/ { print \$3 }');
-		if [ "\$l_dir_uid" = '' ]; then
+		l_dir_uid=$(ls -ldn "$l_prepare_ls_path" 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
+		if [ "$l_dir_uid" = '' ]; then
 		  echo 'Unable to determine backup directory owner.' >&2;
 		  exit 92;
 		fi;
-		if [ "\$l_dir_uid" != 0 ] && [ "\$l_dir_uid" != "\$(id -u)" ]; then
+		if [ "$l_dir_uid" != 0 ] && [ "$l_dir_uid" != "$(id -u)" ]; then
 		  echo 'Backup directory must be owned by root or the ssh user.' >&2;
 		  exit 92;
 		fi;
@@ -1126,87 +1115,86 @@ zxfer_build_remote_backup_dir_prepare_cmd() {
 # pair from stdin (the complete primary file; the forwarded copy differs only
 # in its #source_root line) into two directories already trusted and private.
 # Usage: zxfer_build_backup_pair_write_cmd PRIMARY FORWARDED ROOT CAT_COMMAND,
-# CAT_COMMAND already shell-quoted. The program exits 92 when publication
-# fails and 98 when rollback fails too. Each rename is atomic; this is
-# detected-failure rollback, not crash atomicity. Signals are deferred until
+# CAT_COMMAND is one executable, already shell-quoted. The program exits 92
+# when publication fails and 98 when rollback fails too. Each rename is atomic;
+# this is detected-failure rollback, not crash atomicity. Signals defer until
 # each rename and its marker agree: a signal after the first publish rolls
 # it back; after the second, both files stay live.
 zxfer_build_backup_pair_write_cmd() {
 	zxfer_render_shell_command_from_argv set -- "$1" "$2" "$3"
-	l_pair_render_cat=$4
-	printf '%s;\n' "$g_zxfer_shell_command_result"
+	printf '%s;\nl_pair_cat=%s;\n' "$g_zxfer_shell_command_result" "$4"
 	while IFS= read -r l_pair_render_line || [ -n "$l_pair_render_line" ]; do
 		printf '%s\n' "$l_pair_render_line"
-	done <<-EOF
-		l_pair_primary=\$1;
-		l_pair_forwarded=\$2;
-		l_pair_root=\$3;
+	done <<-'EOF'
+		l_pair_primary=$1;
+		l_pair_forwarded=$2;
+		l_pair_root=$3;
 		l_pair_stage='';
 		l_pair_forwarded_stage='';
 		l_pair_recovery='';
 		l_pair_published=0;
 		zxfer_finish_backup_pair() {
-		  l_pair_exit=\$?;
+		  l_pair_exit=$?;
 		  trap - 0;
 		  trap '' HUP INT TERM;
-		  if [ "\$l_pair_published" -eq 1 ]; then
-		    if [ -n "\$l_pair_recovery" ]; then
-		      if ! mv -f "\$l_pair_recovery" "\$l_pair_primary"; then
-		        rm -f "\$l_pair_primary" || :;
-		        printf 'Backup metadata rollback failed; recover %s from %s.\n' "\$l_pair_primary" "\$l_pair_recovery" >&2;
+		  if [ "$l_pair_published" -eq 1 ]; then
+		    if [ -n "$l_pair_recovery" ]; then
+		      if ! mv -f "$l_pair_recovery" "$l_pair_primary"; then
+		        rm -f "$l_pair_primary" || :;
+		        printf 'Backup metadata rollback failed; recover %s from %s.\n' "$l_pair_primary" "$l_pair_recovery" >&2;
 		        l_pair_recovery='';
 		        l_pair_exit=98;
 		      fi;
-		    elif ! rm -f "\$l_pair_primary"; then
-		      printf 'Backup metadata rollback failed; remove the newly published %s before retrying.\n' "\$l_pair_primary" >&2;
+		    elif ! rm -f "$l_pair_primary"; then
+		      printf 'Backup metadata rollback failed; remove the newly published %s before retrying.\n' "$l_pair_primary" >&2;
 		      l_pair_exit=98;
 		    fi;
 		  fi;
-		  for l_pair_cleanup in "\$l_pair_stage" "\$l_pair_forwarded_stage" "\$l_pair_recovery"; do
-		    [ -z "\$l_pair_cleanup" ] || rm -f "\$l_pair_cleanup" || { [ "\$l_pair_exit" -ne 0 ] || l_pair_exit=92; };
+		  for l_pair_cleanup in "$l_pair_stage" "$l_pair_forwarded_stage" "$l_pair_recovery"; do
+		    [ -z "$l_pair_cleanup" ] || rm -f "$l_pair_cleanup" || { [ "$l_pair_exit" -ne 0 ] || l_pair_exit=92; };
 		  done;
-		  exit "\$l_pair_exit";
+		  exit "$l_pair_exit";
 		};
 		trap zxfer_finish_backup_pair 0;
 		trap 'exit 129' HUP;
 		trap 'exit 130' INT;
 		trap 'exit 143' TERM;
 		umask 077;
-		for l_pair_target in "\$l_pair_primary" "\$l_pair_forwarded"; do
-		  if [ -L "\$l_pair_target" ]; then
-		    printf 'Refusing to write backup metadata %s because it is a symlink.\n' "\$l_pair_target" >&2;
+		for l_pair_target in "$l_pair_primary" "$l_pair_forwarded"; do
+		  if [ -L "$l_pair_target" ]; then
+		    printf 'Refusing to write backup metadata %s because it is a symlink.\n' "$l_pair_target" >&2;
 		    exit 92;
 		  fi;
-		  if [ -e "\$l_pair_target" ] && [ ! -f "\$l_pair_target" ]; then
-		    printf 'Refusing to write backup metadata %s because it is not a regular file.\n' "\$l_pair_target" >&2;
+		  if [ -e "$l_pair_target" ] && [ ! -f "$l_pair_target" ]; then
+		    printf 'Refusing to write backup metadata %s because it is not a regular file.\n' "$l_pair_target" >&2;
 		    exit 92;
 		  fi;
 		done;
-		l_pair_stage=\$(mktemp "\${l_pair_primary%/*}/.zxfer-backup-write.XXXXXX") || exit 92;
-		$l_pair_render_cat >"\$l_pair_stage" && chmod 600 "\$l_pair_stage" || exit 92;
-		if [ "\$l_pair_primary" = "\$l_pair_forwarded" ]; then
-		  [ ! -L "\$l_pair_primary" ] && mv -f "\$l_pair_stage" "\$l_pair_primary" || exit 92;
+		l_pair_stage=$(mktemp "${l_pair_primary%/*}/.zxfer-backup-write.XXXXXX") || exit 92;
+		"$l_pair_cat" >"$l_pair_stage" && chmod 600 "$l_pair_stage" || exit 92;
+		if [ "$l_pair_primary" = "$l_pair_forwarded" ]; then
+		  [ ! -L "$l_pair_primary" ] && mv -f "$l_pair_stage" "$l_pair_primary" || exit 92;
 		  exit 0;
 		fi;
-		l_pair_forwarded_stage=\$(mktemp "\${l_pair_forwarded%/*}/.zxfer-backup-write.XXXXXX") || exit 92;
-		ZXFER_BACKUP_FORWARD_ROOT=\$l_pair_root awk '
-		  index(\$0, "#source_root:") == 1 { \$0 = "#source_root:" ENVIRON["ZXFER_BACKUP_FORWARD_ROOT"] }
+		l_pair_forwarded_stage=$(mktemp "${l_pair_forwarded%/*}/.zxfer-backup-write.XXXXXX") || exit 92;
+		ZXFER_BACKUP_FORWARD_ROOT=$l_pair_root awk '
+		  index($0, "#source_root:") == 1 { $0 = "#source_root:" ENVIRON["ZXFER_BACKUP_FORWARD_ROOT"] }
 		  { print }
-		' "\$l_pair_stage" >"\$l_pair_forwarded_stage" && chmod 600 "\$l_pair_forwarded_stage" || exit 92;
-		if [ -e "\$l_pair_primary" ]; then
-		  l_pair_recovery=\$(mktemp "\${l_pair_primary%/*}/.zxfer-backup-recovery.XXXXXX") || exit 92;
-		  $l_pair_render_cat "\$l_pair_primary" >"\$l_pair_recovery" && chmod 600 "\$l_pair_recovery" || exit 92;
+		' "$l_pair_stage" >"$l_pair_forwarded_stage" && chmod 600 "$l_pair_forwarded_stage" || exit 92;
+		if [ -e "$l_pair_primary" ]; then
+		  l_pair_recovery=$(mktemp "${l_pair_primary%/*}/.zxfer-backup-recovery.XXXXXX") || exit 92;
+		  "$l_pair_cat" "$l_pair_primary" >"$l_pair_recovery" && chmod 600 "$l_pair_recovery" || exit 92;
 		fi;
 		l_pair_signal=0;
 		trap 'l_pair_signal=129' HUP;
 		trap 'l_pair_signal=130' INT;
 		trap 'l_pair_signal=143' TERM;
-		[ ! -L "\$l_pair_primary" ] && mv -f "\$l_pair_stage" "\$l_pair_primary" || exit 92;
+		[ ! -L "$l_pair_primary" ] && mv -f "$l_pair_stage" "$l_pair_primary" || exit 92;
 		l_pair_published=1;
-		[ "\$l_pair_signal" -eq 0 ] || exit "\$l_pair_signal";
-		[ ! -L "\$l_pair_forwarded" ] && mv -f "\$l_pair_forwarded_stage" "\$l_pair_forwarded" || exit 92;
+		[ "$l_pair_signal" -eq 0 ] || exit "$l_pair_signal";
+		[ ! -L "$l_pair_forwarded" ] && mv -f "$l_pair_forwarded_stage" "$l_pair_forwarded" || exit 92;
 		l_pair_published=0;
-		[ "\$l_pair_signal" -eq 0 ] || exit "\$l_pair_signal";
+		[ "$l_pair_signal" -eq 0 ] || exit "$l_pair_signal";
 	EOF
 }
 
@@ -1230,51 +1218,49 @@ zxfer_build_remote_backup_read_cmd() {
 	case $l_read_cmd_parent in
 	-*) l_read_cmd_parent=./$l_read_cmd_parent ;;
 	esac
-	zxfer_escape_single_quotes_into_result "$l_read_cmd_path"
-	l_read_cmd_path_single=$g_zxfer_escaped_single_quotes_result
-	zxfer_escape_single_quotes_into_result "$l_read_cmd_ls_path"
-	l_read_cmd_ls_single=$g_zxfer_escaped_single_quotes_result
-	zxfer_escape_single_quotes_into_result "$l_read_cmd_parent"
-	l_read_cmd_parent_single=$g_zxfer_escaped_single_quotes_result
-	zxfer_render_shell_command_from_argv "${g_cmd_cat:-cat}"
-	l_read_cmd_cat=$g_zxfer_shell_command_result
 	zxfer_build_remote_backup_script_prelude "$l_read_cmd_host" "$l_read_cmd_path" \
 		metadata id ls awk || return "$?"
 
+	zxfer_render_shell_command_from_argv set -- "$l_read_cmd_path" \
+		"$l_read_cmd_ls_path" "$l_read_cmd_parent" "${g_cmd_cat:-cat}"
+	printf '%s;\n' "$g_zxfer_shell_command_result"
 	while IFS= read -r l_read_cmd_line || [ -n "$l_read_cmd_line" ]; do
 		printf '%s\n' "$l_read_cmd_line"
-	done <<-EOF
-
-		if [ ! -f '$l_read_cmd_path_single' ]; then
+	done <<-'EOF'
+		l_read_cmd_path=$1;
+		l_read_cmd_ls_path=$2;
+		l_read_cmd_parent=$3;
+		l_read_cmd_cat=$4;
+		if [ ! -f "$l_read_cmd_path" ]; then
 		  exit 94;
 		fi;
-		l_expected_uid=\$(id -u 2>/dev/null | awk '/^[0-9]+\$/');
-		[ "\$l_expected_uid" != '' ] || exit 97;
-		l_parent_line=\$(ls -ldn '$l_read_cmd_parent_single' 2>/dev/null) || exit 97;
-		l_parent_uid=\$(printf '%s\n' "\$l_parent_line" | awk '\$3 ~ /^[0-9]+\$/ { print \$3 }');
-		[ "\$l_parent_uid" != '' ] || exit 97;
-		if [ "\$l_parent_uid" != 0 ] && [ "\$l_parent_uid" != "\$l_expected_uid" ]; then
+		l_expected_uid=$(id -u 2>/dev/null | awk '/^[0-9]+$/');
+		[ "$l_expected_uid" != '' ] || exit 97;
+		l_parent_line=$(ls -ldn "$l_read_cmd_parent" 2>/dev/null) || exit 97;
+		l_parent_uid=$(printf '%s\n' "$l_parent_line" | awk '$3 ~ /^[0-9]+$/ { print $3 }');
+		[ "$l_parent_uid" != '' ] || exit 97;
+		if [ "$l_parent_uid" != 0 ] && [ "$l_parent_uid" != "$l_expected_uid" ]; then
 		  exit 91;
 		fi;
-		case "\$l_parent_line" in
+		case "$l_parent_line" in
 		?????w* | ????????w*)
-		  case "\$l_parent_line" in
+		  case "$l_parent_line" in
 		  ?????????[tT]*) ;;
 		  *) exit 91 ;;
 		  esac;
 		  ;;
 		esac;
-		l_file_line=\$(ls -ldn '$l_read_cmd_ls_single' 2>/dev/null) || exit 97;
-		l_file_uid=\$(printf '%s\n' "\$l_file_line" | awk '\$3 ~ /^[0-9]+\$/ { print \$3 }');
-		[ "\$l_file_uid" != '' ] || exit 97;
-		if [ "\$l_file_uid" != 0 ] && [ "\$l_file_uid" != "\$l_expected_uid" ]; then
+		l_file_line=$(ls -ldn "$l_read_cmd_ls_path" 2>/dev/null) || exit 97;
+		l_file_uid=$(printf '%s\n' "$l_file_line" | awk '$3 ~ /^[0-9]+$/ { print $3 }');
+		[ "$l_file_uid" != '' ] || exit 97;
+		if [ "$l_file_uid" != 0 ] && [ "$l_file_uid" != "$l_expected_uid" ]; then
 		  exit 95;
 		fi;
-		case "\$l_file_line" in
+		case "$l_file_line" in
 		-rw-------*) ;;
 		*) exit 96 ;;
 		esac;
-		$l_read_cmd_cat '$l_read_cmd_path_single';
+		"$l_read_cmd_cat" "$l_read_cmd_path";
 	EOF
 }
 
@@ -1290,40 +1276,39 @@ zxfer_build_remote_backup_storage_listing_cmd() {
 	l_listing_root=$1
 	l_listing_host=$2
 
-	zxfer_escape_single_quotes_into_result "$g_backup_storage_root"
-	l_listing_store_single=$g_zxfer_escaped_single_quotes_result
-	zxfer_escape_single_quotes_into_result "$l_listing_root"
-	l_listing_root_single=$g_zxfer_escaped_single_quotes_result
 	# The root and each ancestor, pool first.
-	l_listing_chain="'$l_listing_root_single'"
+	set -- "$l_listing_root"
 	l_listing_ancestor=$l_listing_root
 	while :; do
 		case $l_listing_ancestor in
 		*/*) l_listing_ancestor=${l_listing_ancestor%/*} ;;
 		*) break ;;
 		esac
-		zxfer_escape_single_quotes_into_result "$l_listing_ancestor"
-		l_listing_chain="'$g_zxfer_escaped_single_quotes_result' $l_listing_chain"
+		set -- "$l_listing_ancestor" "$@"
 	done
 	zxfer_build_remote_backup_script_prelude "$l_listing_host" \
 		"$g_backup_storage_root/$l_listing_root" directory || return "$?"
 
+	zxfer_render_shell_command_from_argv set -- "$g_backup_storage_root" "$l_listing_root" "$@"
+	printf '%s;\n' "$g_zxfer_shell_command_result"
 	while IFS= read -r l_listing_line || [ -n "$l_listing_line" ]; do
 		printf '%s\n' "$l_listing_line"
-	done <<-EOF
-
-		if [ ! -d '$l_listing_store_single' ]; then
+	done <<-'EOF'
+		l_listing_store=$1;
+		l_listing_root=$2;
+		shift 2;
+		if [ ! -d "$l_listing_store" ]; then
 		  exit 0;
 		fi;
-		cd '$l_listing_store_single' || exit 97;
-		for l_listing_dir in $l_listing_chain; do
-		  if [ -d "\$l_listing_dir" ] || [ -L "\$l_listing_dir" ]; then
-		    printf '%s\n' "\$l_listing_dir";
+		cd "$l_listing_store" || exit 97;
+		for l_listing_dir in "$@"; do
+		  if [ -d "$l_listing_dir" ] || [ -L "$l_listing_dir" ]; then
+		    printf '%s\n' "$l_listing_dir";
 		  fi;
 		done;
-		if [ -d '$l_listing_root_single' ]; then
+		if [ -d "$l_listing_root" ]; then
 		  zxfer_require_remote_backup_tool 'find';
-		  find '$l_listing_root_single' -name '.zxfer_backup_info*' -prune -o \\( -type d -o -type l \\) -print || exit 97;
+		  find "$l_listing_root" -name '.zxfer_backup_info*' -prune -o \( -type d -o -type l \) -print || exit 97;
 		fi;
 	EOF
 }

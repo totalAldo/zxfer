@@ -539,8 +539,10 @@ test_build_fixture_tree_layout_and_guids() {
 		"$(wc -l <"$CASE_DIR/fixtures/incremental/dst_snapshots.list" | tr -d '[:space:]')"
 	assertEquals "incremental depth-1 root rows" 2 \
 		"$(wc -l <"$CASE_DIR/fixtures/incremental/dst_d1_0.list" | tr -d '[:space:]')"
-	# 5 discovery rules + 3 per-dataset depth-1 rules.
-	assertEquals "manifest rule count" 8 \
+	assertEquals "source dataset inventory rows" 3 \
+		"$(wc -l <"$CASE_DIR/fixtures/noop/src_datasets.list" | tr -d '[:space:]')"
+	# 6 discovery rules + 3 per-dataset depth-1 rules.
+	assertEquals "manifest rule count" 9 \
 		"$(wc -l <"$CASE_DIR/fixtures/noop/manifest" | tr -d '[:space:]')"
 
 	assertTrue "every record needs a deterministic 19-digit guid" \

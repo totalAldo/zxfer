@@ -144,8 +144,14 @@ user:k,zz:tail" "$result"
 	printf 'p/a\ttype\np/a\tuser:car\np/new\ttype\np/b\ttype\n' >"$TEST_TMPDIR/parse.skeleton"
 	printf 'p/a\ttype\tfilesystem\t-\np/a\tuser:car\tx\tlocal\np/new\ttype\tvolume\tlocal\np/b\ttype\tfilesystem\t-\n' \
 		>"$TEST_TMPDIR/parse.machine"
-	result=$(zxfer_parse_property_views prefetch "$TEST_TMPDIR/parse.wanted" \
+	zxfer_prepare_property_read_files
+	index=$(zxfer_parse_property_views store "$TEST_TMPDIR/parse.wanted" \
 		"$TEST_TMPDIR/parse.skeleton" "$TEST_TMPDIR/parse.machine" "$TEST_TMPDIR/parse.machine")
+	assertEquals "The recursive parser must store the accepted rows." 0 "$?"
+	result=$(
+		g_zxfer_source_property_table=$ZXFER_LF$index$ZXFER_LF
+		zxfer_property_test_table_dump source
+	)
 	assertEquals "p/a is published with user:car cut" \
 		"p/a	type=filesystem=-,user:car=x=local
 p/b	type=filesystem=-" "$result"

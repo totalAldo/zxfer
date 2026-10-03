@@ -646,12 +646,13 @@ test_remote_target_dry_run_backup_mode_previews_the_directory_program() {
 		"No property data collected; skipping backup write." \
 		"$(sed -n '2,$p' "$CASE_DIR/zxfer.stdout")"
 	l_preview=$(sed -n 1p "$CASE_DIR/zxfer.stdout")
+	# shellcheck disable=SC2016 # These variables belong to the previewed remote program.
 	for l_fragment in \
 		"Dry run: '$MOCKBIN_DIR/ssh' " \
-		" 'localhost' 'PATH='\''$MOCKBIN_DIR:" \
+		" 'localhost' '" "$MOCKBIN_DIR:" "$BACKUP_ROOT" 'PATH=$1;' \
 		"Refusing to use symlinked zxfer backup directory." \
-		"mkdir -p '\''$BACKUP_ROOT'\''" \
-		"chmod 700 '\''$BACKUP_ROOT'\''"; do
+		'mkdir -p "$l_prepare_dir"' \
+		'chmod 700 "$l_prepare_dir"'; do
 		assertContains "the preview must hold [$l_fragment]" "$l_preview" "$l_fragment"
 	done
 	assertEquals "a dry run runs nothing over ssh" "" "$(cat "$SSH_LOG")"

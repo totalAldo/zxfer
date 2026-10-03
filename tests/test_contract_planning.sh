@@ -252,6 +252,8 @@ test_identical_source_and_destination_is_a_proven_noop() {
 		"" "$(find "$CASE_DIR/runtime" ! -path "$CASE_DIR/runtime" -print)"
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
+	assertFalse "existing datasets must not get a creation-attempt notice" \
+		"grep -Fq 'attempting creation before continuing recursive replication.' '$CASE_DIR/zxfer.stderr'"
 }
 
 # Invariant (current dry-run contract, pinned 2026-06): -n issues ZERO zfs
@@ -270,6 +272,8 @@ test_incremental_dryrun_issues_zero_zfs_argv_and_renders_no_plan() {
 	assertFalse "dry run must not invoke zfs at all" "[ -s '$ZFS_LOG' ]"
 	assertFalse "dry run renders no plan on stdout without -V" \
 		"[ -s '$CASE_DIR/zxfer.stdout' ]"
+	assertFalse "dry runs must not announce a creation attempt" \
+		"grep -Fq 'attempting creation before continuing recursive replication.' '$CASE_DIR/zxfer.stderr'"
 	planning_assert_no_mutations
 
 	planning_run_zxfer "$FIXTURE_DIR/incremental" -n -V -R \
@@ -279,6 +283,8 @@ test_incremental_dryrun_issues_zero_zfs_argv_and_renders_no_plan() {
 		"grep -q 'Dry run: send/receive and property-reconcile commands require live snapshot discovery' '$CASE_DIR/zxfer.stderr'"
 	assertFalse "very verbose dry run still must not invoke zfs" \
 		"[ -s '$ZFS_LOG' ]"
+	assertFalse "very verbose dry runs must not announce a creation attempt" \
+		"grep -Fq 'attempting creation before continuing recursive replication.' '$CASE_DIR/zxfer.stderr'"
 }
 
 # Invariant: a failing source snapshot listing fails closed — the zfs exit
@@ -610,6 +616,91 @@ test_delete_option_live_destroys_only_extra_destination_snapshot() {
 		"grep -q '^send ' '$ZFS_LOG'"
 	assertTrue "deletion planning should query candidate creation times" \
 		"grep -q '^get -H -o name,value -p creation $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@' '$ZFS_LOG'"
+}
+
+# Invariant: target-only datasets and their snapshots are preserved, including
+# under -d, -P and the -g pre-pass, while later source datasets still transfer.
+test_recursive_target_only_datasets_do_not_block_synchronization() {
+	planning_setup_env
+	for l_target_only_mode in plain delete properties grandfather remote; do
+		: >"$ZFS_LOG"
+		planning_clone_state "$FIXTURE_DIR/incremental" "target_only_$l_target_only_mode"
+		l_target_only_dest="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/aaa-target-only"
+		printf '%s\n%s/child\n' "$l_target_only_dest" "$l_target_only_dest" \
+			>>"$STATE_DIR/dst_datasets.list"
+		printf '%s@keep\t9999910000000000007\n%s/child@keep\t9999910000000000008\n' \
+			"$l_target_only_dest" "$l_target_only_dest" >>"$STATE_DIR/dst_snapshots.list"
+		set --
+		case $l_target_only_mode in
+		delete) set -- -d ;;
+		properties)
+			l_target_only_props=$(planning_property_default_rows)
+			planning_add_property_fixtures_for_rows "$l_target_only_props" "$l_target_only_props" \
+				"$l_target_only_props" "$l_target_only_props"
+			set -- -d -P
+			;;
+		grandfather) set -- -d -g 1 ;;
+		remote)
+			planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+				fail "Unable to write socket-aware mock ssh."
+			set -- -d -O localhost -T localhost
+			;;
+		esac
+		export MOCK_SSH_LOG="$CASE_DIR/ssh.log"
+		(
+			PATH=$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")
+			export PATH
+			planning_run_zxfer "$STATE_DIR" "$@" -R \
+				"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		)
+		l_target_only_status=$?
+		unset MOCK_SSH_LOG
+		assertEquals "target-only datasets must not block [$l_target_only_mode]; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_target_only_status"
+		assertFalse "no work may target either target-only dataset [$l_target_only_mode]" \
+			"grep -Fq 'aaa-target-only' '$ZFS_LOG'"
+		for l_target_only_suffix in "" /child1 /child2; do
+			planning_assert_log_has_line "receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_target_only_suffix"
+		done
+		planning_assert_no_mutations
+		if [ "$l_target_only_mode" != plain ]; then
+			for l_target_only_suffix in "" /child; do
+				assertTrue "-d must explain preserving target-only data [$l_target_only_mode]" \
+					"grep -Fqx 'zxfer: destination dataset [$l_target_only_dest$l_target_only_suffix] has no source counterpart; leaving it and its snapshots untouched.' '$CASE_DIR/zxfer.stderr'"
+			done
+		fi
+	done
+}
+
+# Absence is trusted only after a successful source dataset inventory that
+# includes its root. Failed, empty or rootless inventories stop before changes.
+test_recursive_delete_source_dataset_inventory_fails_closed() {
+	planning_setup_env
+	for l_delete_inventory_case in failed empty rootless; do
+		: >"$ZFS_LOG"
+		planning_clone_state "$FIXTURE_DIR/noop" "delete_inventory_$l_delete_inventory_case"
+		planning_add_extra_destination_snapshot
+		case $l_delete_inventory_case in
+		failed)
+			planning_force_manifest_failure \
+				"list -Hr -t filesystem,volume -o name $ZXFER_MOCKBIN_SOURCE_ROOT" 2
+			l_delete_inventory_status=2
+			l_delete_inventory_message="Failed to retrieve source dataset inventory for recursive destination snapshot cleanup."
+			;;
+		empty | rootless)
+			: >"$STATE_DIR/src_datasets.list"
+			[ "$l_delete_inventory_case" = empty ] ||
+				printf '%s/child1\n' "$ZXFER_MOCKBIN_SOURCE_ROOT" >"$STATE_DIR/src_datasets.list"
+			l_delete_inventory_status=1
+			l_delete_inventory_message="Failed to filter recursive destination snapshot cleanup against a complete source dataset inventory."
+			;;
+		esac
+		planning_run_zxfer "$STATE_DIR" -d -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		assertEquals "bad inventory must fail closed [$l_delete_inventory_case]" "$l_delete_inventory_status" $?
+		planning_assert_failure_report "snapshot discovery" "$l_delete_inventory_message"
+		planning_assert_no_mutations
+		planning_assert_no_send_receive
+	done
 }
 
 # Invariant (-d without -F): destroying a destination-only snapshot newer than
@@ -997,6 +1088,7 @@ test_skip_unsupported_option_skips_property_destination_does_not_support() {
 # Invariant (-P, missing destination child): a source child whose destination
 # does not exist is `zfs create`d with its local and creation-time
 # properties (read-only ones dropped) before anything is received into it.
+# The creation-attempt notice is printed once, never repeated by seeding.
 test_missing_destination_child_is_created_with_creation_properties_before_receive() {
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/noop" prop_create
@@ -1016,6 +1108,9 @@ test_missing_destination_child_is_created_with_creation_properties_before_receiv
 		>>"$STATE_DIR/manifest" || fail "Unable to append missing-child rule."
 
 	planning_run_property_pass -P
+	assertEquals "property creation gets one stderr notice without -v, never duplicated by seeding" \
+		"zxfer: destination dataset [$l_missing_child] is missing; attempting creation before continuing recursive replication." \
+		"$(cat "$CASE_DIR/zxfer.stderr")"
 	l_create_line="MUTATE create -o compression=lz4 -o readonly=off -o atime=off -o casesensitivity=sensitive -o normalization=none -o utf8only=off $l_missing_child"
 	planning_assert_log_has_line "$l_create_line"
 	assertEquals "exactly one create and no set/inherit for identical datasets" \

@@ -42,8 +42,7 @@
 #   the per-role control sockets and their directory (with
 #   g_zxfer_ssh_control_socket_short_dir, the short directory this module
 #   creates and removes when the run root's socket path is too long), the
-#   control-socket action results, the per-role zfs render
-#   (g_zxfer_zfs_role_*), and the host/command/prepared-command result
+#   control-socket action results, the host/command/prepared-command result
 #   globals.
 # reads globals: g_option_O_origin_host, g_option_T_target_host, g_cmd_zfs,
 #   g_origin_cmd_zfs, g_target_cmd_zfs, ZXFER_SSH_*, and runtime state.
@@ -517,48 +516,60 @@ zxfer_publish_prepared_ssh_shell_command_for_host_or_throw() {
 # ZFS COMMANDS BY ROLE
 ################################################################################
 
-# Purpose: Resolve where one role's zfs runs and, for a remote role, render
-# the remote command with every argument kept intact.
-# Usage: zxfer_prepare_zfs_role_command ROLE ARG...; publishes
-# g_zxfer_zfs_role_side, g_zxfer_zfs_role_host (empty to run locally) and
-# either the local g_zxfer_zfs_role_zfs or the remote g_zxfer_zfs_role_command.
-# An unknown ROLE prints "zxfer: unknown zfs command role [ROLE]." to stderr
-# and returns 1.
-zxfer_prepare_zfs_role_command() {
-	g_zxfer_zfs_role_side=$1
-	g_zxfer_zfs_role_host=""
-	g_zxfer_zfs_role_zfs=$g_cmd_zfs
-	g_zxfer_zfs_role_command=""
-	case $1 in
+# Purpose: Select one role's endpoint and run or render its zfs command.
+# Usage: zxfer_zfs_command_for_role run|render source|destination|local ARG...;
+# run preserves direct local argv execution and returns the zfs/ssh status;
+# render publishes g_zxfer_shell_command_result without recording a call.
+# The endpoint and command live only in this dispatch; no prepared role
+# channel is published for another helper to consume.
+zxfer_zfs_command_for_role() {
+	l_zfs_dispatch_mode=$1
+	l_zfs_dispatch_side=$2
+	case $l_zfs_dispatch_mode in
+	run | render) ;;
+	*) return 1 ;;
+	esac
+	case $2 in
 	source)
-		g_zxfer_zfs_role_host=${g_option_O_origin_host:-}
-		l_zfs_role_remote_zfs=${g_origin_cmd_zfs:-$g_cmd_zfs}
+		l_zfs_dispatch_host=${g_option_O_origin_host:-}
+		l_zfs_dispatch_zfs=${g_origin_cmd_zfs:-$g_cmd_zfs}
 		;;
 	destination)
-		g_zxfer_zfs_role_host=${g_option_T_target_host:-}
-		l_zfs_role_remote_zfs=${g_target_cmd_zfs:-$g_cmd_zfs}
+		l_zfs_dispatch_host=${g_option_T_target_host:-}
+		l_zfs_dispatch_zfs=${g_target_cmd_zfs:-$g_cmd_zfs}
 		;;
 	local)
-		g_zxfer_zfs_role_side=other
+		l_zfs_dispatch_host=""
+		l_zfs_dispatch_zfs=$g_cmd_zfs
+		l_zfs_dispatch_side=other
 		;;
 	*)
-		printf 'zxfer: unknown zfs command role [%s].\n' "$1" >&2
+		printf 'zxfer: unknown zfs command role [%s].\n' "$2" >&2
 		return 1
 		;;
 	esac
-	[ -n "$g_zxfer_zfs_role_host" ] || return 0
+	shift 2
+	[ "$l_zfs_dispatch_mode" != run ] ||
+		zxfer_profile_record_zfs_call "$l_zfs_dispatch_side" "$1"
+	if [ -z "$l_zfs_dispatch_host" ]; then
+		if [ "$l_zfs_dispatch_mode" = render ]; then
+			zxfer_render_shell_command_from_argv "$g_cmd_zfs" "$@"
+			return 0
+		fi
+		zxfer_record_last_command_argv "$g_cmd_zfs" "$@"
+		"$g_cmd_zfs" "$@"
+		return
+	fi
 
-	shift
-	zxfer_render_shell_command_from_argv "$l_zfs_role_remote_zfs" "$@"
-	g_zxfer_zfs_role_command=$g_zxfer_shell_command_result
-	case $g_zxfer_zfs_role_command in
+	zxfer_render_shell_command_from_argv "$l_zfs_dispatch_zfs" "$@"
+	case $g_zxfer_shell_command_result in
 	*"$ZXFER_LF"*)
-		# A raw newline would end the command early in a csh or tcsh login
-		# shell, so a multi-line argument travels in the csh-safe sh -c form.
-		zxfer_build_remote_sh_c_command "$g_zxfer_zfs_role_command" >/dev/null
-		g_zxfer_zfs_role_command=$g_zxfer_remote_sh_c_command_result
+		# csh/tcsh would end a command at a raw newline in an argument.
+		zxfer_build_remote_sh_c_command "$g_zxfer_shell_command_result" >/dev/null
 		;;
 	esac
+	zxfer_ssh_shell_command_for_host "$l_zfs_dispatch_mode" "$l_zfs_dispatch_host" \
+		"$g_zxfer_shell_command_result" "$l_zfs_dispatch_side"
 }
 
 # Purpose: Run zfs for one role: locally, or over ssh when the role has an
@@ -566,16 +577,7 @@ zxfer_prepare_zfs_role_command() {
 # Usage: zxfer_run_zfs_cmd_for_role source|destination|local ARG...; returns
 # the zfs or ssh status, or 1 for an unknown role.
 zxfer_run_zfs_cmd_for_role() {
-	zxfer_prepare_zfs_role_command "$@" || return 1
-	shift
-	zxfer_profile_record_zfs_call "$g_zxfer_zfs_role_side" "$1"
-	if [ -z "$g_zxfer_zfs_role_host" ]; then
-		zxfer_record_last_command_argv "$g_zxfer_zfs_role_zfs" "$@"
-		"$g_zxfer_zfs_role_zfs" "$@"
-		return
-	fi
-	zxfer_invoke_ssh_shell_command_for_host "$g_zxfer_zfs_role_host" \
-		"$g_zxfer_zfs_role_command" "$g_zxfer_zfs_role_side"
+	zxfer_zfs_command_for_role run "$@"
 }
 
 # Purpose: Render the command zxfer_run_zfs_cmd_for_role would run, for
@@ -583,14 +585,7 @@ zxfer_run_zfs_cmd_for_role() {
 # Usage: zxfer_render_zfs_command_for_role source|destination|local ARG...;
 # publishes g_zxfer_shell_command_result, or returns 1 for an unknown role.
 zxfer_render_zfs_command_for_role() {
-	zxfer_prepare_zfs_role_command "$@" || return 1
-	shift
-	if [ -z "$g_zxfer_zfs_role_host" ]; then
-		zxfer_render_shell_command_from_argv "$g_zxfer_zfs_role_zfs" "$@"
-		return 0
-	fi
-	zxfer_ssh_shell_command_for_host render "$g_zxfer_zfs_role_host" \
-		"$g_zxfer_zfs_role_command"
+	zxfer_zfs_command_for_role render "$@"
 }
 
 # Purpose: Run zfs on the source side (the -O host when given).

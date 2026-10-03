@@ -708,21 +708,52 @@ test_remote_backup_protocol_renderers_match_readable_golden_output() {
 test_remote_backup_renderers_treat_host_and_path_metacharacters_as_data() {
 	marker="$TEST_TMPDIR/renderer_metachar_marker"
 	host="target.example; touch $marker #"
-	path="$TEST_TMPDIR_PHYSICAL/quote'dir/it's.meta"
-	g_cmd_cat="/bin/cat"
+	path="$TEST_TMPDIR_PHYSICAL/quote' dir;*/it's.meta"
+	helper="$TEST_TMPDIR_PHYSICAL/quote' cat helper"
+	cat >"$helper" <<'EOF'
+#!/bin/sh
+exec /bin/cat "$@"
+EOF
+	chmod +x "$helper"
+	g_cmd_cat=$helper
+	zxfer_render_shell_command_from_argv "$helper"
+	cat_command=$g_zxfer_shell_command_result
 
 	rendered=$(
 		zxfer_build_remote_backup_dir_prepare_cmd "${path%/*}" "$host" mktemp mv rm &&
-			zxfer_build_backup_pair_write_cmd "$path" "$path" tank/src cat
+			zxfer_build_backup_pair_write_cmd "$path" "$path" tank/src "$cat_command"
 	)
 	assertContains "Hosts are single-quoted data inside the rendered program." \
-		"$rendered" "l_required_host='target.example; touch $marker #';"
+		"$rendered" "'target.example; touch $marker #'"
 	assertContains "Paths with quotes are escaped for the remote shell." \
-		"$rendered" "'$TEST_TMPDIR_PHYSICAL/quote'\\''dir/it'\\''s.meta'"
+		"$rendered" "'$TEST_TMPDIR_PHYSICAL/quote'\\'' dir;*/it'\\''s.meta'"
 	printf 'quoted payload\n' | sh -c "$rendered"
 	assertEquals 0 "$?"
 	assertEquals "quoted payload" "$(cat "$path")"
 	assertFalse "Host metacharacters never execute." "[ -e '$marker' ]"
 	assertEquals "The read program handles the same quoting." \
 		"quoted payload" "$(sh -c "$(zxfer_build_remote_backup_read_cmd "$path" "$host")")"
+}
+
+test_backup_listing_and_collapsed_programs_keep_quoted_arguments_and_stdin() {
+	g_backup_storage_root="$TEST_TMPDIR_PHYSICAL/store' with spaces"
+	root="tank/child' with spaces"
+	path="$g_backup_storage_root/$root/backup.meta"
+	rendered=$(
+		zxfer_build_remote_backup_dir_prepare_cmd "${path%/*}" "target.example doas" mktemp mv rm &&
+			zxfer_build_backup_pair_write_cmd "$path" "$path" "$root" cat
+	)
+	# Dry-run rendering removes newlines; the same program must still parse
+	# and read payload stdin instead of consuming it while initializing argv.
+	collapsed=$(printf '%s\n' "$rendered" | tr '\n' ' ')
+	printf 'collapsed payload\n' | sh -c "$collapsed"
+	status=$?
+	assertEquals "The collapsed program publishes its stdin." 0 "$status"
+	assertEquals "collapsed payload" "$(cat "$path")"
+	listing=$(sh -c "$(zxfer_build_remote_backup_storage_listing_cmd "$root" origin.example)")
+	status=$?
+	assertEquals "Quoted ancestor arguments survive the listing prefix." 0 "$status"
+	assertEquals "The chain precedes find's root entry." "tank
+$root
+$root" "$listing"
 }

@@ -634,6 +634,14 @@ zxfer_mockbin_write_fixture_state_dir() {
 	zxfer_mockbin_emit_snapshot_records "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
 		"$l_mockbin_state_datasets" "$l_mockbin_state_dst_snaps" dataset \
 		>"$l_mockbin_state_dir/dst_snapshots.list" || return 1
+	{
+		printf '%s\n' "$ZXFER_MOCKBIN_SOURCE_ROOT"
+		l_mockbin_state_index=1
+		while [ "$l_mockbin_state_index" -le "$l_mockbin_state_datasets" ]; do
+			printf '%s/child%d\n' "$ZXFER_MOCKBIN_SOURCE_ROOT" "$l_mockbin_state_index"
+			l_mockbin_state_index=$((l_mockbin_state_index + 1))
+		done
+	} >"$l_mockbin_state_dir/src_datasets.list"
 
 	# Mimic `zfs list -H <dataset>`: name, used, avail, refer, mountpoint.
 	printf '%s\t96K\t1.0G\t24K\t/%s\n' "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
@@ -675,6 +683,9 @@ zxfer_mockbin_write_fixture_state_dir() {
 		printf '%s\t%s\t%s\n' \
 			"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT" \
 			src_snapshots_dataset.list 0
+		printf '%s\t%s\t%s\n' \
+			"list -Hr -t filesystem,volume -o name $ZXFER_MOCKBIN_SOURCE_ROOT" \
+			src_datasets.list 0
 		printf '%s\t%s\t%s\n' \
 			"list -H $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" dst_exists.list 0
 		printf '%s\t%s\t%s\n' \

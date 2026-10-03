@@ -88,8 +88,9 @@ module or a chain of setters.
   required creation-time property backfill
 - [../src/zxfer_property_transfer.sh](../src/zxfer_property_transfer.sh):
   the property pass: readonly and noninheritable defaults, the `-o` reader
-  (CLI validation runs it before any zfs command; a malformed item or a
-  property named twice is a usage error), the `-U` destination-support scan,
+  (CLI validation prepares the override policy before any zfs command;
+  a malformed item or a property named twice is a usage error), the
+  readonly policy prepared after endpoint initialization, the `-U` destination-support scan,
   source collection (with `-e` restore) and create-time metadata, one plan
   `awk` per dataset (derive the apply and creation lists with the
   readonly/`-I`/`-U` filters, then diff them against an existing
@@ -185,8 +186,20 @@ performance-sensitive call sites, including the single hardened production
 Functions use distinct `l_*` scratch names when calling one another in the
 same shell because POSIX shell has no function-local variables. Shared `g_*`
 state is appropriate when later phases need it; values used by one linear
-flow stay in that flow. Single-caller wrappers can be inlined when this makes
-the behavior easier to follow.
+flow stay in that flow. Positional parameters belong to each function call,
+so an operation can retain its resources there and pass them to stages without
+child helpers overwriting them. Ordinary `l_*` assignments still have shell-wide
+scope; changing a prefix does not create local state. Single-caller wrappers
+can be inlined when this makes the behavior easier to follow.
+
+Property planning publishes one validated batch with a documented six-list
+schema and a completion marker. The dataset operation reads those lists once
+for creation or apply, then releases the shared batch channel. Snapshot planning
+keeps its shared transfer and verification results, but derives destination
+snapshot presence in the existing AWK batch rather than retaining a second
+copy of every destination record. Restore row loading consumes the validated
+metadata contents directly; the restore cache retains its roots and row index
+for lookups, without a separate copy of the file contents.
 
 The stable `tests/test_helper.sh` entry point loads every module in manifest
 order and owns only test lifecycle and process capture. Domain helpers such as
@@ -233,9 +246,17 @@ and a recovery copy for detected pair-publication failures) lives in
 [`../src/zxfer_backup_metadata.sh`](../src/zxfer_backup_metadata.sh).
 
 Snapshot artifacts also have narrower owners above the allocator. Full
-discovery and the fast recursive no-op proof each allocate one complete ordered
-file group, retain its handles in operation-specific state, and clean the group
-from one terminal path. Discovery owns the flat source/destination record files
+discovery and the fast recursive no-op proof allocate staged files and retain
+their paths, producer handles, statuses, and timers in the operation owner's
+positional parameters. Stages receive the resources they need explicitly;
+cleanup runs from one terminal path in the owner. Published record caches,
+the raw destination-listing handoff, and the registered source PID keep their
+shared ownership because later planning or EXIT teardown needs them. Validation returns its status
+and diagnostic before that release. Full discovery defers release when its
+source producer is unreaped; EXIT teardown stops registered producers before
+removing the root. The fast proof parses its completed destination status record once,
+using it both to retain a successful listing for fallback and to validate the
+proof. Discovery owns the flat source/destination record files
 that survive for later lookups. The snapshot plan module owns a reusable plan
 file, a reusable creation-time file and a reusable slice file, the
 destination-state module the reusable depth-1 listing file, and discovery a
@@ -345,11 +366,17 @@ capability state are per-run and need no cross-process coordination.
 
 Remote capability probes and the secure backup directory/write/read and
 `-O` storage-listing protocols, including their shared prelude and symlink
-walk, are assembled as
-readable multiline POSIX `sh` programs. Their stages, quoting, status values,
-and publication topology are reviewable directly and pinned by golden
-fixtures. The SSH
-transport retains the established rendering for short, single-line scripts.
+walk, are assembled as readable multiline POSIX `sh` programs. Backup programs
+use literal bodies preceded by short argv-quoted input initializations, so
+their runtime quoting can be read directly without interpreting a second
+shell's expansion. Capability probes quote their PATH and tool inputs in the
+renderer. The programs' stages, quoting, status values, and publication topology
+are reviewable directly and pinned by golden fixtures. The SSH
+transport uses one mode-and-role dispatch for local or remote ZFS commands,
+retaining direct local argv execution and named source/destination wrappers.
+The dispatch consumes its selected endpoint directly instead of publishing
+intermediate role fields. It retains the established rendering for short,
+single-line scripts.
 For long or multiline scripts it places bounded, quoted data chunks on one
 physical login-shell command line; a fixed POSIX `sh` bootstrap reconstructs
 the exact program before the explicit `sh -c` handoff. This keeps individual
@@ -364,10 +391,11 @@ rendering, so transport compatibility cannot translate trusted configuration.
 
 One accepted capability response is parsed once and checked for framing,
 requested-tool coverage, duplicate records, statuses, and helper-path shape.
-Only then are the OS, zfs status and validated tool records stored in that
-role's slot, keyed by host and requested tool set. Later OS and tool lookups
-for the same host and scope load those fields from either role's slot
-without another probe or parse: a probe depends only on the host spec and
+Only then are the OS and validated tool records stored in that role's slot,
+keyed by host and requested tool set. The slots retain no raw wire response;
+ZFS status remains in its tool record. Later OS and tool lookups select either
+role's matching slot and consume its fields directly, without copying them
+into active parser scratch or running another probe or parse: a probe depends only on the host spec and
 the scope, and equal `-O` and `-T` specs ask the same scope (the union of
 both roles'), so that host is probed once. A failed probe or a response that
 fails validation fills no slot, and its caller falls back to a direct probe.
@@ -376,6 +404,13 @@ a record gets one direct probe. Secure PATH and ssh policy cannot change
 within a run, so they are not part of the key.
 
 ## Recursive Property Prefetch
+
+Property policy is fixed for the session: CLI validation stores the parsed
+`-o` list separately from parser scratch results, and endpoint initialization
+prepares the readonly list for the destination platform and `-m`. Dataset
+processing and repeated `-Y` passes consume those policies. A `-U` scan resets
+only its support lists; session reset discards both policies, including any
+inherited values.
 
 `zfs get -H` prints property values raw, and a value may hold TAB and LF, so
 a value line can look exactly like another record. Every `zfs get all` read
@@ -443,6 +478,10 @@ one item per argument, so no byte in a property value can become an extra
    runs (local sources and `-O` pulls alike) first try the fast `name,guid`
    proof. A `-T` destination is listed like a local one: each destination
    `zfs list` runs over the target's ssh control master.
+   Recursive `-d` runs with destination-only snapshot work also list source
+   datasets, including those with no snapshots, and remove confirmed target-only
+   datasets from the delete work list before the `-g` pre-pass. Inventory
+   failures stop the run; skipped datasets and their snapshots stay untouched.
 5. With `-g`, plan every dataset of the pass and refuse divergence before
    anything is sent, received, or destroyed on the destination; with `-d`,
    also check each planned destination delete against `-g`. Then number the
@@ -503,9 +542,9 @@ flowchart TD
     D1 --> D2["Register zxfer_trap_exit() for EXIT and signals"]
     D2 --> D3["Run zxfer_init_session_environment()"]
     D3 --> E["Parse flags with zxfer_read_command_line_switches()"]
-    E --> F["Validate combinations and the -o list with zxfer_consistency_check()"]
+    E --> F["Validate combinations and prepare the -o policy with zxfer_consistency_check()"]
     F --> G["When -O or -T is configured: open each role's ssh control master (a -T spec equal to -O shares the origin's; sockets go under the run root, or a short zxfer.ssh.XXXXXX directory when a long TMPDIR would pass sun_path), then probe each remote host's capabilities once over it into in-memory state"]
-    G --> H["Resolve local and needed remote helper paths with zxfer_init_variables()"]
+    G --> H["Resolve local and needed remote helper paths with zxfer_init_variables(), then prepare the destination readonly policy"]
     H --> I["Enter zxfer_run_zfs_mode_loop()"]
     I --> J["Start one pass in zxfer_run_zfs_mode()"]
     J --> K["Resolve source and destination, reject control characters, validate preconditions"]
@@ -584,14 +623,22 @@ flowchart TD
     B -- "yes" --> C["Start one source name,guid snapshot producer"]
     C --> D["Start normalized destination name,guid snapshot producer"]
     D --> E["Sort both streams into per-run temp files"]
-    E --> F{"comm -3 finds no identity diff?"}
-    F -- "yes" --> G["Return clean no-op before full discovery"]
-    F -- "no or uncertain" --> H["Fall back to full snapshot discovery"]
+    E --> E1["Wait for both producers and parse the destination status record once; retain a successful raw listing for fallback"]
+    E1 --> F{"comm -3 finds no identity diff?"}
+    F -- "yes" --> F1["Validate destination and source results"]
+    F1 --> G["Publish clean no-op; EXIT removes the proof files"]
+    F -- "different" --> H["Release proof scratch, retain the reusable listing, then run full discovery"]
+    F1 -- "missing destination or excluded empty source" --> H
+    C -- "fatal launch failure" --> E2["Operation owner releases proof scratch and reports the original diagnostic/status; EXIT tears down registered producers and removes the root"]
+    D -- "fatal launch failure" --> E2
+    F -- "comparison failure" --> E2
+    F1 -- "validation failure" --> E2
     B -- "no (-T, -P, -k, ...)" --> H
-    H --> H1["Start the creation-order source listing as a registered background producer (fanned out through parallel with -j)"]
+    H --> H1["Full discovery owner retains stage paths and timer in its arguments; start the creation-order source listing as a registered background producer (fanned out through parallel with -j)"]
     H1 --> L["Reuse the proof's raw destination listing, or list the destination through zxfer_run_destination_zfs_cmd, locally or over the -T master (exact existence probe only on a zfs failure; ssh's 255 stops the run), then normalize its prefixes"]
     L --> M["Wait for the source producer by PID, then diff the identity records into the work lists"]
-    M --> I{"Transfers, -d deletes, or property work pending?"}
+    M --> M1["For recursive -d delete work, list source datasets and exclude target-only datasets with a notice; failed or rootless inventories stop the run"]
+    M1 --> I{"Transfers, -d deletes, or property work pending?"}
     I -- "yes" --> J["List the destination dataset inventory the same way (live pool probe when the root is missing)"]
     I -- "no" --> N["Keep the source and destination record files for planning when later work reads them"]
     J --> N
@@ -783,9 +830,9 @@ separate owners. `zxfer_ssh_transport.sh` owns the short
 would push them past the `sun_path` limit, in a `zxfer.ssh.XXXXXX` directory
 it creates under the default temp root and removes itself), managed options,
 host-wrapper parsing, and socket cleanup.
-`zxfer_remote_hosts.sh` owns only in-memory capability responses and resolved
-remote helpers, including the per-role slots (host, requested tools, validated
-fields) reused by later lookups of either role. Masters open during startup,
+`zxfer_remote_hosts.sh` owns the in-memory validated capability slots and
+resolved remote helpers. Each slot holds its host, requested tools, OS, and
+validated tool records; either role can select it for a matching lookup. Masters open during startup,
 before the first remote command; a `-T` spec equal to the `-O` spec reuses the
 origin master. Nothing is shared between concurrent zxfer processes, so no
 socket locks, leases, or capability cache files exist to coordinate; session

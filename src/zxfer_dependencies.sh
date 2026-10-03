@@ -262,7 +262,6 @@ zxfer_reset_dependency_state() {
 	g_cmd_awk=""
 	g_cmd_cat=""
 	g_cmd_parallel=""
-	g_cmd_ps=""
 	g_cmd_ssh=""
 	g_cmd_zfs=""
 	g_cmd_compress="zstd -3"
@@ -325,5 +324,4 @@ zxfer_init_dependency_tool_defaults() {
 		g_cmd_parallel=$g_zxfer_required_tool_result
 	fi
 	zxfer_require_tool ps
-	g_cmd_ps=$g_zxfer_required_tool_result
 }

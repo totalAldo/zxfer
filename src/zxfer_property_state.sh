@@ -240,12 +240,9 @@ function store_row(payload,    row, file) {
 #                  human "none" replacing the machine value) with a bare name
 #                  for each record not known in both views, then a line with
 #                  the comma list of those names.
-#   mode=prefetch  ARGV: WANTED SKELETON MACHINE HUMAN for a recursive read,
-#                  every row led by the dataset name. Prints one
-#                  "dataset<TAB>payload" row per wanted dataset whose records
-#                  are all known in both views.
-#   mode=store     prefetch, but each payload goes to a row file (store_row)
-#                  and the line printed is the index line "ROW<TAB>dataset".
+#   mode=store     ARGV: WANTED SKELETON MACHINE HUMAN for a recursive read.
+#                  Stores each complete wanted dataset's payload in a row file
+#                  and prints its index line "ROW<TAB>dataset".
 # An unreadable file, a malformed or repeated skeleton row, or an empty
 # skeleton beside a non-empty view exits 1. Runs behind ZXFER_PROPERTY_AWK_LIB.
 # shellcheck disable=SC2016  # AWK field references must remain literal.
@@ -319,7 +316,7 @@ function merged_item(i,    item_value) {
 	return key_property[i] "=" encode_value(item_value) "=" source["machine", i]
 }
 BEGIN {
-	has_name = (mode == "prefetch" || mode == "store")
+	has_name = (mode == "store")
 	read_skeleton(ARGV[1 + has_name])
 	read_view("machine", ARGV[2 + has_name])
 	read_view("human", ARGV[3 + has_name])
@@ -357,12 +354,8 @@ BEGIN {
 		dataset = order[i]
 		if (!(dataset in wanted) || (dataset in incomplete) || dataset_payload[dataset] == "")
 			continue
-		if (mode == "store") {
-			row = store_row(dataset_payload[dataset])
-			printf "%s\t%s\n", row, dataset
-		} else {
-			printf "%s\t%s\n", dataset, dataset_payload[dataset]
-		}
+		row = store_row(dataset_payload[dataset])
+		printf "%s\t%s\n", row, dataset
 	}
 	exit 0
 }'
@@ -370,7 +363,7 @@ BEGIN {
 # Purpose: Run ZXFER_PROPERTY_NORMALIZE_AWK over staged captures, byte for
 # byte (C locale).
 # Usage: zxfer_parse_property_views merge SKELETON MACHINE HUMAN, or
-# zxfer_parse_property_views prefetch|store WANTED SKELETON MACHINE HUMAN;
+# zxfer_parse_property_views store WANTED SKELETON MACHINE HUMAN;
 # prints the program's output and returns its status. store numbers its row
 # files on from g_zxfer_property_row_count and leaves that count to the
 # caller.

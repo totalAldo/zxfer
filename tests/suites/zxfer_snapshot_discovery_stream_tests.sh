@@ -84,8 +84,7 @@ tank/src@snap-a"
 	# one that is not a number, takes the bounded numbered-sort fallback.
 	for l_reverse_limit in "" 1 bogus; do
 		output=$(
-			g_zxfer_linear_reverse_max_lines=$l_reverse_limit
-			zxfer_reverse_file_lines "$input_file"
+			zxfer_reverse_file_lines "$input_file" "$l_reverse_limit"
 		)
 		assertEquals "The lines should come out last first [limit:$l_reverse_limit]." \
 			"$expected" "$output"
@@ -110,22 +109,20 @@ EOF
 			printf 'awk=%s\n' "$?"
 		)
 		(
-			g_zxfer_linear_reverse_max_lines=1
 			zxfer_get_temp_file() {
 				return 45
 			}
-			zxfer_reverse_file_lines "$input_file"
+			zxfer_reverse_file_lines "$input_file" 1
 			printf 'tempfile=%s\n' "$?"
 		)
 		(
-			g_zxfer_linear_reverse_max_lines=1
 			cat() {
 				if [ "$1" = "-n" ]; then
 					return 1
 				fi
 				command cat "$@"
 			}
-			zxfer_reverse_file_lines "$input_file"
+			zxfer_reverse_file_lines "$input_file" 1
 			printf 'numbering=%s\n' "$?"
 		)
 	)
@@ -168,20 +165,25 @@ test_failed_source_discovery_wait_stops_descendants_after_group_leader_exit() {
 					exit "${2:-1}"
 				}
 				if [ "$wait_mode" = fast ]; then
-					g_zxfer_snapshot_discovery_fast_noop_source_pid=$source_pid
 					(exit 0) &
-					g_zxfer_snapshot_discovery_fast_noop_destination_pid=$!
-					zxfer_wait_for_fast_recursive_noop_discovery
+					destination_pid=$!
+					fast_wait_status=0
+					zxfer_wait_for_snapshot_discovery_producer "$source_pid" "" source || fast_wait_status=$?
+					zxfer_wait_for_snapshot_discovery_producer "$destination_pid" "" destination
 					printf 'status=%s records=<%s>\n' \
-						"$g_zxfer_snapshot_discovery_fast_noop_source_wait_status" "$g_zxfer_cleanup_pid_records"
+						"$fast_wait_status" "$g_zxfer_cleanup_pid_records"
 				else
 					g_source_snapshot_list_pid=$source_pid
-					g_zxfer_full_source_snapshot_file="$g_zxfer_run_tmp_root/source"
-					g_zxfer_full_source_snapshot_error_file="$g_zxfer_run_tmp_root/error"
-					g_zxfer_full_destination_snapshot_file="$g_zxfer_run_tmp_root/destination"
-					g_zxfer_full_destination_snapshot_sorted_file="$g_zxfer_run_tmp_root/sorted"
-					printf 'source listing failed\n' >"$g_zxfer_full_source_snapshot_error_file"
-					zxfer_wait_for_full_source_snapshot_discovery
+					source_file="$g_zxfer_run_tmp_root/source"
+					error_file="$g_zxfer_run_tmp_root/error"
+					destination_file="$g_zxfer_run_tmp_root/destination"
+					sorted_file="$g_zxfer_run_tmp_root/sorted"
+					printf 'source listing failed\n' >"$error_file"
+					zxfer_wait_for_full_source_snapshot_discovery "$source_file" "$error_file" ""
+					full_wait_status=$?
+					printf 'status=%s records=<%s> diagnostic=<%s>\n' \
+						"$full_wait_status" "$g_zxfer_cleanup_pid_records" "$g_zxfer_snapshot_discovery_failure_result"
+					exit "$full_wait_status"
 				fi
 			) 2>&1
 		)
@@ -262,25 +264,23 @@ test_failed_source_discovery_never_signals_a_reaped_producer_pid() {
 				}
 				case $site in
 				fast)
-					g_zxfer_snapshot_discovery_fast_noop_source_pid=$VICTIM
-					g_zxfer_snapshot_discovery_fast_noop_destination_pid=""
-					zxfer_wait_for_fast_recursive_noop_discovery
+					zxfer_wait_for_snapshot_discovery_producer "$VICTIM" "" source
 					;;
 				full)
 					g_source_snapshot_list_pid=$VICTIM
-					g_zxfer_full_source_snapshot_file="$g_zxfer_run_tmp_root/source"
-					g_zxfer_full_source_snapshot_error_file="$g_zxfer_run_tmp_root/error"
-					g_zxfer_full_destination_snapshot_file="$g_zxfer_run_tmp_root/destination"
-					g_zxfer_full_destination_snapshot_sorted_file="$g_zxfer_run_tmp_root/sorted"
-					: >"$g_zxfer_full_source_snapshot_error_file"
-					zxfer_wait_for_full_source_snapshot_discovery
+					source_file="$g_zxfer_run_tmp_root/source"
+					error_file="$g_zxfer_run_tmp_root/error"
+					destination_file="$g_zxfer_run_tmp_root/destination"
+					sorted_file="$g_zxfer_run_tmp_root/sorted"
+					: >"$error_file"
+					zxfer_wait_for_full_source_snapshot_discovery "$source_file" "$error_file" ""
 					;;
 				deststart)
 					zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 						return 7
 					}
-					g_zxfer_snapshot_discovery_fast_noop_source_pid=$VICTIM
-					zxfer_start_fast_recursive_noop_destination_discovery
+					zxfer_start_fast_recursive_noop_destination_discovery \
+						"" "" "" "" "$VICTIM"
 					;;
 				esac
 				printf 'returned %s\n' "$?" >>"$LOG"

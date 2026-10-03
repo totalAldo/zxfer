@@ -566,7 +566,8 @@ or
 is a usage error (exit status 2).
 .TP 8n
 \fB\-d\fR
-(d)elete snapshots on the destination that are absent on the source. This may
+(d)elete snapshots on the destination that are absent on the source, for
+datasets present on the source. This may
 be necessary to function properly anyway, in a similar fashion to
 [\fB\-F\fR].
 This will occur if you are using
@@ -589,6 +590,12 @@ before its send, and with
 when the deleted snapshots were newer than the last common snapshot,
 \fBzxfer\fR
 rolls the destination back to that snapshot before the send.
+.sp
+In recursive mode, datasets found only on the destination and their snapshots
+are left untouched and do not block synchronization. Before admitting snapshot
+cleanup work, zxfer lists the source datasets, including those with no
+snapshots. A dataset absent from that successful inventory is skipped with
+an informational stderr notice. A failed inventory query still stops the run.
 .TP 8n
 \fB\-D\fR
 \fBzxfer\fR
@@ -897,6 +904,14 @@ will transfer
 \fItank/tmp/foo,\fR
 \fItank/tmp/foo/bar\fR
 etc.
+.sp
+During a live recursive run, confirmed missing destination datasets are
+automatically created. An informational notice is printed to stderr before
+each creation attempt, even without
+[\fB\-v\fR].
+Synchronization continues after successful creation. Missing pools, failed
+existence checks, and creation or receive errors still stop the run with a
+nonzero exit status. Dry runs do not print this creation-attempt notice.
 .sp
 Also note that a trailing slash on the source filesystem has a similar effect
 as it has in

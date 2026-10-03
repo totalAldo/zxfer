@@ -39,14 +39,14 @@
 # Module contract:
 # owns globals: the readonly, noninheritable and required-creation property
 #   constants, the filter, plan and child AWK programs, the run-wide
-#   unsupported-property lists (g_zxfer_unsupported_*_properties), and the
-#   result globals g_zxfer_readonly_properties_result,
-#   g_zxfer_override_properties_result, g_zxfer_source_pvs_raw/effective,
+#   unsupported-property lists (g_zxfer_unsupported_*_properties), the
+#   prepared g_zxfer_property_readonly_policy/g_zxfer_property_override_policy,
+#   result globals g_zxfer_override_properties_result, g_zxfer_source_pvs_raw/effective,
 #   g_zxfer_source_dataset_type_result, g_zxfer_source_volume_size_result,
-#   g_zxfer_plan_*_result and g_zxfer_adjusted_*_list, each cleared by the
+#   g_zxfer_property_plan_result and g_zxfer_adjusted_*_list, each cleared by the
 #   function that publishes it. It also writes the property state module's
 #   failure text g_zxfer_property_error_result.
-# reads globals: the property CLI options, the destination platform and -m
+# reads globals: the property CLI options, -R/-n, the destination platform and -m
 #   state, g_initial_source, g_actual_dest, the recursive source and
 #   destination lists, the restore metadata, and the rendered -T command in
 #   g_zxfer_shell_command_result.
@@ -81,30 +81,31 @@ ZXFER_REQUIRED_CREATION_PROPERTIES="casesensitivity,normalization,utf8only"
 zxfer_reset_property_runtime_state() {
 	g_zxfer_unsupported_filesystem_properties=""
 	g_zxfer_unsupported_volume_properties=""
+	g_zxfer_property_readonly_policy=""
+	g_zxfer_property_override_policy=""
 }
 
 # Purpose: Resolve the readonly property list for the destination platform,
 # without mountpoint when -m migration must move mountpoints.
-# Usage: zxfer_resolve_readonly_properties; publishes
-# g_zxfer_readonly_properties_result. Not memoized: every transfer resolves it
-# from the current platform and -m state.
-zxfer_resolve_readonly_properties() {
-	g_zxfer_readonly_properties_result=$ZXFER_BASE_READONLY_PROPERTIES
+# Usage: zxfer_prepare_readonly_property_policy, once after endpoint startup;
+# publishes g_zxfer_property_readonly_policy for every dataset and -Y pass.
+zxfer_prepare_readonly_property_policy() {
+	g_zxfer_property_readonly_policy=$ZXFER_BASE_READONLY_PROPERTIES
 	if [ "${g_destination_operating_system:-}" = "FreeBSD" ] &&
 		[ -n "$ZXFER_FREEBSD_READONLY_PROPERTIES" ]; then
-		g_zxfer_readonly_properties_result=${g_zxfer_readonly_properties_result:+$g_zxfer_readonly_properties_result,}$ZXFER_FREEBSD_READONLY_PROPERTIES
+		g_zxfer_property_readonly_policy=${g_zxfer_property_readonly_policy:+$g_zxfer_property_readonly_policy,}$ZXFER_FREEBSD_READONLY_PROPERTIES
 	fi
 	[ "${g_option_m_migrate:-0}" -eq 1 ] || return 0
 
-	l_readonly_rest=$g_zxfer_readonly_properties_result,
-	g_zxfer_readonly_properties_result=""
+	l_readonly_rest=$g_zxfer_property_readonly_policy,
+	g_zxfer_property_readonly_policy=""
 	while [ -n "$l_readonly_rest" ]; do
 		l_readonly_name=${l_readonly_rest%%,*}
 		l_readonly_rest=${l_readonly_rest#*,}
 		case $l_readonly_name in
 		"" | mountpoint) continue ;;
 		esac
-		g_zxfer_readonly_properties_result=${g_zxfer_readonly_properties_result:+$g_zxfer_readonly_properties_result,}$l_readonly_name
+		g_zxfer_property_readonly_policy=${g_zxfer_property_readonly_policy:+$g_zxfer_property_readonly_policy,}$l_readonly_name
 	done
 }
 
@@ -119,8 +120,8 @@ zxfer_resolve_readonly_properties() {
 # "property=value=override" items, in -o order with names and values
 # percent-encoded, in g_zxfer_override_properties_result, or throws a usage
 # error. Commas separate items and "\," is a literal comma. CLI validation
-# calls it before any zfs command runs; each property transfer parses the
-# text again instead of trusting a stored copy.
+# calls it before any zfs command runs and keeps the validated list in
+# g_zxfer_property_override_policy, separate from this scratch result.
 zxfer_read_override_properties() {
 	g_zxfer_override_properties_result=""
 	[ -n "$1" ] || return 0
@@ -219,7 +220,8 @@ zxfer_append_unsupported_property() {
 # valid everywhere and never probed. Every remote call inside a here-document
 # loop reads /dev/null, so an -O or -T ssh cannot drain the loop's input.
 zxfer_calculate_unsupported_properties() {
-	zxfer_reset_property_runtime_state
+	g_zxfer_unsupported_filesystem_properties=""
+	g_zxfer_unsupported_volume_properties=""
 	l_scan_sources=${g_recursive_source_list:-$g_initial_source}
 	[ -n "$l_scan_sources" ] || return 0
 
@@ -633,20 +635,15 @@ BEGIN {
 # filtered list against the apply list.
 # Usage: zxfer_plan_property_changes SOURCE_PVS OVERRIDE_LIST TRANSFER_ALL_FLAG
 # DATASET_TYPE READONLY_CSV IGNORE_CSV UNSUPPORTED_CSV [DEST_PVS]; an eighth
-# argument, even an empty one, means the destination exists. Publishes
-# g_zxfer_plan_override_pvs_result and g_zxfer_plan_creation_pvs_result, and
-# for an existing destination g_zxfer_plan_dest_pvs_result plus
-# g_zxfer_plan_initial_set_result, g_zxfer_plan_child_set_result and
-# g_zxfer_plan_inherit_result. Throws a usage error when a filesystem's
-# creation-time property differs on the destination and an error when awk
-# fails.
+# argument, even an empty one, means the destination exists. Publishes the
+# validated AWK batch in g_zxfer_property_plan_result: six newline-separated
+# lists (override, creation, destination, initial set, child set, inherit),
+# the completion marker, then warnings already reported on stderr. Values
+# stay percent-encoded, so a list never contains a literal newline. The
+# dataset operation consumes the six lists directly; no scalar copies are
+# published. Throws on a creation-time mismatch, AWK failure or short batch.
 zxfer_plan_property_changes() {
-	g_zxfer_plan_override_pvs_result=""
-	g_zxfer_plan_creation_pvs_result=""
-	g_zxfer_plan_dest_pvs_result=""
-	g_zxfer_plan_initial_set_result=""
-	g_zxfer_plan_child_set_result=""
-	g_zxfer_plan_inherit_result=""
+	g_zxfer_property_plan_result=""
 	l_property_plan_has_destination=0
 	[ "$#" -lt 8 ] || l_property_plan_has_destination=1
 
@@ -679,11 +676,10 @@ zxfer_plan_property_changes() {
 	{
 		IFS= read -r l_property_plan_override
 		if [ "$l_property_plan_status" -eq 0 ]; then
-			IFS= read -r l_property_plan_creation
-			IFS= read -r l_property_plan_dest
-			IFS= read -r l_property_plan_initial_set
-			IFS= read -r l_property_plan_child_set
-			IFS= read -r l_property_plan_inherit
+			# Skip the other five lists; only the operation owner needs them.
+			for l_property_plan_field in creation destination initial_set child_set inherit; do
+				IFS= read -r l_property_plan_line
+			done
 			IFS= read -r l_property_plan_marker
 		fi
 		while IFS= read -r l_property_plan_warning; do
@@ -699,12 +695,8 @@ you will need to first destroy target filesystem."
 	fi
 	[ "$l_property_plan_marker" = "__ZXFER_PROPERTY_PLAN__" ] ||
 		zxfer_throw_error "Failed to plan dataset properties."
-	g_zxfer_plan_override_pvs_result=$l_property_plan_override
-	g_zxfer_plan_creation_pvs_result=$l_property_plan_creation
-	g_zxfer_plan_dest_pvs_result=$l_property_plan_dest
-	g_zxfer_plan_initial_set_result=$l_property_plan_initial_set
-	g_zxfer_plan_child_set_result=$l_property_plan_child_set
-	g_zxfer_plan_inherit_result=$l_property_plan_inherit
+	g_zxfer_property_plan_result=$l_property_plan_output
+	l_property_plan_output=""
 }
 
 ################################################################################
@@ -808,7 +800,8 @@ zxfer_run_zfs_create_with_properties() {
 # created with its full override list; a child gets its creation list, minus
 # overrides the existing parent already supplies for inheritable properties.
 # A missing parent is created first with `zfs create -p`. Throws on probe,
-# read or create failures.
+# read or create failures. Live recursive runs announce the creation attempt
+# on stderr, even without -v.
 zxfer_create_destination_dataset() {
 	l_missing_is_initial_source=$1
 	l_missing_override_pvs=$2
@@ -845,6 +838,9 @@ zxfer_create_destination_dataset() {
 	fi
 
 	l_missing_with_parents="no"
+	if [ -n "${g_option_R_recursive:-}" ] && [ "$g_option_n_dryrun" -eq 0 ]; then
+		zxfer_warn_stderr "zxfer: destination dataset [$l_missing_dataset] is missing; attempting creation before continuing recursive replication."
+	fi
 	if [ "$l_missing_parent_exists" = "0" ]; then
 		case $l_missing_list in
 		*[!,]*)
@@ -1125,11 +1121,10 @@ zxfer_apply_property_changes() {
 # from -P/-o/-I/-U, create the destination with its creation-time properties
 # when it is missing, otherwise diff against the destination in the same plan
 # and apply the resulting sets and inherits, then buffer -k metadata.
-# Usage: zxfer_transfer_properties SOURCE [SKIP_BACKUP_CAPTURE]; called from
+# Usage: zxfer_transfer_properties SOURCE, after session policy preparation; called from
 # the replication loop for every dataset that needs property work and again
 # for the post-seed reconcile pass, which re-captures the dataset's -k row
-# (the write keeps the newest row). No caller sets SKIP_BACKUP_CAPTURE; 1
-# would leave the -k row alone. Reads g_initial_source, g_actual_dest and
+# (the write keeps the newest row). Reads g_initial_source, g_actual_dest and
 # g_recursive_dest_list.
 zxfer_transfer_properties() {
 	zxfer_set_failure_stage "property transfer"
@@ -1137,9 +1132,6 @@ zxfer_transfer_properties() {
 	zxfer_echoV "initial_source: $g_initial_source"
 
 	l_transfer_source=$1
-	l_transfer_skip_backup_capture=${2:-0}
-	zxfer_resolve_readonly_properties
-	l_transfer_readonly_properties=$g_zxfer_readonly_properties_result
 	if [ "$g_initial_source" = "$l_transfer_source" ]; then
 		l_transfer_is_initial_source=1
 	else
@@ -1175,52 +1167,55 @@ zxfer_transfer_properties() {
 		zxfer_throw_error "$g_zxfer_property_error_result" "$?"
 	l_transfer_source_pvs=$g_zxfer_required_properties_result
 
-	# The -o list, already validated at startup; the initial source must hold
+	# The -o policy, prepared at startup; the initial source must hold
 	# every -o property before any destination property changes (-d may already
 	# have destroyed destination-only snapshots).
-	zxfer_read_override_properties "$g_option_o_override_property"
-	l_transfer_override_properties=$g_zxfer_override_properties_result
 	if [ "$l_transfer_is_initial_source" -eq 1 ]; then
-		zxfer_check_override_properties_on_source "$l_transfer_override_properties" \
+		zxfer_check_override_properties_on_source "$g_zxfer_property_override_policy" \
 			"$l_transfer_source_pvs"
 	fi
 
-	# A missing destination is created with its creation-time properties and
-	# needs no diff.
-	if ! zxfer_property_destination_exists "$g_actual_dest"; then
-		zxfer_plan_property_changes "$l_transfer_source_pvs" "$l_transfer_override_properties" \
-			"$g_option_P_transfer_property" "$l_transfer_source_dstype" \
-			"$l_transfer_readonly_properties" "$g_option_I_ignore_properties" \
-			"$l_transfer_unsupported_properties"
-		zxfer_echoV_escaped "zxfer_transfer_properties override_pvs" "$g_zxfer_plan_override_pvs_result"
-		zxfer_echoV_escaped "zxfer_transfer_properties creation_pvs" "$g_zxfer_plan_creation_pvs_result"
+	# Build one planner input. An eighth argument means a live destination;
+	# omit it for creation. Positional parameters retain the input while
+	# destination reads publish their own result channels.
+	set -- "$l_transfer_source_pvs" "$g_zxfer_property_override_policy" \
+		"$g_option_P_transfer_property" "$l_transfer_source_dstype" \
+		"$g_zxfer_property_readonly_policy" "$g_option_I_ignore_properties" \
+		"$l_transfer_unsupported_properties"
+	l_transfer_destination_exists=0
+	if zxfer_property_destination_exists "$g_actual_dest"; then
+		l_transfer_destination_exists=1
+		zxfer_load_normalized_dataset_properties "$g_actual_dest" destination ||
+			zxfer_throw_error "Failed to retrieve destination properties for [$g_actual_dest]${g_zxfer_property_error_result:+: }${g_zxfer_property_error_result:-.}" "$?"
+		zxfer_backfill_required_properties "$g_actual_dest" "$g_zxfer_normalized_dataset_properties" \
+			"$l_transfer_must_create_properties" destination ||
+			zxfer_throw_error "$g_zxfer_property_error_result" "$?"
+		set -- "$@" "$g_zxfer_required_properties_result"
+	fi
+	zxfer_plan_property_changes "$@"
+	{
+		IFS= read -r l_transfer_override_pvs
+		IFS= read -r l_transfer_creation_pvs
+		IFS= read -r l_transfer_dest_pvs
+		IFS= read -r l_transfer_initial_set_list
+		IFS= read -r l_transfer_child_set_list
+		IFS= read -r l_transfer_inherit_list
+	} <<EOF
+$g_zxfer_property_plan_result
+EOF
+	# The operation now owns the lists; release the shared batch channel.
+	g_zxfer_property_plan_result=""
+	zxfer_echoV_escaped "zxfer_transfer_properties override_pvs" "$l_transfer_override_pvs"
+	zxfer_echoV_escaped "zxfer_transfer_properties creation_pvs" "$l_transfer_creation_pvs"
+	if [ "$l_transfer_destination_exists" -eq 0 ]; then
 		zxfer_create_destination_dataset "$l_transfer_is_initial_source" \
-			"$g_zxfer_plan_override_pvs_result" "$g_zxfer_plan_creation_pvs_result" \
+			"$l_transfer_override_pvs" "$l_transfer_creation_pvs" \
 			"$l_transfer_source_dstype" "$l_transfer_source_volsize" "$g_actual_dest" \
-			"$l_transfer_readonly_properties"
-		zxfer_capture_backup_metadata_for_completed_transfer "$l_transfer_source" "$g_zxfer_source_pvs_raw" "$l_transfer_skip_backup_capture"
+			"$g_zxfer_property_readonly_policy"
+		zxfer_capture_backup_metadata_for_completed_transfer "$l_transfer_source" "$g_zxfer_source_pvs_raw"
 		return 0
 	fi
-
-	# Destination properties, the plan with its diff, child inheritance
-	# adjustment, apply. The zfs or parse diagnostic, when there is one,
-	# follows the context.
-	zxfer_load_normalized_dataset_properties "$g_actual_dest" destination ||
-		zxfer_throw_error "Failed to retrieve destination properties for [$g_actual_dest]${g_zxfer_property_error_result:+: }${g_zxfer_property_error_result:-.}" "$?"
-	zxfer_backfill_required_properties "$g_actual_dest" "$g_zxfer_normalized_dataset_properties" \
-		"$l_transfer_must_create_properties" destination ||
-		zxfer_throw_error "$g_zxfer_property_error_result" "$?"
-	zxfer_plan_property_changes "$l_transfer_source_pvs" "$l_transfer_override_properties" \
-		"$g_option_P_transfer_property" "$l_transfer_source_dstype" \
-		"$l_transfer_readonly_properties" "$g_option_I_ignore_properties" \
-		"$l_transfer_unsupported_properties" "$g_zxfer_required_properties_result"
-	l_transfer_override_pvs=$g_zxfer_plan_override_pvs_result
-	l_transfer_initial_set_list=$g_zxfer_plan_initial_set_result
-	l_transfer_child_set_list=$g_zxfer_plan_child_set_result
-	l_transfer_inherit_list=$g_zxfer_plan_inherit_result
-	zxfer_echoV_escaped "zxfer_transfer_properties override_pvs" "$l_transfer_override_pvs"
-	zxfer_echoV_escaped "zxfer_transfer_properties creation_pvs" "$g_zxfer_plan_creation_pvs_result"
-	zxfer_echoV_escaped "zxfer_transfer_properties dest_pvs" "$g_zxfer_plan_dest_pvs_result"
+	zxfer_echoV_escaped "zxfer_transfer_properties dest_pvs" "$l_transfer_dest_pvs"
 	zxfer_echoV_escaped "zxfer_transfer_properties init_set" "$l_transfer_initial_set_list"
 	zxfer_echoV_escaped "zxfer_transfer_properties child_set" "$l_transfer_child_set_list"
 	zxfer_echoV_escaped "zxfer_transfer_properties inherit" "$l_transfer_inherit_list"
@@ -1228,7 +1223,7 @@ zxfer_transfer_properties() {
 	if [ "$l_transfer_is_initial_source" -eq 0 ] &&
 		{ [ -n "$l_transfer_child_set_list" ] || [ -n "$l_transfer_inherit_list" ]; }; then
 		zxfer_adjust_child_inherit_to_match_parent "$g_actual_dest" "$l_transfer_override_pvs" \
-			"$l_transfer_child_set_list" "$l_transfer_inherit_list" "$l_transfer_readonly_properties" ||
+			"$l_transfer_child_set_list" "$l_transfer_inherit_list" "$g_zxfer_property_readonly_policy" ||
 			zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]." "$?"
 		l_transfer_child_set_list=$g_zxfer_adjusted_set_list
 		l_transfer_inherit_list=$g_zxfer_adjusted_inherit_list
@@ -1238,5 +1233,5 @@ zxfer_transfer_properties() {
 
 	zxfer_apply_property_changes "$g_actual_dest" "$l_transfer_is_initial_source" \
 		"$l_transfer_initial_set_list" "$l_transfer_child_set_list" "$l_transfer_inherit_list"
-	zxfer_capture_backup_metadata_for_completed_transfer "$l_transfer_source" "$g_zxfer_source_pvs_raw" "$l_transfer_skip_backup_capture"
+	zxfer_capture_backup_metadata_for_completed_transfer "$l_transfer_source" "$g_zxfer_source_pvs_raw"
 }

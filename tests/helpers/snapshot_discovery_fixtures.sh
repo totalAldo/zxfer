@@ -125,9 +125,7 @@ zxfer_test_reset_snapshot_discovery_option_fixture() {
 # capability tests never share probe state.
 zxfer_test_reset_snapshot_discovery_remote_capability_fixture() {
 	g_origin_remote_capabilities_host=""
-	g_origin_remote_capabilities_response=""
 	g_target_remote_capabilities_host=""
-	g_target_remote_capabilities_response=""
 }
 
 # Purpose: Reset fake helper commands and rendered-command state.
@@ -160,13 +158,10 @@ zxfer_test_reset_snapshot_discovery_result_fixture() {
 	g_recursive_destination_extra_dataset_list=""
 	g_zxfer_snapshot_discovery_file_read_result=""
 	g_zxfer_recursive_dataset_list_result=""
-	g_zxfer_linear_reverse_max_lines=""
-	g_cmd_ps=${g_cmd_ps:-$(command -v ps 2>/dev/null || printf '%s\n' ps)}
 	g_ssh_origin_control_socket=""
 	g_ssh_target_control_socket=""
 	g_last_background_pid=""
 	g_source_snapshot_list_pid=""
-	g_zxfer_full_source_snapshot_sorted_file=""
 	g_zxfer_temp_file_result=""
 }
 

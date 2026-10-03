@@ -79,7 +79,7 @@ zxfer_test_load_backup_restore_rows() {
 	ZXFER_TEST_BACKUP_SOURCE_ROOT=$1
 	ZXFER_TEST_BACKUP_DESTINATION_ROOT=$2
 	shift 2
-	g_restored_backup_file_contents=$(zxfer_test_render_current_backup_metadata_contents "$@")
+	set -- "$(zxfer_test_render_current_backup_metadata_contents "$@")"
 	unset ZXFER_TEST_BACKUP_SOURCE_ROOT ZXFER_TEST_BACKUP_DESTINATION_ROOT
-	zxfer_load_backup_restore_rows
+	zxfer_load_backup_restore_rows "$1"
 }
