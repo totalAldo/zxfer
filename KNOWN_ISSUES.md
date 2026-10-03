@@ -14,9 +14,14 @@ File references below use the current flat `src/` layout and the shared
 fragments it runs; black-box pins live in the `tests/test_contract_*.sh`
 suites.
 
-## Correctness And Portability
+Latest review: 2026-10-03, against source revision `78e6c83`. Existing entries
+were checked against the current implementations and focused offline tests;
+new helper reproductions used only temporary files and mocked operations.
+This review did not run live ZFS or a platform VM matrix.
 
-### Low: a dataset recreated during a recursive property read can take forged property values
+## Security, Correctness And Portability
+
+### High: a dataset recreated during a recursive property read can take forged property values
 
 With `-R` and `-P` or `-o`, each side's properties are read with two
 `zfs get -r` value views and then a name list (`src/zxfer_property_state.sh`,
@@ -47,8 +52,9 @@ created; on an existing destination, a forged creation-time value that differs
 from the destination's stops the run (exit 1) with the error that the property
 `may only be set at filesystem creation time`.
 
-It stays Low because it needs all of these: `-R` with `-P` (or `-k`/`-m`) or
-`-o`; a dataset destroyed and recreated inside the gap between two of zxfer's
+The priority reflects the crossing from user-property write permission to
+zxfer's native-property privileges. The trigger is narrow: `-R` with `-P`
+(or `-k`/`-m`) or `-o`; a dataset destroyed and recreated between two
 `zfs get -r` calls; and write access to the value printed before it. A
 property removed between the calls is never listed. A property added between
 them can take its record only from the value printed just before it in the
@@ -64,7 +70,41 @@ one more `zfs get -r` per side but only narrow the window: a dataset destroyed
 after the first name list and recreated with the same property names before
 the second still passes.
 
-### Low: a user property created during a property read can cut the value before it and take its text
+### High: path checks do not protect against replacement through a writable ancestor
+
+`zxfer_read_local_backup_file` and the program rendered by
+`zxfer_build_remote_backup_read_cmd` (`src/zxfer_backup_metadata.sh`) check
+for symlinks, validate the file's owner and 0600 mode, and validate its
+immediate parent. They do not check whether another user can replace a higher
+directory component. A private, correctly owned backup directory beneath a
+non-sticky group- or world-writable ancestor passes these checks, but another
+user can rename that directory entry and substitute a new path after
+validation, before `cat` opens the file.
+
+A controlled local helper reproduction replaced the checked directory at
+that boundary: the reader returned 0, and the format-v2 parser accepted the
+substituted file with the expected roots and `readonly=on=local`. Thus `-e`
+or a chained backup restore can consume native-property metadata supplied
+by someone who cannot write the original 0700 directory or 0600 file. The
+remote reader has the same pathname-check-then-open sequence; the remote
+race was identified by inspection, not reproduced against an SSH host.
+
+`zxfer_validate_error_log_parent` and
+`zxfer_append_failure_report_to_log` (`src/zxfer_reporting.sh`) have the
+same ancestor gap. A second controlled reproduction redirected an append
+to a replacement path after validation, returning 0 and leaving the
+original log unchanged. This can bypass the log's owner, mode and symlink
+checks at the actual write.
+
+This requires an ancestor that a less-privileged user can replace; the
+default root-controlled backup tree does not expose that configuration.
+Use paths whose entire ancestry is protected from such replacement.
+Remediation must validate protection of each directory entry through its
+parent, including ownership and sticky-directory semantics, or retain a
+validated directory/file handle through the operation. Checking only the
+leaf's owner and mode again does not close the gap.
+
+### Medium: a user property created during a property read can cut the value before it and take its text
 
 Every `zfs get all` read takes the machine and human value views first and the
 property names alone last (`src/zxfer_property_state.sh`,
@@ -94,10 +134,10 @@ sides, locally and over `-O`/`-T`. In a recursive read, a whole dataset
 created between the calls (which needs the create permission, or a churn job)
 cuts the last value printed before it the same way.
 
-It stays Low because the published values touch only user properties, which
-that permission can set directly anyway, although the replica can end with
-values the source never held at any moment; native properties cannot be forged
-this way.
+The impact is limited to user properties; native properties cannot be forged
+this way. It is Medium because a successful read silently corrupts values and
+provenance, and can persist them in the replica and backup metadata even when
+the source never held that combined state.
 `test_parse_property_views_residual_created_record_takes_text_from_the_value_before_it`
 in `tests/test_zxfer_property_state.sh` pins the current
 behavior. A complete fix reads every user property alone (two `zfs get` calls
@@ -105,6 +145,26 @@ per user property per dataset) or uses `zfs get -j` where OpenZFS 2.3 or later
 provides it. Reading the name list, or the machine view, a second time costs
 one more `zfs get` per read but only narrows the window: a property created
 and removed again at the right moments still passes.
+
+### Medium: large property lists can exceed the operating system's execution limits
+
+`zxfer_plan_property_changes` (`src/zxfer_property_transfer.sh`) exports
+the complete encoded source and destination property lists into
+`ZXFER_AWK_SOURCE_PVS` and `ZXFER_AWK_DEST_PVS` before starting `awk`.
+Both lists, the planner program and the remaining arguments/environment
+must fit the operating system's exec limits; property count is not bounded
+to keep them below that limit. Percent encoding can further expand values.
+The child-create filter and inheritance planner use the same environment
+transport for their complete lists.
+
+An offline macOS helper reproduction with 80 user properties, each containing
+an 8,000-byte value, produced 641,287-byte source and destination lists.
+With `ARG_MAX=1048576`, even identical lists failed to launch `awk` with
+`Argument list too long`, followed by `Failed to plan dataset properties.`
+The planner fails closed, but cannot reconcile such a dataset through the
+normal property-transfer path. Exact limits vary by platform and by the
+rest of the environment. Pass large inputs through private staged files
+or stdin, preserving the existing encoding and failure propagation.
 
 ### Low: report escaping passes C1 controls, and the `-U` warning prints values raw
 
@@ -198,8 +258,34 @@ instead of returning, such as a failed scratch-file allocation, the run still
 stops with a non-zero status before any replication work, but its message is
 discarded, and under bash (macOS `/bin/sh`) so is the structured failure
 report. Rerun with `-v` to see the diagnostic. Found by review; it is the same
-pattern as the `-O -j` parallel lookup fixed on 2026-09-24, not reproduced
-separately.
+pattern as the `-O -j` parallel lookup fixed on 2026-09-24. A helper
+reproduction injecting a throw with status 37 into the probe exits 37 with
+no output in quiet mode; `-v` prints the diagnostic.
+
+### Low: a FIFO raced into a missing failure-log path can block exit
+
+`zxfer_append_failure_report_to_log` (`src/zxfer_reporting.sh`) creates a
+missing `ZXFER_ERROR_LOG` with `noclobber`, after checking twice that the
+path does not exist. In a shared sticky parent, another user can create a
+FIFO at that name between the final check and the open. `noclobber` prevents
+truncating an existing regular file but does not prevent opening a FIFO;
+the open waits for a reader before the later file validation can refuse it.
+When this happens in the exit trap, stderr already contains the failure
+report, but zxfer does not finish exiting until the open unblocks. Keep the
+log in a directory only root or the zxfer user can write. This residual
+creation race is also documented in `SECURITY.md`; it is distinct from
+replacement through an unprotected ancestor.
+
+### Low: concurrent failure-log reports can interleave
+
+`zxfer_append_failure_report_to_log` (`src/zxfer_reporting.sh`) uses an
+unlocked `awk` append. A small report normally fits one `O_APPEND` write,
+but a report larger than awk's output buffer takes multiple writes, which
+can interleave with another run. NFS appends also lack the atomicity assumed
+for local appends. The resulting log can mix fields from different runs;
+each run's stderr report is unaffected. `SECURITY.md` already records this
+limitation. Serialize report publication when complete concurrent log
+records are required; `O_APPEND` alone does not guarantee that property.
 
 ### Low: a failed `zfs send` is seen only through its receive
 
@@ -239,7 +325,13 @@ so the risk is ambiguous log text, not terminal injection. See
 BusyBox ash itself is supported, but a host whose whole userland is BusyBox
 (Alpine-like) is unvalidated: BusyBox `ps` rejects `-p`, which wrapper-mode
 teardown and the setsid launcher check in `zxfer_signal_background_shell`
-use. Those checks fail closed rather than signal the wrong process.
+use. Those checks avoid direct signals to a PID whose identity cannot be
+verified, but do not guarantee teardown: wrapper cleanup can fail, and a
+live launcher that has not established its process group can remain
+unsignalled while `zxfer_signal_background_shell` returns 0. A safe helper
+reproduction with failed group signals, a live PID and a failing `ps`
+confirmed that result. This userland gap remains unvalidated on a real
+BusyBox-only host.
 
 ### Low: under a UTF-8 locale, bash 3.2 and ksh93 digit checks accept some non-ASCII characters
 
@@ -266,3 +358,17 @@ capability probe produces. dash, bash 5 and zsh compare code points and are
 not affected. A fix lists the characters in every such pattern
 (`[!0123456789]`), as the test tooling now does, with a test that runs under
 `LC_ALL=en_US.UTF-8`.
+
+## Architectural Remediation Themes
+
+- Bind property values to their dataset/property identities in one structured
+  capture where supported, and reject ambiguous records before publishing a
+  fallback capture. Both property-read races above arise from joining name
+  and value views taken at different times. A repeated name list alone does
+  not establish that the datasets or values stayed the same.
+- Give path validation responsibility for the protected ancestry as well as
+  the leaf, and keep that protection valid through the actual open. Backup
+  reads and failure-log appends currently make the same unsupported
+  assumption that a trusted immediate parent cannot be replaced through a
+  higher component. Exclusive log creation additionally needs to reject
+  non-regular entries without first opening a potentially blocking FIFO.
