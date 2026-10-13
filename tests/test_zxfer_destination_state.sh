@@ -55,7 +55,7 @@ reference_newest_existence_state() {
 # lookup.
 cached_state() {
 	if zxfer_lookup_destination_existence_cache "$1"; then
-		printf '%s\n' "$g_zxfer_destination_existence_cache_entry_result"
+		printf '%s\n' "$g_zxfer_destination_exists_result"
 	else
 		printf '%s\n' miss
 	fi
@@ -86,6 +86,98 @@ backup/dst/child" "$g_recursive_dest_list"
 		1 "$(cached_state "backup/dst/child")"
 	assertEquals "Datasets under the seeded root but not listed should read as missing." \
 		0 "$(cached_state "backup/dst/unlisted")"
+}
+
+test_destination_inventory_is_retained_once_and_observations_take_precedence() {
+	inventory=$(printf '%s\n' backup/dst backup/dst/a 'backup/dst/my [data]*')
+	zxfer_seed_destination_existence_cache_from_recursive_list backup/dst "$inventory"
+	assertEquals "Seeding must not duplicate the inventory as observation rows." "" "$g_destination_existence_cache"
+	zxfer_note_destination_dataset_exists backup/dst/a
+	assertEquals "Noting a listed dataset must not add redundant observations." "" "$g_destination_existence_cache"
+	assertEquals "A listed name with glob characters is literal." 1 "$(cached_state 'backup/dst/my [data]*')"
+	assertEquals "A partial name does not match the inventory." 0 "$(cached_state backup/dst/my)"
+	assertEquals "An empty query must not match an empty inventory line." miss "$(cached_state '')"
+
+	zxfer_set_destination_existence_cache_entry backup/dst/a 0
+	assertEquals "A later missing observation wins over a listed dataset." 0 "$(cached_state backup/dst/a)"
+	zxfer_note_destination_dataset_exists backup/dst/a
+	assertEquals "Creation overrides the older missing observation." 1 "$(cached_state backup/dst/a)"
+	assertEquals "Observations do not rewrite inventory order or duplicate names." "$inventory" "$g_recursive_dest_list"
+
+	zxfer_set_destination_existence_cache_entry backup/dst/a 0
+	zxfer_note_destination_receive_completed backup/dst
+	assertEquals "Receive completion retains explicit missing observations." 0 "$(cached_state backup/dst/a)"
+	assertEquals "Receive completion retains positive inventory membership." 1 "$(cached_state 'backup/dst/my [data]*')"
+	assertEquals "Receive completion requires live probes for unlisted descendants." miss "$(cached_state backup/dst/new)"
+	zxfer_seed_destination_existence_cache_from_recursive_list backup/dst "$inventory"
+	assertEquals "A new complete inventory supersedes old observations." 1 "$(cached_state backup/dst/a)"
+	assertEquals "A new complete inventory restores the missing default." 0 "$(cached_state backup/dst/new)"
+}
+
+destination_ancestor_probe_fixture() {
+	printf '%s\n' "$*" >>"$probe_log"
+	case $6 in
+	'backup/my [parent]*/branch')
+		printf '  '
+		return 37
+		;;
+	'backup/my [parent]*') return 42 ;;
+	backup)
+		case $outcome in
+		absent) printf '%s\n' backup ;;
+		existing) printf '%s\n' backup 'backup/my [parent]*' ;;
+		malformed) printf '%s\n' backup/other ;;
+		denied)
+			printf '%s\n' 'permission denied' >&2
+			return 1
+			;;
+		missing_pool)
+			printf '%s\n' 'no such pool or dataset' >&2
+			return 1
+			;;
+		esac
+		;;
+	*) return 99 ;;
+	esac
+}
+
+test_sunos_ancestor_walk_preserves_first_failure_and_only_caches_proven_absence() {
+	probe_log="$TEST_TMPDIR/ancestor_probes.log"
+	for outcome in absent existing malformed denied missing_pool; do
+		: >"$probe_log"
+		output=$(
+			g_destination_operating_system=SunOS
+			zxfer_reset_destination_existence_cache
+			g_zxfer_destination_exists_result=""
+			g_zxfer_destination_exists_error=""
+			zxfer_run_destination_zfs_cmd() { destination_ancestor_probe_fixture "$@"; }
+			status=0
+			zxfer_exists_destination_via_parent_recursive_listing 'backup/my [parent]*/branch/child' || status=$?
+			printf 'status=%s\nresult=<%s>\nerror=<%s>\n' "$status" "${g_zxfer_destination_exists_result:-}" "$g_zxfer_destination_exists_error"
+			for dataset in 'backup/my [parent]*/branch/child' 'backup/my [parent]*/branch' 'backup/my [parent]*' backup; do
+				printf '%s=%s\n' "$dataset" "$(cached_state "$dataset")"
+			done
+		)
+		assertEquals "The walk lists each parent once in order [$outcome]." \
+			"list -H -r -o name backup/my [parent]*/branch
+list -H -r -o name backup/my [parent]*
+list -H -r -o name backup" "$(cat "$probe_log")"
+		case $outcome in
+		absent | missing_pool)
+			assertContains "Only proven absence succeeds [$outcome]." "$output" 'status=0'
+			assertContains "The original destination is marked missing [$outcome]." "$output" 'backup/my [parent]*/branch/child=0'
+			assertContains "The original parent is marked missing [$outcome]." "$output" 'backup/my [parent]*/branch=0'
+			assertContains "The missing child of the final ancestor is cached [$outcome]." "$output" 'backup/my [parent]*=0'
+			assertContains "Successful proof leaves no diagnostic [$outcome]." "$output" 'error=<>'
+			;;
+		*)
+			assertContains "An unproven destination fails closed [$outcome]." "$output" 'status=1'
+			assertContains "The first parent's whitespace diagnostic is preserved [$outcome]." "$output" \
+				'error=<Failed to determine whether destination dataset [backup/my [parent]*/branch/child] exists: parent recursive listing for [backup/my [parent]*/branch] failed:   >'
+			assertContains "An unproven destination is not cached missing [$outcome]." "$output" 'backup/my [parent]*/branch/child=miss'
+			;;
+		esac
+	done
 }
 
 test_zxfer_mark_destination_root_missing_in_cache_marks_descendants_missing() {
@@ -140,7 +232,7 @@ test_zxfer_lookup_destination_existence_cache_matches_newest_row_semantics() {
 			0 "$lookup_status"
 		assertEquals "The in-shell lookup should return the newest row for [$dataset]." \
 			"$(reference_newest_existence_state "$dataset")" \
-			"$g_zxfer_destination_existence_cache_entry_result"
+			"$g_zxfer_destination_exists_result"
 	done
 
 	for dataset in "backup/dst/d" "backup/ds" "dst/a" "backup/dst/a/child" "my data"; do
@@ -149,17 +241,17 @@ test_zxfer_lookup_destination_existence_cache_matches_newest_row_semantics() {
 		assertEquals "Datasets without a row of their own should miss: [$dataset]." \
 			1 "$lookup_status"
 		assertEquals "A miss should publish no state for [$dataset]." \
-			"" "$g_zxfer_destination_existence_cache_entry_result"
+			"" "$g_zxfer_destination_exists_result"
 	done
 
 	g_destination_existence_cache_root="backup/dst"
 	g_destination_existence_cache_root_complete=1
 	zxfer_lookup_destination_existence_cache "backup/dst/d"
 	assertEquals "Under a complete root, unlisted datasets should read as missing." \
-		0 "$g_zxfer_destination_existence_cache_entry_result"
+		0 "$g_zxfer_destination_exists_result"
 	zxfer_lookup_destination_existence_cache "backup/dst/b"
 	assertEquals "Under a complete root, a cached row should still win." \
-		1 "$g_zxfer_destination_existence_cache_entry_result"
+		1 "$g_zxfer_destination_exists_result"
 }
 
 test_zxfer_mark_destination_hierarchy_exists_does_not_grow_cache_for_known_datasets() {
@@ -269,14 +361,15 @@ test_zxfer_get_live_destination_record_file_lists_the_dataset_at_depth_one() {
 				fi
 			}
 			zxfer_get_live_destination_record_file "backup/src/my child"
-			if [ "${g_zxfer_live_destination_record_file_result#"$g_zxfer_run_tmp_root"/}" != "$g_zxfer_live_destination_record_file_result" ]; then
+			if [ "${g_zxfer_live_destination_listing_file#"$g_zxfer_run_tmp_root"/}" != "$g_zxfer_live_destination_listing_file" ]; then
 				printf 'listing_under_root=yes\n'
 			fi
-			cp "$g_zxfer_live_destination_record_file_result" "$listing_copy"
+			cp "$g_zxfer_live_destination_listing_file" "$listing_copy"
+			listing_path=$g_zxfer_live_destination_listing_file
 			failure_status=0
 			zxfer_get_live_destination_record_file "other/dataset" || failure_status=$?
 			printf 'failure_status=%s\n' "$failure_status"
-			printf 'failure_result=<%s>\n' "$g_zxfer_live_destination_record_file_result"
+			[ "$g_zxfer_live_destination_listing_file" != "$listing_path" ] || printf 'listing_reused=yes\n'
 			printf 'failure_error=%s\n' "$g_zxfer_live_destination_record_file_error"
 		)
 	)
@@ -290,13 +383,46 @@ test_zxfer_get_live_destination_record_file_lists_the_dataset_at_depth_one() {
 backup/src/my child@s2	3" "$(cat "$listing_copy")"
 	assertContains "A failed depth-1 listing should return its status." \
 		"$output" "failure_status=42"
-	assertContains "A failed depth-1 listing should publish no record file." \
-		"$output" "failure_result=<>"
+	assertContains "A failed listing retains the owned path for the next checked listing." \
+		"$output" "listing_reused=yes"
 	assertContains "A failed depth-1 listing should publish its output for the error report." \
 		"$output" "failure_error=ssh: broken pipe"
 	assertEquals "Every call should be one depth-1 listing of the named dataset; nothing lists the tree." \
 		"list -H -d 1 -o name,guid -t snapshot backup/src/my child
 list -H -d 1 -o name,guid -t snapshot other/dataset" "$(cat "$zfs_log")"
+}
+
+test_live_destination_listing_preserves_allocation_and_readback_failure_contracts() {
+	for failure in allocation readback; do
+		output=$(
+			listed=0
+			g_zxfer_live_destination_record_file_error=stale
+			if [ "$failure" = allocation ]; then
+				zxfer_ensure_runtime_artifact_file() { return 51; }
+			else
+				zxfer_read_runtime_artifact_file_trimmed() {
+					g_zxfer_runtime_artifact_read_result=""
+					return 41
+				}
+			fi
+			zxfer_run_destination_zfs_cmd() {
+				listed=1
+				printf 'partial capture\n'
+				return 42
+			}
+			status=0
+			zxfer_get_live_destination_record_file backup/dst || status=$?
+			printf 'status=%s listed=%s error=<%s>\n' \
+				"$status" "$listed" "$g_zxfer_live_destination_record_file_error"
+		)
+		if [ "$failure" = allocation ]; then
+			assertEquals "Allocation failure stops before listing and clears old diagnostics." \
+				"status=51 listed=0 error=<>" "$output"
+		else
+			assertEquals "Readback failure cannot replace the original listing status." \
+				"status=42 listed=1 error=<>" "$output"
+		fi
+	done
 }
 
 test_zxfer_map_destination_dataset_maps_roots_children_and_outsiders() {

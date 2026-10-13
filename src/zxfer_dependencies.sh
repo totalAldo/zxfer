@@ -37,11 +37,9 @@
 
 # Module contract:
 # owns globals: g_zxfer_secure_path; the g_cmd_* helper and compression
-#   commands with their *_safe renderings; the lookup results
-#   g_zxfer_tool_path_result, g_zxfer_normalized_tool_path,
-#   g_zxfer_required_tool_result and g_zxfer_resolved_cli_command_result.
-# reads globals: ZXFER_SECURE_PATH, ZXFER_SECURE_PATH_APPEND and
-#   g_option_z_compress.
+#   command defaults; the lookup results
+#   g_zxfer_tool_path_result and g_zxfer_required_tool_result.
+# reads globals: ZXFER_SECURE_PATH and ZXFER_SECURE_PATH_APPEND.
 # mutates caches: none.
 # returns via stdout: none.
 # Helper lookup never forks: zxfer_find_tool_in_path walks the PATH list.
@@ -132,16 +130,16 @@ zxfer_find_tool_in_path() {
 # Purpose: Undo the shell quoting that some /bin/sh builds (OmniOS) add to
 # command -v output, and drop trailing newlines as a $(...) capture would.
 # Usage: zxfer_normalize_resolved_tool_path PATH; publishes
-# g_zxfer_normalized_tool_path and prints nothing.
+# g_zxfer_required_tool_result and prints nothing.
 zxfer_normalize_resolved_tool_path() {
-	g_zxfer_normalized_tool_path=$1
+	g_zxfer_required_tool_result=$1
 	case $1 in
 	\'/*\')
 		l_unquoted_path=${1#\'}
 		l_unquoted_path=${l_unquoted_path%\'}
 		case $l_unquoted_path in
 		*\'*) ;;
-		*) g_zxfer_normalized_tool_path=$l_unquoted_path ;;
+		*) g_zxfer_required_tool_result=$l_unquoted_path ;;
 		esac
 		;;
 	\"/*\")
@@ -149,14 +147,14 @@ zxfer_normalize_resolved_tool_path() {
 		l_unquoted_path=${l_unquoted_path%\"}
 		case $l_unquoted_path in
 		*\"*) ;;
-		*) g_zxfer_normalized_tool_path=$l_unquoted_path ;;
+		*) g_zxfer_required_tool_result=$l_unquoted_path ;;
 		esac
 		;;
 	esac
 
 	while :; do
-		case $g_zxfer_normalized_tool_path in
-		*"$ZXFER_LF") g_zxfer_normalized_tool_path=${g_zxfer_normalized_tool_path%"$ZXFER_LF"} ;;
+		case $g_zxfer_required_tool_result in
+		*"$ZXFER_LF") g_zxfer_required_tool_result=${g_zxfer_required_tool_result%"$ZXFER_LF"} ;;
 		*) break ;;
 		esac
 	done
@@ -168,7 +166,7 @@ zxfer_normalize_resolved_tool_path() {
 # operator message there.
 zxfer_validate_resolved_tool_path() {
 	zxfer_normalize_resolved_tool_path "$1"
-	l_validated_tool_path=$g_zxfer_normalized_tool_path
+	l_validated_tool_path=$g_zxfer_required_tool_result
 	l_validated_tool_problem=""
 	if ! zxfer_value_is_single_line "$l_validated_tool_path"; then
 		l_validated_tool_problem="a single-line absolute path without control whitespace"
@@ -208,51 +206,6 @@ zxfer_require_tool() {
 		zxfer_throw_dependency_error "$g_zxfer_required_tool_result"
 }
 
-# Purpose: Reset the endpoint-safe codecs (the origin compressor and the
-# target decompressor) to the local ones.
-# Usage: Called before the remote roles replace the command they run.
-zxfer_reset_endpoint_compression_commands() {
-	g_origin_cmd_compress_safe=$g_cmd_compress_safe
-	g_target_cmd_decompress_safe=$g_cmd_decompress_safe
-}
-
-# Purpose: Resolve a CLI command's first token, on the local secure PATH or on
-# a remote host, and requote the command around the resolved path.
-# Usage: zxfer_resolve_cli_command_safe HOST_SPEC STRING [LABEL]
-# [PROFILE_SIDE]; an empty HOST_SPEC resolves locally. Publishes the command,
-# each token single-quoted, in g_zxfer_resolved_cli_command_result, or
-# returns 1 with the operator message there.
-zxfer_resolve_cli_command_safe() {
-	l_cli_label=${3:-command}
-	if ! zxfer_check_literal_token_string "$2" "$l_cli_label"; then
-		g_zxfer_resolved_cli_command_result=$g_zxfer_literal_token_error_result
-		return 1
-	fi
-	zxfer_split_tokens_into_result "$2"
-	l_cli_tokens=$g_zxfer_split_tokens_result
-	if [ -z "$l_cli_tokens" ]; then
-		g_zxfer_resolved_cli_command_result="Required dependency \"$l_cli_label\" must not be empty or whitespace-only."
-		return 1
-	fi
-	if [ -n "$1" ]; then
-		zxfer_resolve_remote_required_tool "$1" "${l_cli_tokens%%"$ZXFER_LF"*}" \
-			"$l_cli_label" "${4:-}"
-	else
-		zxfer_find_required_tool "${l_cli_tokens%%"$ZXFER_LF"*}" "$l_cli_label"
-	fi || {
-		g_zxfer_resolved_cli_command_result=$g_zxfer_required_tool_result
-		return 1
-	}
-
-	zxfer_split_begin "$ZXFER_LF"
-	# shellcheck disable=SC2086 # One checked token per line.
-	set -- $l_cli_tokens
-	zxfer_split_end
-	shift
-	zxfer_render_shell_command_from_argv "$g_zxfer_required_tool_result" "$@"
-	g_zxfer_resolved_cli_command_result=$g_zxfer_shell_command_result
-}
-
 # Purpose: Drop every inherited helper command and the secure PATH, and set the
 # default compression commands.
 # Usage: Called first by zxfer_reset_session_state: later resets copy g_cmd_zfs
@@ -280,33 +233,6 @@ zxfer_initialize_dependency_reporting_defaults() {
 	if zxfer_find_tool_in_path awk "$ZXFER_DEFAULT_SECURE_PATH"; then
 		g_cmd_awk=$g_zxfer_tool_path_result
 	fi
-}
-
-# Purpose: Validate -z/-Z and resolve the local compression and decompression
-# commands into g_cmd_compress_safe and g_cmd_decompress_safe.
-# Usage: Called once after option parsing. Without -z (which -Z implies) both
-# stay empty, since every consumer is gated on -z.
-zxfer_refresh_compression_commands() {
-	g_cmd_compress_safe=""
-	g_cmd_decompress_safe=""
-	[ "$g_option_z_compress" -eq 1 ] || return 0
-
-	zxfer_check_literal_token_string "$g_cmd_compress" "Compression command (-Z)" ||
-		zxfer_throw_usage_error "$g_zxfer_literal_token_error_result" 2
-	zxfer_split_tokens_into_result "$g_cmd_compress"
-	[ -n "$g_zxfer_split_tokens_result" ] ||
-		zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
-	zxfer_check_literal_token_string "$g_cmd_decompress" "Decompression command" ||
-		zxfer_throw_error "$g_zxfer_literal_token_error_result"
-	zxfer_split_tokens_into_result "$g_cmd_decompress"
-	[ -n "$g_zxfer_split_tokens_result" ] ||
-		zxfer_throw_error "Compression requested but decompression command missing."
-	zxfer_resolve_cli_command_safe "" "$g_cmd_compress" "compression command" ||
-		zxfer_throw_dependency_error "$g_zxfer_resolved_cli_command_result"
-	g_cmd_compress_safe=$g_zxfer_resolved_cli_command_result
-	zxfer_resolve_cli_command_safe "" "$g_cmd_decompress" "decompression command" ||
-		zxfer_throw_dependency_error "$g_zxfer_resolved_cli_command_result"
-	g_cmd_decompress_safe=$g_zxfer_resolved_cli_command_result
 }
 
 # Purpose: Resolve the helpers every run needs on the secure PATH.

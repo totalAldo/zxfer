@@ -35,18 +35,27 @@ test_reconcile_live_destination_snapshot_state_republishes_the_plan_from_live_ro
 		replan_want_anchor replan_want_pending replan_want_has; do
 		g_did_delete_dest_snapshots=1
 		g_actual_dest="backup/target/src"
+		replan_pending_rows=$(replan_rows tank/src "$replan_pending")
+		replan_plan=$TEST_TMPDIR/original-transfer.plan
+		printf 'common\t%s\n' "$(replan_rows tank/src "$replan_anchor")" >"$replan_plan"
+		printf '%s\n' "$replan_pending_rows" | awk 'NF { print "send\t" $0 }' >>"$replan_plan"
 		zxfer_publish_snapshot_transfer_plan "$(replan_rows tank/src "$replan_anchor")" \
-			"$(replan_rows tank/src "$replan_pending")" 1
+			"${replan_pending_rows%%"$ZXFER_LF"*}" "${replan_pending_rows##*"$ZXFER_LF"}" \
+			1 "$replan_plan"
 		REPLAN_LIVE=$(replan_rows backup/target/src "$replan_live")
 		zxfer_reconcile_live_destination_snapshot_state tank/src </dev/null
+		replan_want_rows=$(replan_rows tank/src "$replan_want_pending")
 		assertEquals "Live rows [$replan_live] after anchor [$replan_anchor] and pending [$replan_pending]." \
-			"$(replan_rows tank/src "$replan_want_anchor")|$(replan_rows tank/src "$replan_want_pending")|$replan_want_has" \
-			"$g_last_common_snap|$g_src_snapshot_transfer_list|$g_dest_has_snapshots"
+			"$(replan_rows tank/src "$replan_want_anchor")|${replan_want_rows%%"$ZXFER_LF"*}|${replan_want_rows##*"$ZXFER_LF"}|$replan_want_has" \
+			"$g_last_common_snap|$g_src_snapshot_transfer_first|$g_src_snapshot_transfer_final|$g_dest_has_snapshots"
 	done <<'EOF'
+snap2:222|-|-|-|snap2:222|0
+snap2:222|-|snap1:111|-|snap2:222|1
 snap2:222|snap3:333 snap4:444|snap1:111 snap2:222|snap2:222|snap3:333 snap4:444|1
 snap1:111|snap2:222 snap3:333 snap4:444|snap4:444|snap4:444|-|1
 -|snap1:111 snap2:222 snap3:333 snap4:444|snap1:111 snap3:333|snap3:333|snap4:444|1
 snap2:222|snap3:333 snap4:444|snap1:111|-|snap2:222 snap3:333 snap4:444|1
+snap1:111|snap2:222 snap4:444|snap3:333|-|snap1:111 snap2:222 snap4:444|1
 snap1:111|snap2:222 snap3:333 snap4:444|unrelated:999|-|snap1:111 snap2:222 snap3:333 snap4:444|1
 snap1:111|snap2:222 snap3:333 snap4:444|-|-|snap1:111 snap2:222 snap3:333 snap4:444|0
 -|snap1 snap2 snap3 snap4|snap1:111 snap3:333|-|snap1 snap2 snap3 snap4|1

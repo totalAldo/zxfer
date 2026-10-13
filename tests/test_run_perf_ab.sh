@@ -116,6 +116,14 @@ perf_ab_assert_tsv_rows() {
 		}' "$TEST_TMPDIR/perf_ab.stdout")"
 }
 
+test_metadata_read_scenarios_drive_both_trees() {
+	perf_ab_run --baseline-ref HEAD --sizes 1 --snapshots 2 --reps 1 \
+		--latency-ms 0 --scenarios restore,remote_restore,forward,remote_forward
+	assertEquals "Metadata scenarios succeed: $PERF_AB_STDERR" 0 "$PERF_AB_STATUS"
+	perf_ab_assert_tsv_rows 1 restore remote_restore forward remote_forward
+	perf_ab_assert_workdir_removed
+}
+
 test_help_prints_usage() {
 	perf_ab_run --help
 	assertEquals "--help should succeed" 0 "$PERF_AB_STATUS"

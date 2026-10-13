@@ -41,10 +41,11 @@
 #   constants, the filter, plan and child AWK programs, the run-wide
 #   unsupported-property lists (g_zxfer_unsupported_*_properties), the
 #   prepared g_zxfer_property_readonly_policy/g_zxfer_property_override_policy,
-#   result globals g_zxfer_override_properties_result, g_zxfer_source_pvs_raw/effective,
-#   g_zxfer_source_dataset_type_result, g_zxfer_source_volume_size_result,
-#   g_zxfer_property_plan_result and g_zxfer_adjusted_*_list, each cleared by the
-#   function that publishes it. It also writes the property state module's
+#   reusable planner input, action and parent-work files,
+#   result globals g_zxfer_override_properties_result,
+#   g_zxfer_source_dataset_type_result, g_zxfer_source_volume_size_result
+#   and the small g_zxfer_property_plan_summary_result (action and override
+#   counts), cleared before planning. It also writes the property state module's
 #   failure text g_zxfer_property_error_result.
 # reads globals: the property CLI options, -R/-n, the destination platform and -m
 #   state, g_initial_source, g_actual_dest, the recursive source and
@@ -53,8 +54,8 @@
 # mutates caches: the unsupported-property lists, destination property rows
 #   (dropped by the state module's invalidation after every create, set and
 #   inherit), and the destination existence cache through probes.
-# returns via stdout: zxfer_filter_child_creation_overrides_for_parent, and
-#   rendered destination commands on dry runs.
+# returns via stdout: diagnostic plan lists and rendered destination commands
+#   on dry runs. Property values remain encoded until command construction.
 #
 # Per dataset, zxfer_transfer_properties reads the source, checks the -o
 # properties against the initial source, decides whether the destination
@@ -76,13 +77,17 @@ ZXFER_NONINHERITABLE_PROPERTIES="quota,reservation,canmount,refquota,refreservat
 # Creation-time properties a filesystem must match; volumes have none.
 ZXFER_REQUIRED_CREATION_PROPERTIES="casesensitivity,normalization,utf8only"
 
-# Purpose: Reset the run-wide unsupported-property lists.
-# Usage: Called at session initialization and before a fresh -U scan.
+# Purpose: Reset run-wide property policy and forget inherited planner scratch.
+# Usage: Called at session initialization; never acts on inherited file paths.
 zxfer_reset_property_runtime_state() {
 	g_zxfer_unsupported_filesystem_properties=""
 	g_zxfer_unsupported_volume_properties=""
 	g_zxfer_property_readonly_policy=""
 	g_zxfer_property_override_policy=""
+	g_zxfer_property_input_file=""
+	g_zxfer_property_plan_file=""
+	g_zxfer_property_parent_plan_file=""
+	g_zxfer_property_plan_summary_result=""
 }
 
 # Purpose: Resolve the readonly property list for the destination platform,
@@ -338,42 +343,6 @@ EOF
 # SOURCE SIDE
 ################################################################################
 
-# Purpose: Load the source property list and the effective list used for
-# transfer (the restored -e view when enabled).
-# Usage: zxfer_collect_source_props SOURCE DESTINATION; publishes
-# g_zxfer_source_pvs_raw and g_zxfer_source_pvs_effective, or returns the zfs
-# status with its diagnostic in g_zxfer_property_error_result. The source is
-# read through the source zfs role, so it reaches the -O host. Startup has
-# already validated the whole -e file and stored its rows, so each dataset
-# only looks its row up.
-zxfer_collect_source_props() {
-	l_collect_source=$1
-	l_collect_destination=$2
-
-	g_zxfer_source_pvs_raw=""
-	g_zxfer_source_pvs_effective=""
-	zxfer_load_normalized_dataset_properties "$l_collect_source" source || return "$?"
-	g_zxfer_source_pvs_raw=$g_zxfer_normalized_dataset_properties
-	g_zxfer_source_pvs_effective=$g_zxfer_source_pvs_raw
-	[ "$g_option_e_restore_property_mode" -eq 1 ] || return 0
-
-	l_restore_status=0
-	zxfer_find_restored_backup_properties "$l_collect_source" "$l_collect_destination" ||
-		l_restore_status=$?
-	case $l_restore_status in
-	0) g_zxfer_source_pvs_effective=$g_zxfer_backup_restore_properties_result ;;
-	3 | 8)
-		zxfer_throw_usage_error "Can't find the properties for the filesystem $l_collect_source and destination $l_collect_destination"
-		;;
-	9)
-		zxfer_throw_usage_error "Multiple restored property entries matched filesystem $l_collect_source and destination $l_collect_destination"
-		;;
-	*)
-		zxfer_throw_usage_error "Failed to parse the restored properties for the filesystem $l_collect_source and destination $l_collect_destination"
-		;;
-	esac
-}
-
 # Purpose: Resolve and validate the source dataset type plus the zvol size a
 # volume needs at creation time.
 # Usage: zxfer_get_validated_source_dataset_create_metadata SOURCE SOURCE_PVS;
@@ -438,6 +407,54 @@ zxfer_get_validated_source_dataset_create_metadata() {
 # PLAN: DERIVE AND DIFF
 ################################################################################
 
+# Purpose: Stage encoded property lists for one synchronous AWK operation.
+# Usage: zxfer_stage_property_inputs KEY<TAB>LIST ...; overwrites one private
+# run-owned file and appends a completion marker. Lists contain no literal
+# TAB or LF. Call before command substitution so allocation survives in the
+# parent shell. The operation consumes the file before another may reuse it;
+# EXIT owns its release. Returns the allocation or write status on failure.
+zxfer_stage_property_inputs() {
+	if [ -z "${g_zxfer_property_input_file:-}" ]; then
+		zxfer_get_temp_file || return "$?"
+		g_zxfer_property_input_file=$g_zxfer_runtime_artifact_path_result
+	fi
+	l_property_input_status=0
+	# A builtin's failed redirection returns instead of exiting the shell.
+	{ printf '%s\n' "$@" '__ZXFER_PROPERTY_INPUT__' >|"$g_zxfer_property_input_file"; } 2>/dev/null ||
+		l_property_input_status=$?
+	case $l_property_input_status in
+	1 | 2) return 1 ;;
+	*) return "$l_property_input_status" ;;
+	esac
+}
+
+# Read complete KEY<TAB>LIST rows literally, without awk -v escape handling
+# or exec-size limits on property values. Only the small private path crosses
+# the environment for property values. Reject incomplete input before any
+# plan can be published.
+# shellcheck disable=SC2016  # AWK field references must remain literal.
+ZXFER_PROPERTY_INPUT_AWK='
+BEGIN {
+	input_path = ENVIRON["ZXFER_PROPERTY_INPUT_FILE"]
+	while ((input_status = (getline input_line < input_path)) > 0) {
+		if (input_line == "__ZXFER_PROPERTY_INPUT__") {
+			input_complete = 1
+			break
+		}
+		input_separator = index(input_line, "\t")
+		if (input_separator < 2)
+			exit 1
+		input_key = substr(input_line, 1, input_separator - 1)
+		if (input_key in property_input)
+			exit 1
+		property_input[input_key] = substr(input_line, input_separator + 1)
+	}
+	if (!input_complete || (getline input_line < input_path) != 0)
+		exit 1
+	close(input_path)
+}
+'
+
 # Shared rules prefix of the plan, child-create and child-inherit programs.
 #   filter_property_list(list, drop_unsupported)  drop readonly and ignored
 #       (-I) properties unless the item is an explicit override and, when
@@ -446,10 +463,12 @@ zxfer_get_validated_source_dataset_create_metadata() {
 #   sets_locally(property, source)  the inheritance rule: a local value or a
 #       noninheritable property is set on the dataset itself; any other value
 #       may be inherited from its parent
-# The lists arrive in ZXFER_AWK_REMOVE_LIST and ZXFER_AWK_UNSUPPORTED_LIST,
-# the noninheritable names and verbose with -v. Every caller sets both
-# variables, empty when unused, so an exported value never leaks in. Runs
-# behind ZXFER_PROPERTY_AWK_LIB.
+# Name-only policies arrive in ZXFER_AWK_REMOVE_LIST and
+# ZXFER_AWK_UNSUPPORTED_LIST, the noninheritable names and verbose with -v.
+# Every caller supplies both, so exported values never leak in. Keeping these
+# literal preserves the existing AWK handling of -I items with control bytes.
+# Property values come from the staged input file. Runs behind
+# ZXFER_PROPERTY_INPUT_AWK and ZXFER_PROPERTY_AWK_LIB.
 # shellcheck disable=SC2016  # AWK program is intentionally single-quoted.
 ZXFER_PROPERTY_RULES_AWK='
 function filter_property_list(list, drop_unsupported, count, items, i, fields, field_count, output) {
@@ -480,18 +499,42 @@ BEGIN {
 }
 '
 
-# Plans one dataset from the source list in ZXFER_AWK_SOURCE_PVS, the parsed
-# -o list in ZXFER_AWK_OVERRIDE_PVS and, with has_destination=1, the
-# destination list in ZXFER_AWK_DEST_PVS. Derive builds the override (apply)
-# and creation lists and filters both; diff filters the destination list
-# with the readonly and -I lists only and compares the apply list with it.
-# Prints the apply, creation, filtered destination, initial-set, child-set
-# and inherit lists, one per line, then __ZXFER_PROPERTY_PLAN__ and one line
-# per -U warning. A creation-time property that differs on the destination
-# prints its name and the warnings and exits 3. Runs behind
-# ZXFER_PROPERTY_AWK_LIB and ZXFER_PROPERTY_RULES_AWK.
+# Plan one dataset in one AWK. The file holds only selected create/set/inherit
+# actions, with encoded values and first-source/override provenance for late
+# parent reconciliation. -V alone retains the diagnostic CSV views. Checked
+# close and a final record precede the stdout marker and warnings; validation
+# publishes small action/override counts. Creation mismatches retain status 3
+# and the original property-name and warning protocol.
 # shellcheck disable=SC2016  # AWK field references must remain literal.
 ZXFER_PROPERTY_PLAN_AWK='
+function emit_action(verb, property, value, source, desired) {
+	print verb "\t" property "=" value "=" source "=" (source == "override" ? desired : "") > output_path
+}
+function plan_action(verb, property, value) {
+	if (verb == "") return
+	if ((is_initial == 1 && verb == "root_set") ||
+		(is_initial == 0 && verb != "root_set"))
+		emit_action(verb == "inherit" ? "inherit" : "set", property, value,
+			desired_source[property], desired_value[property])
+	if (very_verbose == 1) {
+		if (verb == "root_set") initial_set_list = append_csv(initial_set_list, property "=" value)
+		else if (verb == "set") child_set_list = append_csv(child_set_list, property "=" value)
+		else inherit_list = append_csv(inherit_list, property "=" value)
+	}
+}
+function root_action(property, value, source,    root_sets) {
+	root_sets = (source == "local" || source == "override")
+	if (!(property in dest_available)) return root_sets ? "root_set" : ""
+	return (dest_value[property] != value ||
+		(root_sets && dest_source[property] != "local")) ? "root_set" : ""
+}
+function child_action(property, value, source) {
+	if (!(property in dest_available) || dest_value[property] != value)
+		return sets_locally(property, source) ? "set" : "inherit"
+	if (source == "local" && dest_source[property] != "local") return "set"
+	if (!sets_locally(property, source) && dest_source[property] == "local") return "inherit"
+	return ""
+}
 function append_creation(property, value, source) {
 	if (!(property in creation_seen)) {
 		creation_output = append_csv(creation_output, property "=" value "=" source)
@@ -503,14 +546,16 @@ function print_warnings(i) {
 		print warnings[i]
 }
 BEGIN {
+	output_path = ENVIRON["ZXFER_PROPERTY_PLAN_FILE"]
+	printf "" > output_path
 	if (source_dstype != "volume")
 		csv_to_set(required_creation_properties, required_create)
 
 	# Derive. The -o items arrive parsed, encoded and unique. Without -P they
 	# lead both lists; with -P they replace the source values they name.
-	first_values(ENVIRON["ZXFER_AWK_OVERRIDE_PVS"], override_value, override_source)
+	first_values(property_input["override"], override_value, override_source)
 	if (transfer_all_flag == 0) {
-		override_count = split(ENVIRON["ZXFER_AWK_OVERRIDE_PVS"], override_items, ",")
+		override_count = split(property_input["override"], override_items, ",")
 		for (i = 1; i <= override_count; i++) {
 			if (override_items[i] == "")
 				continue
@@ -520,7 +565,7 @@ BEGIN {
 		}
 	}
 
-	source_count = split(ENVIRON["ZXFER_AWK_SOURCE_PVS"], source_items, ",")
+	source_count = split(property_input["source"], source_items, ",")
 	for (i = 1; i <= source_count; i++) {
 		if (source_items[i] == "")
 			continue
@@ -557,7 +602,7 @@ BEGIN {
 	# Diff. A creation-time property the destination holds with another
 	# value is refused before anything is planned.
 	if (has_destination == 1) {
-		dest_output = filter_property_list(ENVIRON["ZXFER_AWK_DEST_PVS"], 0)
+		dest_output = filter_property_list(property_input["destination"], 0)
 		first_values(dest_output, dest_value, dest_source)
 		for (property in dest_value)
 			dest_available[property] = 1
@@ -567,136 +612,180 @@ BEGIN {
 			if (plan_items[i] == "")
 				continue
 			split(plan_items[i], fields, "=")
-			plan_property[i] = fields[1]
-			plan_value[i] = fields[2]
-			plan_source[i] = fields[3]
-			if ((plan_property[i] in required_create) &&
-				(plan_property[i] in dest_available) &&
-				plan_value[i] != dest_value[plan_property[i]]) {
-				print plan_property[i]
+			property = fields[1]
+			if (!(property in desired_value)) {
+				desired_value[property] = fields[2]
+				desired_source[property] = fields[3]
+			}
+			if ((property in required_create) && (property in dest_available) &&
+				fields[2] != dest_value[property]) {
+				print property
 				print_warnings()
 				exit 3
 			}
 		}
 
+		# Keep the ordered encoded records: restored metadata can repeat a
+		# property with another value. Actions retain each record, but their
+		# provenance remains the first record above. Validate all creation
+		# constraints before emitting any action.
 		for (i = 1; i <= plan_count; i++) {
-			property = plan_property[i]
+			split(plan_items[i], fields, "=")
+			property = fields[1]
 			if (property == "" || (property in required_create))
 				continue
-			item = property "=" plan_value[i]
-			# Local and -o values are set on the replicated root itself.
-			root_sets = (plan_source[i] == "local" || plan_source[i] == "override")
-			if (!(property in dest_available)) {
-				if (root_sets)
-					initial_set_list = append_csv(initial_set_list, item)
-				if (sets_locally(property, plan_source[i]))
-					child_set_list = append_csv(child_set_list, item)
-				else
-					inherit_list = append_csv(inherit_list, item)
-				continue
-			}
-
-			if (dest_value[property] != plan_value[i] ||
-				(root_sets && dest_source[property] != "local"))
-				initial_set_list = append_csv(initial_set_list, item)
-
-			if (plan_value[i] != dest_value[property]) {
-				if (sets_locally(property, plan_source[i]))
-					child_set_list = append_csv(child_set_list, item)
-				else
-					inherit_list = append_csv(inherit_list, item)
-			} else if (plan_source[i] == "local" &&
-				dest_source[property] != "local") {
-				child_set_list = append_csv(child_set_list, item)
-			} else if (!sets_locally(property, plan_source[i]) &&
-				dest_source[property] == "local") {
-				inherit_list = append_csv(inherit_list, item)
-			}
-
+			if (is_initial == 1 || very_verbose == 1)
+				plan_action(root_action(property, fields[2], fields[3]), property, fields[2])
+			if (is_initial == 0 || very_verbose == 1)
+				plan_action(child_action(property, fields[2], fields[3]), property, fields[2])
+			# Later repeated records compare as absent, as before.
 			delete dest_available[property]
 		}
 	}
 
-	print override_output
-	print creation_output
-	print dest_output
-	print initial_set_list
-	print child_set_list
-	print inherit_list
+	if (has_destination == 0) {
+		create_count = split(is_initial == 1 ? override_output : creation_output, create_items, ",")
+		for (i = 1; i <= create_count; i++) {
+			if (create_items[i] == "") continue
+			split(create_items[i], fields, "=")
+			emit_action("create", fields[1], fields[2], fields[3], fields[2])
+		}
+	}
+	if (very_verbose == 1) {
+		print "view\toverride_pvs=" override_output > output_path
+		print "view\tcreation_pvs=" creation_output > output_path
+		if (has_destination == 1) {
+			print "view\tdest_pvs=" dest_output > output_path
+			print "view\tinit_set=" initial_set_list > output_path
+			print "view\tchild_set=" child_set_list > output_path
+			print "view\tinherit=" inherit_list > output_path
+		}
+	}
+	print "__ZXFER_PROPERTY_ACTIONS__" > output_path
+	if (close(output_path) != 0) exit 1
 	print "__ZXFER_PROPERTY_PLAN__"
 	print_warnings()
 }'
 
-# Purpose: Plan one dataset's properties with one awk: the override (apply)
-# and creation lists from the source list, the parsed -o list and -P,
-# filtered by the readonly, -I and -U lists (explicit overrides survive the
-# readonly and -I filters; unsupported items are always dropped and reported
-# on stderr when verbose), and, when the destination exists, the diff of its
-# filtered list against the apply list.
-# Usage: zxfer_plan_property_changes SOURCE_PVS OVERRIDE_LIST TRANSFER_ALL_FLAG
-# DATASET_TYPE READONLY_CSV IGNORE_CSV UNSUPPORTED_CSV [DEST_PVS]; an eighth
-# argument, even an empty one, means the destination exists. Publishes the
-# validated AWK batch in g_zxfer_property_plan_result: six newline-separated
-# lists (override, creation, destination, initial set, child set, inherit),
-# the completion marker, then warnings already reported on stderr. Values
-# stay percent-encoded, so a list never contains a literal newline. The
-# dataset operation consumes the six lists directly; no scalar copies are
-# published. Throws on a creation-time mismatch, AWK failure or short batch.
-zxfer_plan_property_changes() {
-	g_zxfer_property_plan_result=""
-	l_property_plan_has_destination=0
-	[ "$#" -lt 8 ] || l_property_plan_has_destination=1
+# Purpose: Validate a complete action file before any property mutation.
+# Usage: zxfer_validate_property_plan FILE; returns 1 on read failure,
+# unknown records, a missing final marker or data after it.
+zxfer_validate_property_plan() {
+	g_zxfer_property_plan_summary_result=""
+	l_validate_property_plan_complete=0
+	l_validate_property_plan_actions=0
+	l_validate_property_plan_overrides=0
+	{
+		while IFS= read -r l_validate_property_plan_row; do
+			[ "$l_validate_property_plan_complete" -eq 0 ] || return 1
+			case $l_validate_property_plan_row in
+			"__ZXFER_PROPERTY_ACTIONS__") l_validate_property_plan_complete=1 ;;
+			create"$ZXFER_TAB"?*=*=*=* | set"$ZXFER_TAB"?*=*=*=* | inherit"$ZXFER_TAB"?*=*=*=*)
+				l_validate_property_plan_actions=$((l_validate_property_plan_actions + 1))
+				l_validate_property_plan_source=${l_validate_property_plan_row#*"$ZXFER_TAB"}
+				case $l_validate_property_plan_source in
+				*"$ZXFER_TAB"*) return 1 ;;
+				esac
+				l_validate_property_plan_source=${l_validate_property_plan_source#*=}
+				l_validate_property_plan_source=${l_validate_property_plan_source#*=}
+				l_validate_property_plan_desired=${l_validate_property_plan_source#*=}
+				case $l_validate_property_plan_desired in *'='*) return 1 ;; esac
+				case $l_validate_property_plan_source in
+				override=*) l_validate_property_plan_overrides=$((l_validate_property_plan_overrides + 1)) ;;
+				esac
+				;;
+			view"$ZXFER_TAB"?*=*) ;;
+			*) return 1 ;;
+			esac
+		done
+		[ -z "$l_validate_property_plan_row" ] && [ "$l_validate_property_plan_complete" -eq 1 ]
+	} 2>/dev/null <"$1" || return 1
+	g_zxfer_property_plan_summary_result="$l_validate_property_plan_actions $l_validate_property_plan_overrides"
+}
 
+# Purpose: Plan and validate this dataset without publishing payload globals.
+# Usage: zxfer_plan_property_changes IS_INITIAL HAS_DESTINATION TYPE
+# SOURCE_PVS DEST_PVS UNSUPPORTED_CSV; both flags are 0 or 1. Run-wide -P,
+# -o, readonly and -I policies are already prepared by session startup.
+# An existing destination may have an empty list. Publishes the reusable
+# action file and a small action/override count summary; failures clear it.
+zxfer_plan_property_changes() {
+	g_zxfer_property_plan_summary_result=""
+	[ "$#" -eq 6 ] || zxfer_throw_error "Failed to plan dataset properties."
+	case $1:$2 in 0:0 | 0:1 | 1:0 | 1:1) ;; *) zxfer_throw_error "Failed to plan dataset properties." ;; esac
+	zxfer_stage_property_inputs "source$ZXFER_TAB$4" \
+		"override$ZXFER_TAB$g_zxfer_property_override_policy" "destination$ZXFER_TAB$5" ||
+		zxfer_throw_error "Failed to stage property planner input." "$?"
+	zxfer_ensure_runtime_artifact_file "$g_zxfer_property_plan_file" property-plan ||
+		zxfer_throw_error "Failed to plan dataset properties." "$?"
+	g_zxfer_property_plan_file=$g_zxfer_runtime_artifact_path_result
+	zxfer_write_runtime_artifact_file "$g_zxfer_property_plan_file" "" ||
+		zxfer_throw_error "Failed to plan dataset properties." "$?"
 	l_property_plan_status=0
-	# Every list travels through the environment: awk -v would reinterpret
-	# backslash escapes in property values.
 	l_property_plan_output=$(
-		ZXFER_AWK_SOURCE_PVS=$1 \
-			ZXFER_AWK_OVERRIDE_PVS=$2 \
-			ZXFER_AWK_REMOVE_LIST="$5,$6" \
-			ZXFER_AWK_UNSUPPORTED_LIST=$7 \
-			ZXFER_AWK_DEST_PVS=${8:-} \
-			"${g_cmd_awk:-awk}" \
-			-v transfer_all_flag="$3" \
-			-v source_dstype="$4" \
-			-v has_destination="$l_property_plan_has_destination" \
+		ZXFER_PROPERTY_INPUT_FILE=$g_zxfer_property_input_file \
+			ZXFER_PROPERTY_PLAN_FILE=$g_zxfer_property_plan_file \
+			ZXFER_AWK_REMOVE_LIST="$g_zxfer_property_readonly_policy,$g_option_I_ignore_properties" \
+			ZXFER_AWK_UNSUPPORTED_LIST=$6 \
+			"${g_cmd_awk:-awk}" -v is_initial="$1" \
+			-v transfer_all_flag="$g_option_P_transfer_property" -v source_dstype="$3" \
+			-v has_destination="$2" \
 			-v required_creation_properties="$ZXFER_REQUIRED_CREATION_PROPERTIES" \
 			-v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
-			-v verbose="${g_option_v_verbose:-0}" \
-			"$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK$ZXFER_PROPERTY_PLAN_AWK"
+			-v verbose="${g_option_v_verbose:-0}" -v very_verbose="${g_option_V_very_verbose:-0}" \
+			"$ZXFER_PROPERTY_INPUT_AWK$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK$ZXFER_PROPERTY_PLAN_AWK"
 	) || l_property_plan_status=$?
 	case $l_property_plan_status in
 	0 | 3) ;;
 	*) zxfer_throw_error "Failed to plan dataset properties." ;;
 	esac
-
-	# Six lists and the completion marker, or on a creation-time mismatch the
-	# property alone; then one -U warning per line.
-	l_property_plan_marker=""
 	{
-		IFS= read -r l_property_plan_override
-		if [ "$l_property_plan_status" -eq 0 ]; then
-			# Skip the other five lists; only the operation owner needs them.
-			for l_property_plan_field in creation destination initial_set child_set inherit; do
-				IFS= read -r l_property_plan_line
-			done
-			IFS= read -r l_property_plan_marker
-		fi
+		IFS= read -r l_property_plan_header
 		while IFS= read -r l_property_plan_warning; do
 			[ -z "$l_property_plan_warning" ] || zxfer_warn_stderr "$l_property_plan_warning"
 		done
-	} <<EOF || :
+	} <<EOF
 $l_property_plan_output
 EOF
 	if [ "$l_property_plan_status" -eq 3 ]; then
-		zxfer_throw_error_with_usage "The property \"$l_property_plan_override\" may only be set
+		zxfer_throw_error_with_usage "The property \"$l_property_plan_header\" may only be set
 at filesystem creation time. To modify this property
 you will need to first destroy target filesystem."
 	fi
-	[ "$l_property_plan_marker" = "__ZXFER_PROPERTY_PLAN__" ] ||
+	case $l_property_plan_header in
+	"__ZXFER_PROPERTY_PLAN__") ;;
+	*) zxfer_throw_error "Failed to plan dataset properties." ;;
+	esac
+	zxfer_validate_property_plan "$g_zxfer_property_plan_file" ||
 		zxfer_throw_error "Failed to plan dataset properties."
-	g_zxfer_property_plan_result=$l_property_plan_output
-	l_property_plan_output=""
+}
+
+# Purpose: Read one diagnostic action list without retaining normal-run CSVs.
+# Usage: zxfer_property_plan_list FILE VERB; prints name=value items in order.
+# The complete file has already been validated by its producer.
+zxfer_property_plan_list() {
+	l_property_plan_list=""
+	{
+		while IFS="$ZXFER_TAB" read -r l_property_plan_list_verb l_property_plan_list_item; do
+			[ "$l_property_plan_list_verb" = "$2" ] || continue
+			l_property_plan_list_name=${l_property_plan_list_item%%=*}
+			l_property_plan_list_value=${l_property_plan_list_item#*=}
+			l_property_plan_list="$l_property_plan_list${l_property_plan_list:+,}$l_property_plan_list_name=${l_property_plan_list_value%%=*}"
+		done
+	} <"$1" || return "$?"
+	printf '%s\n' "$l_property_plan_list"
+}
+
+# Purpose: Display the planner views only under -V, before parent resolution.
+# Usage: zxfer_show_property_plan FILE; values remain encoded and escaped.
+zxfer_show_property_plan() {
+	[ "${g_option_V_very_verbose:-0}" -eq 1 ] || return 0
+	{
+		while IFS="$ZXFER_TAB" read -r l_show_property_plan_kind l_show_property_plan_view; do
+			[ "$l_show_property_plan_kind" = view ] || continue
+			zxfer_echoV_escaped "zxfer_transfer_properties ${l_show_property_plan_view%%=*}" "${l_show_property_plan_view#*=}"
+		done
+	} <"$1" || zxfer_throw_error "Failed to read dataset property plan." "$?"
 }
 
 ################################################################################
@@ -720,147 +809,51 @@ zxfer_property_destination_exists() {
 	return 0
 }
 
-# Purpose: Drop child create overrides the parent already supplies, so
-# recursive -o overrides of inheritable properties stay inherited on
-# descendants once the parent has the requested value.
-# Usage: zxfer_filter_child_creation_overrides_for_parent CREATION_PVS
-# PARENT_PVS READONLY_CSV; the parent list is filtered with the readonly and
-# -I lists first. Prints the filtered creation list.
-zxfer_filter_child_creation_overrides_for_parent() {
-	# shellcheck disable=SC2016
-	ZXFER_AWK_CREATION_PVS=$1 ZXFER_AWK_PARENT_PVS=$2 \
-		ZXFER_AWK_REMOVE_LIST="${3:-},${g_option_I_ignore_properties:-}" \
-		ZXFER_AWK_UNSUPPORTED_LIST='' "${g_cmd_awk:-awk}" \
-		-v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
-		"$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK"'
-BEGIN {
-	first_values(filter_property_list(ENVIRON["ZXFER_AWK_PARENT_PVS"], 0), parent_value, parent_source)
-	count = split(ENVIRON["ZXFER_AWK_CREATION_PVS"], items, ",")
-	for (i = 1; i <= count; i++) {
-		if (items[i] == "")
-			continue
-		split(items[i], fields, "=")
-		if (fields[3] == "override" && !(fields[1] in noninheritable) &&
-			(fields[1] in parent_value) && parent_value[fields[1]] == fields[2])
-			continue
-		output = append_csv(output, items[i])
-	}
-	print output
-}'
-}
-
-# Purpose: Build and run `zfs create` with each property as its own -o
-# argument, so property data can never become shell syntax or extra argv.
-# Usage: zxfer_run_zfs_create_with_properties yes|no TYPE VOLSIZE LIST
-# DESTINATION. yes adds -p, which must carry no properties because OpenZFS
-# ignores -o on that path; a volume needs its size.
-zxfer_run_zfs_create_with_properties() {
-	l_create_with_parents=$1
-	l_create_dataset_type=$2
-	l_create_volume_size=$3
-	l_create_property_list=$4
-	l_create_destination=$5
-
-	if [ "$l_create_dataset_type" = "volume" ] && [ -z "$l_create_volume_size" ]; then
-		return 1
-	fi
-	set -- create
-	if [ "$l_create_with_parents" = "yes" ]; then
-		case $l_create_property_list in
-		*[!,]*) return 1 ;;
-		esac
-		set -- "$@" -p
-	fi
-	if [ "$l_create_dataset_type" = "volume" ]; then
-		set -- "$@" -V "$l_create_volume_size"
-	fi
-	l_create_rest=$l_create_property_list,
-	while [ -n "$l_create_rest" ]; do
-		l_create_item=${l_create_rest%%,*}
-		l_create_rest=${l_create_rest#*,}
-		[ -n "$l_create_item" ] || continue
-		l_create_value=${l_create_item#*=}
-		zxfer_decode_property_value "${l_create_value%%=*}"
-		set -- "$@" -o "${l_create_item%%=*}=$g_zxfer_decoded_property_value"
-	done
-	set -- "$@" "$l_create_destination"
-
-	if [ "$g_option_n_dryrun" -eq 0 ]; then
-		zxfer_run_destination_zfs_cmd "$@"
-	else
-		zxfer_build_destination_zfs_command "$@"
-	fi
-}
-
-# Purpose: Create a missing destination dataset with its creation-time
-# properties.
-# Usage: zxfer_create_destination_dataset IS_INITIAL_SOURCE OVERRIDE_PVS
-# CREATION_PVS SOURCE_TYPE SOURCE_VOLSIZE DESTINATION READONLY_CSV, once
-# zxfer_property_destination_exists found it missing. The initial source is
-# created with its full override list; a child gets its creation list, minus
-# overrides the existing parent already supplies for inheritable properties.
-# A missing parent is created first with `zfs create -p`. Throws on probe,
-# read or create failures. Live recursive runs announce the creation attempt
-# on stderr, even without -v.
+# Purpose: Create a missing destination using its selected action plan.
+# Usage: zxfer_create_destination_dataset FILE IS_INITIAL TYPE VOLSIZE
+# DESTINATION READONLY_CSV. Probe parents before creation; filter only child
+# overrides actually supplied by that parent. -p must never carry properties.
 zxfer_create_destination_dataset() {
-	l_missing_is_initial_source=$1
-	l_missing_override_pvs=$2
-	l_missing_creation_pvs=$3
-	l_missing_source_dstype=$4
-	l_missing_source_volsize=$5
-	l_missing_dataset=$6
-	l_missing_readonly_properties=$7
-
+	l_missing_plan=$1
+	l_missing_initial=$2
+	l_missing_type=$3
+	l_missing_volsize=$4
+	l_missing_dataset=$5
+	l_missing_readonly=$6
 	zxfer_echov "Creating destination filesystem \"$l_missing_dataset\" with specified properties."
-
 	l_missing_parent_exists=""
-	l_missing_parent_dataset=${l_missing_dataset%/*}
-	if [ "$l_missing_parent_dataset" != "$l_missing_dataset" ]; then
-		zxfer_probe_destination_existence "$l_missing_parent_dataset" ||
+	l_missing_parent=${l_missing_dataset%/*}
+	if [ "$l_missing_parent" != "$l_missing_dataset" ]; then
+		zxfer_probe_destination_existence "$l_missing_parent" ||
 			zxfer_throw_error "$g_zxfer_destination_exists_error" "$?"
 		l_missing_parent_exists=$g_zxfer_destination_exists_result
 	fi
-
-	if [ "$l_missing_is_initial_source" -eq 1 ]; then
-		l_missing_list=$l_missing_override_pvs
-	else
-		l_missing_list=$l_missing_creation_pvs
-		case "$l_missing_parent_exists,$l_missing_list," in
-		1,*"=override,"*)
-			zxfer_load_normalized_dataset_properties "$l_missing_parent_dataset" destination ||
-				zxfer_throw_error "Failed to retrieve parent destination properties for [$l_missing_parent_dataset]${g_zxfer_property_error_result:+: }${g_zxfer_property_error_result:-.}" "$?"
-			l_missing_list=$(zxfer_filter_child_creation_overrides_for_parent \
-				"$l_missing_list" "$g_zxfer_normalized_dataset_properties" \
-				"$l_missing_readonly_properties") ||
-				zxfer_throw_error "Failed to filter child creation override properties." "$?"
-			;;
-		esac
+	if [ "$l_missing_initial" -eq 0 ] && [ "$l_missing_parent_exists" = 1 ] &&
+		[ "${g_zxfer_property_plan_summary_result#* }" -ne 0 ]; then
+		zxfer_load_normalized_dataset_properties "$l_missing_parent" destination ||
+			zxfer_throw_error "Failed to retrieve parent destination properties for [$l_missing_parent]${g_zxfer_property_error_result:+: }${g_zxfer_property_error_result:-.}" "$?"
+		zxfer_resolve_parent_property_plan "$l_missing_plan" "$g_zxfer_normalized_dataset_properties" "$l_missing_readonly" create ||
+			zxfer_throw_error "Failed to filter child creation override properties." "$?"
+		l_missing_plan=$g_zxfer_property_parent_plan_file
 	fi
-
-	l_missing_with_parents="no"
 	if [ -n "${g_option_R_recursive:-}" ] && [ "$g_option_n_dryrun" -eq 0 ]; then
 		zxfer_warn_stderr "zxfer: destination dataset [$l_missing_dataset] is missing; attempting creation before continuing recursive replication."
 	fi
-	if [ "$l_missing_parent_exists" = "0" ]; then
-		case $l_missing_list in
-		*[!,]*)
-			zxfer_run_zfs_create_with_properties "yes" "filesystem" "" "" "$l_missing_parent_dataset" ||
+	l_missing_with_parents=no
+	if [ "$l_missing_parent_exists" = 0 ]; then
+		if [ "${g_zxfer_property_plan_summary_result%% *}" -ne 0 ]; then
+			zxfer_execute_property_plan create "" filesystem "" "$l_missing_parent" yes ||
 				zxfer_throw_error "Error when creating destination filesystem." "$?"
 			if [ "$g_option_n_dryrun" -eq 0 ]; then
-				zxfer_note_destination_dataset_exists "$l_missing_parent_dataset"
-				zxfer_invalidate_destination_property_mutation_cache "$l_missing_parent_dataset"
+				zxfer_note_destination_dataset_exists "$l_missing_parent"
+				zxfer_invalidate_destination_property_mutation_cache "$l_missing_parent"
 			fi
-			;;
-		*)
-			l_missing_with_parents="yes"
-			;;
-		esac
+		else
+			l_missing_with_parents=yes
+		fi
 	fi
-
-	zxfer_run_zfs_create_with_properties "$l_missing_with_parents" "$l_missing_source_dstype" \
-		"$l_missing_source_volsize" "$l_missing_list" "$l_missing_dataset" ||
+	zxfer_execute_property_plan create "$l_missing_plan" "$l_missing_type" "$l_missing_volsize" "$l_missing_dataset" "$l_missing_with_parents" ||
 		zxfer_throw_error "Error when creating destination filesystem." "$?"
-
 	if [ "$g_option_n_dryrun" -eq 0 ]; then
 		zxfer_note_destination_dataset_exists "$l_missing_dataset"
 		zxfer_invalidate_destination_property_mutation_cache "$l_missing_dataset"
@@ -925,191 +918,151 @@ zxfer_run_destination_property_verb() {
 # CHILD INHERITANCE / APPLY
 ################################################################################
 
-# Rewrites a child's set/inherit plan against the destination parent, whose
-# list in ZXFER_AWK_PARENT_PVS is filtered with the readonly and -I lists
-# first: a property stays inherited only when the parent already provides the
-# desired effective value (or the value is a matching inheritable -o
-# override); otherwise it must be set locally on the child. Runs behind
-# ZXFER_PROPERTY_AWK_LIB and ZXFER_PROPERTY_RULES_AWK.
-# shellcheck disable=SC2016  # AWK field references must remain literal.
-ZXFER_CHILD_INHERIT_ADJUST_AWK='
-function matches_inheritable_override(property_name, property_value) {
-	return ((property_name in override_source) &&
-		override_source[property_name] == "override" &&
-		!(property_name in noninheritable) &&
-		override_value[property_name] == property_value)
+# Parent resolution has two explicit rules: creation drops inheritable
+# overrides only when the actual parent matches; reconciliation also keeps
+# a matching inheritable -o request inherited. Process original sets before
+# original inherits to preserve command argument and inherit ordering.
+# shellcheck disable=SC2016  # AWK fields must remain literal.
+ZXFER_PARENT_PROPERTY_PLAN_AWK='
+function resolve_action(verb, item, fields, property, value, source, desired, inherit) {
+	split(item, fields, "=")
+	property = fields[1]; value = fields[2]; source = fields[3]; desired = fields[4]
+	if (mode == "create") {
+		if (source == "override" && !(property in noninheritable) &&
+			(property in parent_value) && parent_value[property] == value) return
+	} else {
+		inherit = 0
+		if (!(property in noninheritable) &&
+			(verb == "inherit" || !sets_locally(property, source)))
+			inherit = ((source == "override" && desired == value) ||
+				((property in parent_value) && parent_value[property] == value))
+		verb = inherit ? "inherit" : "set"
+	}
+	print verb "\t" item > output_path
 }
 BEGIN {
-	first_values(filter_property_list(ENVIRON["ZXFER_AWK_PARENT_PVS"], 0), parent_value, parent_source)
-	first_values(ENVIRON["ZXFER_AWK_OVERRIDE_PVS"], override_value, override_source)
-
-	set_count = split(ENVIRON["ZXFER_AWK_SET_LIST"], set_items, ",")
-	for (i = 1; i <= set_count; i++) {
-		if (set_items[i] == "")
-			continue
-		split(set_items[i], set_fields, "=")
-		set_property = set_fields[1]
-		set_value = set_fields[2]
-
-		if (!(set_property in override_source) ||
-			sets_locally(set_property, override_source[set_property])) {
-			new_set_list = append_csv(new_set_list, set_items[i])
-			continue
+	output_path = ENVIRON["ZXFER_PROPERTY_PLAN_OUTPUT"]
+	input_path = ENVIRON["ZXFER_PROPERTY_PLAN_FILE"]
+	first_values(filter_property_list(property_input["parent"], 0), parent_value, parent_source)
+	while ((status = (getline row < input_path)) > 0) {
+		if (row == "__ZXFER_PROPERTY_ACTIONS__") { complete = 1; break }
+		at = index(row, "\t")
+		if (at < 2) exit 1
+		verb = substr(row, 1, at - 1); item = substr(row, at + 1)
+		if (verb == "create" || verb == "set") {
+			if ((mode == "create") != (verb == "create")) exit 1
+			sets[++set_count] = item
+		} else if (verb == "inherit") {
+			if (mode != "apply") exit 1
+			inherits[++inherit_count] = item
 		}
-
-		if (matches_inheritable_override(set_property, set_value)) {
-			new_inherit_list = append_csv(new_inherit_list, set_items[i])
-			continue
-		}
-
-		if ((set_property in parent_value) &&
-			parent_value[set_property] == set_value) {
-			new_inherit_list = append_csv(new_inherit_list, set_items[i])
-		} else {
-			new_set_list = append_csv(new_set_list, set_items[i])
-		}
+		else if (verb != "view") exit 1
 	}
-
-	inherit_count = split(ENVIRON["ZXFER_AWK_INHERIT_LIST"], inherit_items, ",")
-	for (i = 1; i <= inherit_count; i++) {
-		if (inherit_items[i] == "")
-			continue
-		split(inherit_items[i], inherit_fields, "=")
-		inherit_property = inherit_fields[1]
-		inherit_value = inherit_fields[2]
-
-		if (inherit_property in noninheritable) {
-			new_set_list = append_csv(new_set_list, inherit_property "=" inherit_value)
-			continue
-		}
-
-		if (matches_inheritable_override(inherit_property, inherit_value)) {
-			new_inherit_list = append_csv(new_inherit_list, inherit_items[i])
-			continue
-		}
-
-		if ((inherit_property in parent_value) &&
-			parent_value[inherit_property] == inherit_value) {
-			new_inherit_list = append_csv(new_inherit_list, inherit_items[i])
-		} else {
-			new_set_list = append_csv(new_set_list, inherit_property "=" inherit_value)
-		}
-	}
-
-	print new_set_list
-	print new_inherit_list
+	if (!complete || (getline row < input_path) != 0 || close(input_path) != 0) exit 1
+	printf "" > output_path
+	for (i = 1; i <= set_count; i++) resolve_action(mode == "create" ? "create" : "set", sets[i])
+	for (i = 1; i <= inherit_count; i++) resolve_action("inherit", inherits[i])
+	print "__ZXFER_PROPERTY_ACTIONS__" > output_path
+	if (close(output_path) != 0) exit 1
 }'
 
-# Purpose: Keep a child's inherit requests inherited only when the
-# destination parent already provides the desired effective value; otherwise
-# set the property locally on the child.
-# Usage: zxfer_adjust_child_inherit_to_match_parent DESTINATION OVERRIDE_PVS
-# CHILD_SET_LIST INHERIT_LIST READONLY_CSV; publishes g_zxfer_adjusted_set_list
-# and g_zxfer_adjusted_inherit_list (unchanged for a root dataset, an empty
-# plan, or a missing parent), returns the parent property read status on
-# failure, and throws on a probe or awk failure.
-zxfer_adjust_child_inherit_to_match_parent() {
-	l_adjust_destination=$1
-	l_adjust_override_pvs=$2
-	l_adjust_set_list=$3
-	l_adjust_inherit_list=$4
-	l_adjust_readonly_properties=$5
-
-	g_zxfer_adjusted_set_list=$l_adjust_set_list
-	g_zxfer_adjusted_inherit_list=$l_adjust_inherit_list
-	[ -n "$l_adjust_set_list" ] || [ -n "$l_adjust_inherit_list" ] || return 0
-
-	l_adjust_parent_dataset=${l_adjust_destination%/*}
-	[ "$l_adjust_parent_dataset" != "$l_adjust_destination" ] || return 0
-	zxfer_probe_destination_existence "$l_adjust_parent_dataset" ||
-		zxfer_throw_error "$g_zxfer_destination_exists_error" "$?"
-	[ "$g_zxfer_destination_exists_result" -eq 1 ] || return 0
-
-	zxfer_load_normalized_dataset_properties "$l_adjust_parent_dataset" destination || return "$?"
-	if [ "$g_zxfer_normalized_dataset_properties_cache_hit" -eq 0 ]; then
-		g_zxfer_profile_parent_destination_property_reads=$((g_zxfer_profile_parent_destination_property_reads + 1))
+# Purpose: Rewrite a selected action plan against a freshly read parent.
+# Usage: zxfer_resolve_parent_property_plan FILE PARENT_PVS READONLY_CSV
+# create|apply; publish the checked parent-work file and its count summary.
+# Allocation, staging and AWK statuses are returned for the caller to report.
+zxfer_resolve_parent_property_plan() {
+	g_zxfer_property_plan_summary_result=""
+	case $4 in create | apply) ;; *) return 1 ;; esac
+	zxfer_stage_property_inputs "parent$ZXFER_TAB$2" || return "$?"
+	zxfer_ensure_runtime_artifact_file "$g_zxfer_property_parent_plan_file" property-parent-plan || return "$?"
+	g_zxfer_property_parent_plan_file=$g_zxfer_runtime_artifact_path_result
+	zxfer_write_runtime_artifact_file "$g_zxfer_property_parent_plan_file" "" || return "$?"
+	l_parent_property_plan_status=0
+	ZXFER_PROPERTY_INPUT_FILE=$g_zxfer_property_input_file \
+		ZXFER_PROPERTY_PLAN_FILE=$1 ZXFER_PROPERTY_PLAN_OUTPUT=$g_zxfer_property_parent_plan_file \
+		ZXFER_AWK_REMOVE_LIST="$3,${g_option_I_ignore_properties:-}" ZXFER_AWK_UNSUPPORTED_LIST='' \
+		"${g_cmd_awk:-awk}" -v mode="$4" -v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
+		"$ZXFER_PROPERTY_INPUT_AWK$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK$ZXFER_PARENT_PROPERTY_PLAN_AWK" || l_parent_property_plan_status=$?
+	if [ "$l_parent_property_plan_status" -eq 0 ]; then
+		zxfer_validate_property_plan "$g_zxfer_property_parent_plan_file" || l_parent_property_plan_status=1
 	fi
-
-	l_adjust_status=0
-	l_adjusted_lists=$(
-		ZXFER_AWK_OVERRIDE_PVS=$l_adjust_override_pvs \
-			ZXFER_AWK_PARENT_PVS=$g_zxfer_normalized_dataset_properties \
-			ZXFER_AWK_SET_LIST=$l_adjust_set_list \
-			ZXFER_AWK_INHERIT_LIST=$l_adjust_inherit_list \
-			ZXFER_AWK_REMOVE_LIST="$l_adjust_readonly_properties,${g_option_I_ignore_properties:-}" \
-			ZXFER_AWK_UNSUPPORTED_LIST='' \
-			"${g_cmd_awk:-awk}" -v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
-			"$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK$ZXFER_CHILD_INHERIT_ADJUST_AWK"
-	) || l_adjust_status=$?
-	[ "$l_adjust_status" -eq 0 ] ||
-		zxfer_throw_error "Failed to reconcile child property inheritance."
-
-	# A trailing empty list is stripped by the command substitution, so the
-	# last read may hit EOF; that is not a failure.
-	{
-		IFS= read -r g_zxfer_adjusted_set_list
-		IFS= read -r g_zxfer_adjusted_inherit_list
-	} <<EOF || :
-$l_adjusted_lists
-EOF
-	return 0
+	[ "$l_parent_property_plan_status" -ne 0 ] || return 0
+	[ "$4" != apply ] || zxfer_throw_error "Failed to reconcile child property inheritance."
+	return "$l_parent_property_plan_status"
 }
 
-# Purpose: Apply the planned property sets and inherits to one destination.
-# Usage: zxfer_apply_property_changes DESTINATION IS_INITIAL_SOURCE
-# INITIAL_SET_LIST CHILD_SET_LIST INHERIT_LIST; the initial source applies its
-# initial-set list only, a child its child-set list plus one `zfs inherit`
-# per inherit item. The sets run as one `zfs set` with each item decoded into
-# exactly one property=value argument. Throws when a set or inherit fails.
-zxfer_apply_property_changes() {
-	l_apply_destination=$1
-	if [ "$2" -eq 1 ]; then
-		l_apply_set_list=$3
-		l_apply_inherit_list=""
+# Purpose: Build create/set argv once from encoded action rows; apply ordered
+# inherits only after the single set. Never pass a decoded value to eval.
+# Usage: zxfer_execute_property_plan create|apply FILE TYPE VOLSIZE DEST [yes|no].
+# Empty FILE is allowed only for property-free parent creation. Create returns
+# its original status; set/inherit retain their centralized failure reports.
+zxfer_execute_property_plan() {
+	case $1 in create | apply) ;; *) return 1 ;; esac
+	l_execute_property_plan_mode=$1
+	l_execute_property_plan_file=$2
+	l_execute_property_plan_type=$3
+	l_execute_property_plan_size=$4
+	l_execute_property_plan_dest=$5
+	l_execute_property_plan_parents=${6:-no}
+	if [ -n "$l_execute_property_plan_file" ]; then
+		zxfer_validate_property_plan "$l_execute_property_plan_file" || return 1
 	else
-		l_apply_set_list=$4
-		l_apply_inherit_list=$5
+		[ "$l_execute_property_plan_mode" = create ] || return 1
 	fi
-	[ -n "$l_apply_set_list" ] || [ -n "$l_apply_inherit_list" ] || return 0
-
-	# Decoded values are escaped for display: they may hold any byte.
-	if [ "${g_option_v_verbose:-0}" -eq 1 ]; then
-		zxfer_echov "Setting properties/sources on destination filesystem \"$l_apply_destination\"."
-		if [ -n "$l_apply_set_list" ]; then
-			zxfer_decode_serialized_property_list_for_display "$l_apply_set_list"
-			zxfer_echov "Property set list: $(zxfer_escape_report_value "$g_zxfer_property_display_list_result")"
+	if [ "$l_execute_property_plan_mode" = create ]; then
+		[ "$l_execute_property_plan_type" != volume ] || [ -n "$l_execute_property_plan_size" ] || return 1
+		set -- create
+		[ "$l_execute_property_plan_parents" != yes ] || set -- "$@" -p
+		[ "$l_execute_property_plan_type" != volume ] || set -- "$@" -V "$l_execute_property_plan_size"
+	else
+		set --
+		if [ "${g_option_v_verbose:-0}" -eq 1 ] && [ "${g_zxfer_property_plan_summary_result%% *}" -ne 0 ]; then
+			zxfer_echov "Setting properties/sources on destination filesystem \"$l_execute_property_plan_dest\"."
+			for l_execute_property_plan_kind in set inherit; do
+				l_execute_property_plan_display=$(zxfer_property_plan_list "$l_execute_property_plan_file" "$l_execute_property_plan_kind") ||
+					zxfer_throw_error "Failed to read dataset property plan." "$?"
+				[ -n "$l_execute_property_plan_display" ] || continue
+				zxfer_decode_serialized_property_list_for_display "$l_execute_property_plan_display"
+				zxfer_echov "Property $l_execute_property_plan_kind list: $(zxfer_escape_report_value "$g_zxfer_property_display_list_result")"
+			done
 		fi
-		if [ -n "$l_apply_inherit_list" ]; then
-			zxfer_decode_serialized_property_list_for_display "$l_apply_inherit_list"
-			zxfer_echov "Property inherit list: $(zxfer_escape_report_value "$g_zxfer_property_display_list_result")"
+	fi
+	if [ -n "$l_execute_property_plan_file" ]; then
+		{
+			while IFS="$ZXFER_TAB" read -r l_execute_property_plan_verb l_execute_property_plan_item; do
+				case $l_execute_property_plan_verb in
+				create | set)
+					case $l_execute_property_plan_mode,$l_execute_property_plan_verb in
+					create,create | apply,set) ;; *) return 1 ;; esac
+					[ "$l_execute_property_plan_parents" != yes ] || return 1
+					l_execute_property_plan_value=${l_execute_property_plan_item#*=}
+					zxfer_decode_property_value "${l_execute_property_plan_value%%=*}"
+					[ "$l_execute_property_plan_mode" != create ] || set -- "$@" -o
+					set -- "$@" "${l_execute_property_plan_item%%=*}=$g_zxfer_decoded_property_value"
+					;;
+				inherit) [ "$l_execute_property_plan_mode" = apply ] || return 1 ;;
+				esac
+			done
+		} <"$l_execute_property_plan_file" || return "$?"
+	fi
+	if [ "$l_execute_property_plan_mode" = create ]; then
+		if [ "$g_option_n_dryrun" -eq 0 ]; then
+			zxfer_run_destination_zfs_cmd "$@" "$l_execute_property_plan_dest"
+		else
+			zxfer_build_destination_zfs_command "$@" "$l_execute_property_plan_dest"
 		fi
+		return "$?"
 	fi
-
-	l_apply_rest=$l_apply_set_list,
-	set --
-	while [ -n "$l_apply_rest" ]; do
-		l_apply_item=${l_apply_rest%%,*}
-		l_apply_rest=${l_apply_rest#*,}
-		[ -n "$l_apply_item" ] || continue
-		l_apply_value=${l_apply_item#*=}
-		zxfer_decode_property_value "${l_apply_value%%=*}"
-		set -- "$@" "${l_apply_item%%=*}=$g_zxfer_decoded_property_value"
-	done
-	if [ "$#" -gt 0 ]; then
-		zxfer_run_destination_property_verb set \
-			"Error when setting properties on destination filesystem." \
-			"$l_apply_destination" "$@"
-	fi
-
-	l_apply_rest=$l_apply_inherit_list,
-	while [ -n "$l_apply_rest" ]; do
-		l_apply_item=${l_apply_rest%%,*}
-		l_apply_rest=${l_apply_rest#*,}
-		[ -n "$l_apply_item" ] || continue
-		zxfer_run_destination_property_verb inherit \
-			"Error when inheriting properties on destination filesystem." \
-			"$l_apply_destination" "${l_apply_item%%=*}"
-	done
+	[ "$#" -eq 0 ] || zxfer_run_destination_property_verb set \
+		"Error when setting properties on destination filesystem." "$l_execute_property_plan_dest" "$@"
+	{
+		while IFS="$ZXFER_TAB" read -r l_execute_property_plan_verb l_execute_property_plan_item; do
+			[ "$l_execute_property_plan_verb" = inherit ] || continue
+			zxfer_run_destination_property_verb inherit \
+				"Error when inheriting properties on destination filesystem." \
+				"$l_execute_property_plan_dest" "${l_execute_property_plan_item%%=*}" </dev/null
+		done
+	} <"$l_execute_property_plan_file" || return "$?"
 }
 
 ################################################################################
@@ -1125,7 +1078,9 @@ zxfer_apply_property_changes() {
 # the replication loop for every dataset that needs property work and again
 # for the post-seed reconcile pass, which re-captures the dataset's -k row
 # (the write keeps the newest row). Reads g_initial_source, g_actual_dest and
-# g_recursive_dest_list.
+# g_recursive_dest_list. Owns l_transfer_* views: raw is reserved for -k,
+# effective is the restored/backfilled planner input. The selected action file
+# stays in this operation until execution; capture retains its original view.
 zxfer_transfer_properties() {
 	zxfer_set_failure_stage "property transfer"
 	zxfer_echoV "zxfer_transfer_properties: $1"
@@ -1140,9 +1095,28 @@ zxfer_transfer_properties() {
 
 	# Source properties, create-time metadata, and required-property backfill
 	# for both the raw (-k) and effective (apply) views.
-	zxfer_collect_source_props "$l_transfer_source" "$g_actual_dest" ||
+	zxfer_load_normalized_dataset_properties "$l_transfer_source" source ||
 		zxfer_throw_error "${g_zxfer_property_error_result:-Failed to retrieve source properties for [$l_transfer_source].}" "$?"
-	zxfer_get_validated_source_dataset_create_metadata "$l_transfer_source" "$g_zxfer_source_pvs_raw" ||
+	l_transfer_raw_pvs=$g_zxfer_normalized_dataset_properties
+	l_transfer_effective_pvs=$l_transfer_raw_pvs
+	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
+		l_transfer_restore_status=0
+		zxfer_find_restored_backup_properties "$l_transfer_source" "$g_actual_dest" ||
+			l_transfer_restore_status=$?
+		case $l_transfer_restore_status in
+		0) l_transfer_effective_pvs=$g_zxfer_property_row_payload_result ;;
+		3 | 8)
+			zxfer_throw_usage_error "Can't find the properties for the filesystem $l_transfer_source and destination $g_actual_dest"
+			;;
+		9)
+			zxfer_throw_usage_error "Multiple restored property entries matched filesystem $l_transfer_source and destination $g_actual_dest"
+			;;
+		*)
+			zxfer_throw_usage_error "Failed to parse the restored properties for the filesystem $l_transfer_source and destination $g_actual_dest"
+			;;
+		esac
+	fi
+	zxfer_get_validated_source_dataset_create_metadata "$l_transfer_source" "$l_transfer_raw_pvs" ||
 		zxfer_throw_error "$g_zxfer_property_error_result" "$?"
 	l_transfer_source_dstype=$g_zxfer_source_dataset_type_result
 	l_transfer_source_volsize=$g_zxfer_source_volume_size_result
@@ -1158,31 +1132,26 @@ zxfer_transfer_properties() {
 	esac
 	[ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ] ||
 		l_transfer_unsupported_properties=""
-	zxfer_backfill_required_properties "$l_transfer_source" "$g_zxfer_source_pvs_raw" \
+	zxfer_backfill_required_properties "$l_transfer_source" "$l_transfer_raw_pvs" \
 		"$l_transfer_must_create_properties" source ||
 		zxfer_throw_error "$g_zxfer_property_error_result" "$?"
-	g_zxfer_source_pvs_raw=$g_zxfer_required_properties_result
-	zxfer_backfill_required_properties "$l_transfer_source" "$g_zxfer_source_pvs_effective" \
-		"$l_transfer_must_create_properties" source "$g_zxfer_source_pvs_raw" ||
+	l_transfer_raw_pvs=$g_zxfer_required_properties_result
+	zxfer_backfill_required_properties "$l_transfer_source" "$l_transfer_effective_pvs" \
+		"$l_transfer_must_create_properties" source "$l_transfer_raw_pvs" ||
 		zxfer_throw_error "$g_zxfer_property_error_result" "$?"
-	l_transfer_source_pvs=$g_zxfer_required_properties_result
+	l_transfer_effective_pvs=$g_zxfer_required_properties_result
 
 	# The -o policy, prepared at startup; the initial source must hold
 	# every -o property before any destination property changes (-d may already
 	# have destroyed destination-only snapshots).
 	if [ "$l_transfer_is_initial_source" -eq 1 ]; then
 		zxfer_check_override_properties_on_source "$g_zxfer_property_override_policy" \
-			"$l_transfer_source_pvs"
+			"$l_transfer_effective_pvs"
 	fi
 
-	# Build one planner input. An eighth argument means a live destination;
-	# omit it for creation. Positional parameters retain the input while
-	# destination reads publish their own result channels.
-	set -- "$l_transfer_source_pvs" "$g_zxfer_property_override_policy" \
-		"$g_option_P_transfer_property" "$l_transfer_source_dstype" \
-		"$g_zxfer_property_readonly_policy" "$g_option_I_ignore_properties" \
-		"$l_transfer_unsupported_properties"
+	# Retain both views across reads; existence is independent of payload size.
 	l_transfer_destination_exists=0
+	l_transfer_destination_pvs=""
 	if zxfer_property_destination_exists "$g_actual_dest"; then
 		l_transfer_destination_exists=1
 		zxfer_load_normalized_dataset_properties "$g_actual_dest" destination ||
@@ -1190,48 +1159,41 @@ zxfer_transfer_properties() {
 		zxfer_backfill_required_properties "$g_actual_dest" "$g_zxfer_normalized_dataset_properties" \
 			"$l_transfer_must_create_properties" destination ||
 			zxfer_throw_error "$g_zxfer_property_error_result" "$?"
-		set -- "$@" "$g_zxfer_required_properties_result"
+		l_transfer_destination_pvs=$g_zxfer_required_properties_result
 	fi
-	zxfer_plan_property_changes "$@"
-	{
-		IFS= read -r l_transfer_override_pvs
-		IFS= read -r l_transfer_creation_pvs
-		IFS= read -r l_transfer_dest_pvs
-		IFS= read -r l_transfer_initial_set_list
-		IFS= read -r l_transfer_child_set_list
-		IFS= read -r l_transfer_inherit_list
-	} <<EOF
-$g_zxfer_property_plan_result
-EOF
-	# The operation now owns the lists; release the shared batch channel.
-	g_zxfer_property_plan_result=""
-	zxfer_echoV_escaped "zxfer_transfer_properties override_pvs" "$l_transfer_override_pvs"
-	zxfer_echoV_escaped "zxfer_transfer_properties creation_pvs" "$l_transfer_creation_pvs"
+	zxfer_plan_property_changes "$l_transfer_is_initial_source" "$l_transfer_destination_exists" \
+		"$l_transfer_source_dstype" "$l_transfer_effective_pvs" "$l_transfer_destination_pvs" \
+		"$l_transfer_unsupported_properties"
+	set -- "$g_zxfer_property_plan_file"
+	zxfer_show_property_plan "$1"
 	if [ "$l_transfer_destination_exists" -eq 0 ]; then
-		zxfer_create_destination_dataset "$l_transfer_is_initial_source" \
-			"$l_transfer_override_pvs" "$l_transfer_creation_pvs" \
-			"$l_transfer_source_dstype" "$l_transfer_source_volsize" "$g_actual_dest" \
-			"$g_zxfer_property_readonly_policy"
-		zxfer_capture_backup_metadata_for_completed_transfer "$l_transfer_source" "$g_zxfer_source_pvs_raw"
+		zxfer_create_destination_dataset "$1" "$l_transfer_is_initial_source" \
+			"$l_transfer_source_dstype" "$l_transfer_source_volsize" "$g_actual_dest" "$g_zxfer_property_readonly_policy"
+		zxfer_capture_backup_metadata_for_completed_transfer "$l_transfer_source" "$l_transfer_raw_pvs"
 		return 0
 	fi
-	zxfer_echoV_escaped "zxfer_transfer_properties dest_pvs" "$l_transfer_dest_pvs"
-	zxfer_echoV_escaped "zxfer_transfer_properties init_set" "$l_transfer_initial_set_list"
-	zxfer_echoV_escaped "zxfer_transfer_properties child_set" "$l_transfer_child_set_list"
-	zxfer_echoV_escaped "zxfer_transfer_properties inherit" "$l_transfer_inherit_list"
-
-	if [ "$l_transfer_is_initial_source" -eq 0 ] &&
-		{ [ -n "$l_transfer_child_set_list" ] || [ -n "$l_transfer_inherit_list" ]; }; then
-		zxfer_adjust_child_inherit_to_match_parent "$g_actual_dest" "$l_transfer_override_pvs" \
-			"$l_transfer_child_set_list" "$l_transfer_inherit_list" "$g_zxfer_property_readonly_policy" ||
-			zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]." "$?"
-		l_transfer_child_set_list=$g_zxfer_adjusted_set_list
-		l_transfer_inherit_list=$g_zxfer_adjusted_inherit_list
-		zxfer_echoV_escaped "zxfer_transfer_properties adjusted child_set" "$l_transfer_child_set_list"
-		zxfer_echoV_escaped "zxfer_transfer_properties adjusted inherit" "$l_transfer_inherit_list"
+	if [ "$l_transfer_is_initial_source" -eq 0 ] && [ "${g_zxfer_property_plan_summary_result%% *}" -ne 0 ]; then
+		l_transfer_parent=${g_actual_dest%/*}
+		if [ "$l_transfer_parent" != "$g_actual_dest" ]; then
+			zxfer_probe_destination_existence "$l_transfer_parent" ||
+				zxfer_throw_error "$g_zxfer_destination_exists_error" "$?"
+			if [ "$g_zxfer_destination_exists_result" -eq 1 ]; then
+				zxfer_load_normalized_dataset_properties "$l_transfer_parent" destination ||
+					zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]." "$?"
+				if [ "$g_zxfer_normalized_dataset_properties_cache_hit" -eq 0 ]; then
+					g_zxfer_profile_parent_destination_property_reads=$((g_zxfer_profile_parent_destination_property_reads + 1))
+				fi
+				zxfer_resolve_parent_property_plan "$1" "$g_zxfer_normalized_dataset_properties" "$g_zxfer_property_readonly_policy" apply ||
+					zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]." "$?"
+				set -- "$g_zxfer_property_parent_plan_file"
+			fi
+		fi
+		if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
+			zxfer_echoV_escaped "zxfer_transfer_properties adjusted child_set" "$(zxfer_property_plan_list "$1" set)"
+			zxfer_echoV_escaped "zxfer_transfer_properties adjusted inherit" "$(zxfer_property_plan_list "$1" inherit)"
+		fi
 	fi
-
-	zxfer_apply_property_changes "$g_actual_dest" "$l_transfer_is_initial_source" \
-		"$l_transfer_initial_set_list" "$l_transfer_child_set_list" "$l_transfer_inherit_list"
-	zxfer_capture_backup_metadata_for_completed_transfer "$l_transfer_source" "$g_zxfer_source_pvs_raw"
+	zxfer_execute_property_plan apply "$1" "" "" "$g_actual_dest" ||
+		zxfer_throw_error "Failed to read dataset property plan." "$?"
+	zxfer_capture_backup_metadata_for_completed_transfer "$l_transfer_source" "$l_transfer_raw_pvs"
 }

@@ -25,76 +25,110 @@ setUp() {
 	zxfer_test_reset_all_owner_state
 }
 
-# A service list splits on any whitespace into one name per line, and an SMF
-# pattern stays literal even when it matches a path in the working
-# directory. The split keeps the caller's IFS and noglob, and a list of
-# whitespace only stops no service.
+# Both operations own their service arguments. Splitting preserves wildcard
+# patterns, caller IFS and noglob, even when service calls replace split scratch.
 test_service_lists_split_on_whitespace_and_keep_patterns_literal() {
 	work_dir="$TEST_TMPDIR/service-pattern-cwd"
 	svcadm_log="$TEST_TMPDIR/service-split-svcadm.log"
 	mkdir -p "$work_dir/svc:/site"
 	: >"$work_dir/svc:/site/local-match"
 	: >"$svcadm_log"
-
 	output=$(
-		(
-			cd "$work_dir" || exit 90
-			SVCADM_LOG=$svcadm_log
-			svcadm() {
-				printf '%s\n' "$*" >>"$SVCADM_LOG"
-			}
-			for l_caller_ifs in default colon; do
-				if [ "$l_caller_ifs" = colon ]; then
-					IFS=:
-					set -f
-				fi
-				for l_list in "" "$(printf ' \t\n ')" \
-					"$(printf 'svc:/a\nsvc:/b    svc:/c')" 'svc:/site/*'; do
-					zxfer_normalize_service_list "$l_list"
-					printf '<%s>\n' "$g_zxfer_normalized_service_list_result"
-				done
-				l_flags=$-
-				if [ "${l_flags#*f}" != "$l_flags" ]; then
-					printf 'noglob kept, ifs=<%s>\n' "$IFS"
-				else
-					printf '%s\n' "globbing kept"
-				fi
+		cd "$work_dir" || exit 90
+		svcadm() {
+			printf '%s|%s|%s\n' "$1" "${2:-}" "${3:-}" >>"$svcadm_log"
+			zxfer_split_tokens_into_result 'unrelated helper scratch'
+		}
+		for l_caller_ifs in default colon; do
+			if [ "$l_caller_ifs" = colon ]; then
+				IFS=:
+				set -f
+			fi
+			for l_list in "" "$(printf ' \t\n ')" \
+				"$(printf 'svc:/a\nsvc:/b    svc:/c')" 'svc:/site/*'; do
+				zxfer_stopsvcs "$l_list"
+				printf 'queue=<%s>\n' "$g_zxfer_services_to_restart"
+				zxfer_restore_migration_services_status_only
+				printf 'restored=<%s>\n' "$g_zxfer_services_to_restart"
 			done
-			zxfer_stopsvcs "$(printf ' \t\n ')"
-			printf 'need=%s\n' "$g_services_need_relaunch"
-		)
+			l_flags=$-
+			if [ "${l_flags#*f}" != "$l_flags" ]; then
+				printf 'noglob kept, ifs=<%s>\n' "$IFS"
+			else
+				printf '%s\n' 'globbing kept'
+			fi
+		done
 	)
-
-	assertEquals "Lists split on any whitespace, patterns stay literal, and the caller's IFS and noglob stay as they were." \
-		"<>
-<>
-<svc:/a
-svc:/b
-svc:/c>
-<svc:/site/*>
+	assertEquals "Operations keep literal ordered names and caller shell modes." \
+		"queue=<>
+restored=<>
+queue=<>
+restored=<>
+queue=< svc:/a svc:/b svc:/c>
+restored=<>
+queue=< svc:/site/*>
+restored=<>
 globbing kept
-<>
-<>
-<svc:/a
-svc:/b
-svc:/c>
-<svc:/site/*>
-noglob kept, ifs=<:>
-need=0" "$output"
-	assertEquals "A list of whitespace only must stop no service." "" "$(cat "$svcadm_log")"
+queue=<>
+restored=<>
+queue=<>
+restored=<>
+queue=< svc:/a svc:/b svc:/c>
+restored=<>
+queue=< svc:/site/*>
+restored=<>
+noglob kept, ifs=<:>" "$output"
+	l_expected_calls="disable|-st|svc:/a
+disable|-st|svc:/b
+disable|-st|svc:/c
+enable|svc:/a|
+enable|svc:/b|
+enable|svc:/c|
+disable|-st|svc:/site/*
+enable|svc:/site/*|"
+	assertEquals "Empty lists do nothing; every literal name stops and restarts in order." \
+		"$l_expected_calls
+$l_expected_calls" "$(cat "$svcadm_log")"
 }
 
 test_relaunch_returns_success_when_no_services_are_pending_in_current_shell() {
 	g_zxfer_services_to_restart=""
-	g_services_need_relaunch=1
 	g_services_relaunch_in_progress=1
 
 	zxfer_relaunch
 
-	assertEquals "Empty zxfer_relaunch queues should clear the zxfer_relaunch-needed flag." \
-		"0" "$g_services_need_relaunch"
 	assertEquals "Empty zxfer_relaunch queues should clear the in-progress guard." \
 		"0" "$g_services_relaunch_in_progress"
+}
+
+test_restore_retains_only_failed_services_and_exit_does_not_retry_them() {
+	(
+		svcadm() {
+			printf '%s\n' "$*" >>"$TEST_TMPDIR/service-restore-calls"
+			zxfer_split_tokens_into_result 'unrelated restore scratch'
+			[ "$2" != svc:/bad1 ] && [ "$2" != svc:/bad2 ]
+		}
+		g_zxfer_services_to_restart=' svc:/good svc:/bad1 svc:/bad2'
+		l_test_restore_status=0
+		zxfer_restore_migration_services_status_only || l_test_restore_status=$?
+		printf 'status=%s queue=<%s> guard=%s\nmessage=%s\n' \
+			"$l_test_restore_status" "$g_zxfer_services_to_restart" \
+			"$g_services_relaunch_in_progress" "$g_zxfer_migration_service_restore_failure_message"
+		zxfer_restore_migration_services_on_exit
+		svcadm() { return 0; }
+		zxfer_restore_migration_services_status_only
+		printf 'retry=%s queue=<%s> guard=%s message=<%s>\n' "$?" \
+			"$g_zxfer_services_to_restart" "$g_services_relaunch_in_progress" \
+			"$g_zxfer_migration_service_restore_failure_message"
+	) >"$TEST_TMPDIR/service-restore-results"
+	assertEquals "A partial restore retains failed names and its diagnostic; an explicit retry clears recovery state." \
+		"status=1 queue=<svc:/bad1 svc:/bad2> guard=1
+message=Couldn't re-enable services: svc:/bad1 svc:/bad2.
+retry=0 queue=<> guard=0 message=<>" "$(cat "$TEST_TMPDIR/service-restore-results")"
+	assertEquals "Exit must not repeat a failed ordinary restore." \
+		"enable svc:/good
+enable svc:/bad1
+enable svc:/bad2" "$(cat "$TEST_TMPDIR/service-restore-calls")"
 }
 
 test_restore_migration_services_on_exit_restarts_pending_services_and_reports_failures() {
@@ -108,11 +142,11 @@ test_restore_migration_services_on_exit_restarts_pending_services_and_reports_fa
 				return "$l_test_restore_status"
 			}
 
-			g_services_need_relaunch=0
+			g_zxfer_services_to_restart=""
 			zxfer_restore_migration_services_on_exit
 			printf 'none=%s\n' "$?"
 
-			g_services_need_relaunch=1
+			g_zxfer_services_to_restart="svc:/pending:default"
 			g_services_relaunch_in_progress=1
 			zxfer_restore_migration_services_on_exit
 			printf 'in_progress=%s\n' "$?"

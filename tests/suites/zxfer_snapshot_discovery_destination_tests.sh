@@ -54,7 +54,7 @@ test_start_destination_snapshot_name_sorted_fifo_producer_stops_an_unregistered_
 	registration_output=$(
 		(
 			zxfer_get_temp_file >/dev/null || exit 1
-			test_output=$g_zxfer_temp_file_result
+			test_output=$g_zxfer_runtime_artifact_path_result
 			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' "backup/dst/src@snapA"
 			}

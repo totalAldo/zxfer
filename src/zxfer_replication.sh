@@ -46,17 +46,18 @@
 #   snapshot and the -m preparation), and the per-pass mutation marker
 #   g_is_performed_send_destroy, which the -Y loop reads. The marker has two
 #   writers on purpose: this module sets it after a dataset's -d destroy, and
-#   the send/receive scheduler in zxfer_send_jobs.sh after each send, the one
+#   the send/receive operation in zxfer_send_receive.sh after each send, the one
 #   place that knows a send happened.
 # reads globals: g_option_*, g_destination, discovery's recursive dataset
 #   lists, and the snapshot plan: g_last_common_snap,
-#   g_src_snapshot_transfer_list, g_dest_has_snapshots, the delete markers and
-#   the -g pre-pass's g_zxfer_plan_delete_snapshots. The plan changes only
+#   g_src_snapshot_transfer_first/final, g_dest_has_snapshots, the delete markers and
+#   the -g pre-pass's checked plan path and destroy target. The plan changes only
 #   through zxfer_snapshot_plan.sh; a seed receive publishes its snapshot as
 #   the new anchor with zxfer_publish_snapshot_transfer_plan.
-# mutates caches: destination existence through the destination-state
-#   helpers; the destination property iteration cache before the post-seed
-#   pass.
+# mutates caches: destination existence and the post-seed property iteration
+#   cache through their state helpers. Prepares the full queue and plans once
+#   per pass, then snapshot-only -g preflight. Owns -m mount checks, unmounts,
+#   snapshot and rediscovery; delegates service stop/recovery to migration services.
 # returns via stdout: none.
 
 # Purpose: Reset the replication state for a new session.
@@ -153,7 +154,8 @@ zxfer_seed_destination_for_snapshot_transfer() {
 	# The received seed is the new common snapshot.
 	g_dest_seed_requires_property_reconcile=1
 	zxfer_publish_snapshot_transfer_plan "$l_seed_record" \
-		"${g_src_snapshot_transfer_list:-}" 1
+		"$g_src_snapshot_transfer_first" "$g_src_snapshot_transfer_final" \
+		1 "$g_zxfer_transfer_plan_file"
 }
 
 # Purpose: Send the current dataset's pending snapshots, seeding the
@@ -167,33 +169,27 @@ zxfer_copy_snapshots() {
 	# listing; -Y repeats whole passes to converge under outside drift.
 	zxfer_reconcile_live_destination_snapshot_state "$1"
 
-	# One record per line, oldest first; drop stray blank edge lines once.
-	l_copy_list=${g_src_snapshot_transfer_list:-}
-	while :; do
-		case $l_copy_list in
-		"$ZXFER_LF"*) l_copy_list=${l_copy_list#"$ZXFER_LF"} ;;
-		*"$ZXFER_LF") l_copy_list=${l_copy_list%"$ZXFER_LF"} ;;
-		*) break ;;
-		esac
-	done
-	if [ -z "$l_copy_list" ]; then
-		zxfer_echoV "No snapshots to copy, skipping destination dataset: $g_actual_dest."
-		return
-	fi
-	l_copy_first=${l_copy_list%%"$ZXFER_LF"*}
-	l_copy_final=${l_copy_list##*"$ZXFER_LF"}
 	# Record paths are everything before the first tab (guid column).
-	l_copy_first_path=${l_copy_first%%	*}
-	l_copy_final_path=${l_copy_final%%	*}
+	l_copy_first_path=${g_src_snapshot_transfer_first%%	*}
+	l_copy_final_path=${g_src_snapshot_transfer_final%%	*}
 
 	# Nothing new to send: no rollback after deleting extra snapshots either.
-	if [ "${g_last_common_snap%%	*}" = "$l_copy_final_path" ]; then
-		zxfer_echoV "No new snapshots to copy for $g_actual_dest."
+	if [ -z "$g_src_snapshot_transfer_first" ] || [ "${g_last_common_snap%%	*}" = "$l_copy_final_path" ]; then
+		if [ -z "$g_src_snapshot_transfer_first" ]; then
+			zxfer_echoV "No snapshots to copy, skipping destination dataset: $g_actual_dest."
+		else
+			zxfer_echoV "No new snapshots to copy for $g_actual_dest."
+		fi
+		if [ -n "$g_last_common_snap" ]; then
+			zxfer_echov "No new snapshots to transfer for [$1] -> [$g_actual_dest]: newest listed source snapshot is already shared: ${g_last_common_snap%%"$ZXFER_TAB"*} (GUID: ${g_last_common_snap#*"$ZXFER_TAB"})."
+		else
+			zxfer_echov "No new snapshots to transfer for [$1] -> [$g_actual_dest]: no source snapshots were listed for this dataset in discovery."
+		fi
 		return
 	fi
 
 	zxfer_rollback_destination_to_last_common_snapshot
-	zxfer_seed_destination_for_snapshot_transfer "$l_copy_first" "$l_copy_first_path"
+	zxfer_seed_destination_for_snapshot_transfer "$g_src_snapshot_transfer_first" "$l_copy_first_path"
 
 	# Seeding the only pending snapshot completes the transfer; never send a
 	# snapshot incrementally to itself.
@@ -272,13 +268,38 @@ zxfer_unsupported_property_scan_is_required() {
 	return 0
 }
 
+# Parent-first ordering is shared by the full queue and its snapshot-only -g
+# projection. The latter retains the original delta-list order within a depth,
+# but uses the positions of the already prepared full queue.
+# shellcheck disable=SC2016 # awk reads literal fields.
+ZXFER_REPLICATION_ITERATION_AWK='
+preflight && !datasets {
+	if ($0 == "") { datasets = 1; next }
+	tab = index($0, "\t")
+	position[substr($0, tab + 1)] = substr($0, 1, tab - 1)
+	next
+}
+NF && !seen[$0]++ {
+	depth = gsub("/", "/")
+	rows[depth, ++count[depth]] = $0
+	if (depth > max_depth) max_depth = depth
+}
+END {
+	for (depth = 0; depth <= max_depth; depth++)
+		for (row = 1; row <= count[depth]; row++) {
+			source = rows[depth, row]
+			if (preflight && !(source in position)) exit 1
+			print (preflight ? position[source] : ++number) "\t" source
+		}
+}'
+
 # Purpose: Merge dataset work once, keeping parents ahead of descendants and
 # independent siblings ready for -j. Source and destination delta lists may
 # overlap; a destination-only snapshot can belong to an existing source parent.
 # Usage: zxfer_build_replication_iteration_list PROPERTY_PASS_REQUIRED;
 # publishes $g_zxfer_replication_iteration_list_result, one
-# "POSITION<TAB>SOURCE" row per dataset, only after the snapshot record files
-# are split by position, so every list comes with its own slices.
+# "POSITION<TAB>SOURCE" row per dataset, only after its snapshot plans and
+# source slices are prepared by position.
 zxfer_build_replication_iteration_list() {
 	l_iteration_sources=${g_recursive_source_list:-}
 	if [ "$g_option_R_recursive" != "" ] && [ "$1" -eq 1 ]; then
@@ -290,33 +311,20 @@ $l_iteration_sources"
 ${g_recursive_destination_extra_dataset_list:-}"
 	fi
 	g_zxfer_replication_iteration_list_result=""
-	# One pass deduplicates into depth buckets. This avoids both per-dataset
-	# shell scans of the growing list and the former three staged files.
-	# shellcheck disable=SC2016 # awk must receive literal record fields.
+	# One pass deduplicates into depth buckets, followed by grouped planning.
 	l_iteration_result=$(
-		"${g_cmd_awk:-awk}" '
-		NF && !seen[$0]++ {
-			depth = gsub("/", "/")
-			rows[depth, ++count[depth]] = $0
-			if (depth > max_depth) max_depth = depth
-		}
-		END {
-			for (depth = 0; depth <= max_depth; depth++)
-				for (row = 1; row <= count[depth]; row++)
-					print ++position "\t" rows[depth, row]
-		}
-	' <<EOF
+		"${g_cmd_awk:-awk}" "$ZXFER_REPLICATION_ITERATION_AWK" <<EOF
 $l_iteration_sources
 EOF
 	) || return "$?"
-	zxfer_split_snapshot_records "$l_iteration_result" || return "$?"
+	zxfer_prepare_snapshot_plans "$l_iteration_result" || return "$?"
 	g_zxfer_replication_iteration_list_result=$l_iteration_result
 }
 
 # Purpose: Replicate one dataset: plan and -d delete, reconcile properties,
 # then send.
 # Usage: zxfer_process_source_dataset SOURCE PROPERTY_PASS(0|1) [POSITION];
-# POSITION, SOURCE's iteration-list position, selects its snapshot slices.
+# POSITION selects SOURCE's prepared snapshot plan and source slice.
 # Appends a seeded SOURCE to g_zxfer_post_seed_property_sources.
 # Side effects: Sets failure_stage replication for the dataset's planning,
 # deletes, re-plan, rollback and seed decision, so a failure there never
@@ -328,7 +336,7 @@ zxfer_process_source_dataset() {
 
 	zxfer_set_failure_stage "replication"
 	zxfer_set_actual_dest "$l_process_source"
-	zxfer_select_snapshot_slice "${3:-}" "$l_process_source"
+	zxfer_select_snapshot_plan "${3:-}" "$l_process_source"
 	# In-flight background receives cannot affect this dataset's cached
 	# destination state: the ready-queue ancestry gate defers any dataset
 	# whose destination conflicts with an active job, zxfer_reap_send_job
@@ -338,6 +346,8 @@ zxfer_process_source_dataset() {
 		"$l_process_source"
 	# The plan's -d destroy changed the destination; -Y repeats such a pass.
 	[ "${g_did_delete_dest_snapshots:-0}" -eq 0 ] || g_is_performed_send_destroy=1
+	zxfer_report_snapshot_transfer_skips "$l_process_source" "$g_actual_dest" \
+		"$g_zxfer_transfer_plan_file" "$g_last_common_snap"
 
 	if [ "$l_process_property_pass" -eq 1 ]; then
 		zxfer_transfer_properties "$l_process_source"
@@ -412,10 +422,14 @@ EOF
 
 # Purpose: Replicate every dataset of the pass, then reconcile the properties
 # of seeded destinations.
-# Usage: zxfer_copy_filesystems, after discovery, the -s/-m snapshot and the
-# -g pre-pass.
+# Usage: zxfer_copy_filesystems, after discovery and the -s/-m snapshot.
+# Prepares the full queue and plans, then runs -g before any dataset execution.
 zxfer_copy_filesystems() {
-	zxfer_echoV "Begin zxfer_copy_filesystems()"
+	if [ "$g_option_g_grandfather_protection" = "" ]; then
+		zxfer_echoV "Begin zxfer_copy_filesystems()"
+	else
+		zxfer_echov "Checking grandfather status of all snapshots marked for deletion..."
+	fi
 
 	l_copy_property_pass=0
 	if [ "$g_option_P_transfer_property" -eq 1 ] ||
@@ -426,12 +440,17 @@ zxfer_copy_filesystems() {
 		[ -z "${g_recursive_source_list:-}" ] &&
 		{ [ "$g_option_d_delete_destination_snapshots" -ne 1 ] ||
 			[ -z "${g_recursive_destination_extra_dataset_list:-}" ]; }; then
+		g_zxfer_replication_iteration_list_result=""
+		zxfer_perform_grandfather_protection_checks
+		[ "$g_option_g_grandfather_protection" = "" ] || zxfer_echoV "Begin zxfer_copy_filesystems()"
 		zxfer_wait_for_zfs_send_jobs "final sync"
 		zxfer_echoV "End zxfer_copy_filesystems()"
 		return
 	fi
 	zxfer_build_replication_iteration_list "$l_copy_property_pass" ||
 		zxfer_throw_error "Failed to prepare replication dataset iteration list." "$?"
+	zxfer_perform_grandfather_protection_checks
+	[ "$g_option_g_grandfather_protection" = "" ] || zxfer_echoV "Begin zxfer_copy_filesystems()"
 	if [ -z "$g_zxfer_replication_iteration_list_result" ]; then
 		zxfer_wait_for_zfs_send_jobs "final sync"
 		zxfer_echoV "End zxfer_copy_filesystems()"
@@ -551,6 +570,59 @@ zxfer_refresh_dataset_iteration_state() {
 	zxfer_refresh_property_tree_prefetch_context
 }
 
+# Purpose: Stop the -c services, unmount every source dataset and take the -m
+# snapshot.
+# Usage: zxfer_prepare_migration_services, after the first pass's discovery;
+# under -n only previews the commands.
+zxfer_prepare_migration_services() {
+	[ "$g_option_m_migrate" -eq 1 ] || return
+	zxfer_set_failure_stage "migration service handling"
+
+	[ -z "$g_option_c_services" ] || zxfer_stopsvcs "$g_option_c_services"
+
+	if [ "$g_option_n_dryrun" -eq 1 ]; then
+		if zxfer_command_display_render_enabled; then
+			while IFS= read -r l_migration_source; do
+				[ -n "$l_migration_source" ] || continue
+				zxfer_echov "Dry run: $(zxfer_render_source_zfs_command unmount "$l_migration_source")"
+			done <<EOF
+${g_recursive_source_list:-}
+EOF
+		fi
+		zxfer_newsnap "$g_initial_source"
+		return
+	fi
+
+	# Every dataset must be mounted before any is unmounted or snapshotted.
+	# ssh inside these loops must not read the list.
+	while IFS= read -r l_migration_source; do
+		[ -n "$l_migration_source" ] || continue
+		if ! l_migration_mounted=$(zxfer_run_source_zfs_cmd get -Ho value mounted "$l_migration_source" </dev/null); then
+			zxfer_throw_error "Couldn't determine whether source $l_migration_source is mounted."
+		fi
+		if [ "$l_migration_mounted" != "yes" ]; then
+			zxfer_throw_usage_error "The source filesystem is not mounted, cannot use -m."
+		fi
+	done <<EOF
+${g_recursive_source_list:-}
+EOF
+
+	while IFS= read -r l_migration_source; do
+		[ -n "$l_migration_source" ] || continue
+		zxfer_echov "Unmounting $l_migration_source."
+		if ! zxfer_run_source_zfs_cmd unmount "$l_migration_source" </dev/null; then
+			zxfer_relaunch
+			zxfer_throw_error "Couldn't unmount source $l_migration_source."
+		fi
+	done <<EOF
+${g_recursive_source_list:-}
+EOF
+
+	zxfer_newsnap "$g_initial_source"
+	# The new snapshots must be discovered before they can be sent.
+	zxfer_refresh_dataset_iteration_state
+}
+
 # Purpose: Take the -s snapshot and rediscover, unless -m takes it instead.
 # Usage: zxfer_maybe_capture_preflight_snapshot, after the first pass's
 # discovery or from the dry-run preview.
@@ -595,29 +667,41 @@ zxfer_preview_zfs_mode_dry_run() {
 # Purpose: Refuse a -g pass before any change when a dataset has diverged or,
 # with -d, when a planned destination delete is protected by -g.
 # Usage: zxfer_perform_grandfather_protection_checks, before
-# zxfer_copy_filesystems; plans every dataset the pass visits and enforces
-# the divergence contract without deleting anything, so a -F receive never
+# the ready queue in zxfer_copy_filesystems. Loads prepared snapshot-work
+# plans and enforces divergence without deleting anything, so a -F receive never
 # runs on an earlier dataset of a pass that refuses a later one.
 zxfer_perform_grandfather_protection_checks() {
 	[ "$g_option_g_grandfather_protection" != "" ] || return 0
 
-	zxfer_echov "Checking grandfather status of all snapshots marked for deletion..."
-	zxfer_build_replication_iteration_list 0 ||
+	l_grandfather_sources=${g_recursive_source_list:-}
+	if [ "$g_option_d_delete_destination_snapshots" -eq 1 ]; then
+		l_grandfather_sources="$l_grandfather_sources
+${g_recursive_destination_extra_dataset_list:-}"
+	fi
+	# The preflight visits only snapshot work, in its original order. It reads
+	# the full queue's plans without rebuilding slices or planning again.
+	l_grandfather_rows=$(
+		"${g_cmd_awk:-awk}" "$ZXFER_REPLICATION_ITERATION_AWK" preflight=1 <<EOF
+$g_zxfer_replication_iteration_list_result
+
+$l_grandfather_sources
+EOF
+	) ||
 		zxfer_throw_error "Failed to prepare replication dataset iteration list." "$?"
 	while IFS= read -r l_grandfather_row; do
 		[ -n "$l_grandfather_row" ] || continue
 		l_grandfather_source=${l_grandfather_row#*"$ZXFER_TAB"}
 		zxfer_set_actual_dest "$l_grandfather_source"
-		zxfer_select_snapshot_slice "${l_grandfather_row%%"$ZXFER_TAB"*}" \
+		zxfer_select_snapshot_plan "${l_grandfather_row%%"$ZXFER_TAB"*}" \
 			"$l_grandfather_source"
 		# DELETE=0 plans and enforces divergence only; ssh must not read the
 		# list.
 		zxfer_inspect_delete_snap 0 "$l_grandfather_source" </dev/null
 		[ "$g_option_d_delete_destination_snapshots" -eq 1 ] || continue
-		[ -n "$g_zxfer_plan_delete_snapshots" ] || continue
-		zxfer_prepare_snapshot_delete_creation_state "$g_zxfer_plan_delete_snapshots" </dev/null
+		[ -n "$g_zxfer_plan_destroy_target" ] || continue
+		zxfer_prepare_snapshot_delete_creation_state "$g_zxfer_plan_file" </dev/null
 	done <<EOF
-$g_zxfer_replication_iteration_list_result
+$l_grandfather_rows
 EOF
 	zxfer_echov "Grandfather check passed."
 }
@@ -647,8 +731,6 @@ zxfer_run_zfs_mode() {
 	# Discovery and -m preparation name their own stages; failures from here
 	# on that set none (the -g pre-pass, planning) are replication failures.
 	zxfer_set_failure_stage "replication"
-	zxfer_perform_grandfather_protection_checks
-
 	zxfer_copy_filesystems
 
 	# Re-launch any stopped services.

@@ -43,7 +43,7 @@ dryrun_incr_small	ssh_master_opens	0
 dryrun_incr_small	profile:zfs_list_calls	0
 dryrun_incr_small	profile:zfs_send_calls	0
 dryrun_incr_small	profile:zfs_receive_calls	0
-incr_small	TOTAL	79
+incr_small	TOTAL	71
 incr_small	ssh_connections	0
 incr_small	ssh_master_opens	0
 incr_small	profile:zfs_list_calls	2
@@ -55,13 +55,13 @@ remote_noop_small	ssh_master_opens	1
 remote_noop_small	profile:zfs_list_calls	2
 remote_noop_small	profile:zfs_send_calls	0
 remote_noop_small	profile:zfs_receive_calls	0
-remote_incr_small	TOTAL	78
+remote_incr_small	TOTAL	65
 remote_incr_small	ssh_connections	1
 remote_incr_small	ssh_master_opens	1
 remote_incr_small	profile:zfs_list_calls	3
 remote_incr_small	profile:zfs_send_calls	11
 remote_incr_small	profile:zfs_receive_calls	11
-props_small	TOTAL	97
+props_small	TOTAL	75
 props_small	ssh_connections	0
 props_small	ssh_master_opens	0
 props_small	profile:zfs_list_calls	3

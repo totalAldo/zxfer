@@ -28,7 +28,7 @@ test_find_restored_backup_properties_returns_lookup_statuses() {
 			printf 'load=%s\n' "$?"
 			# The row file of "lost" disappears after the load.
 			zxfer_find_property_row "$g_zxfer_backup_restore_index" lost
-			rm -f "$g_zxfer_property_row_dir/$g_zxfer_property_row_result"
+			rm -f "$g_zxfer_backup_restore_row_dir/$g_zxfer_property_row_result"
 			for l_pair in \
 				"tank/src|backup/dst/src" \
 				"tank/src/a b/[c]*|backup/dst/src/a b/[c]*" \
@@ -39,8 +39,9 @@ test_find_restored_backup_properties_returns_lookup_statuses() {
 				"tank/other|backup/dst/src" \
 				"tank/src|backup/dst" \
 				"tank/src/|backup/dst/src/"; do
+				g_zxfer_property_row_payload_result=stale
 				zxfer_find_restored_backup_properties "${l_pair%|*}" "${l_pair#*|}"
-				printf '%s %s <%s>\n' "$l_pair" "$?" "$g_zxfer_backup_restore_properties_result"
+				printf '%s %s <%s>\n' "$l_pair" "$?" "$g_zxfer_property_row_payload_result"
 			done
 		) 2>&1
 	)
@@ -63,7 +64,8 @@ test_get_backup_properties_reports_a_failed_row_load_as_a_read_failure() {
 		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local")")"
 	output=$(
 		(
-			zxfer_load_backup_restore_rows() { return 1; }
+			zxfer_prepare_property_read_files || exit
+			zxfer_create_private_temp_dir() { return 1; }
 			zxfer_get_backup_properties
 		) 2>&1
 	)
@@ -90,7 +92,7 @@ test_try_backup_restore_candidate_maps_read_format_and_row_statuses() {
 		result=$(
 			(
 				zxfer_read_local_backup_file() {
-					g_zxfer_backup_file_read_result=$valid
+					zxfer_write_runtime_artifact_file "$2" "$valid" || return
 					# No case statement here: bash 3.2 (macOS /bin/sh)
 					# mis-parses case patterns inside command substitution.
 					if [ "$1" = "$BACKUP_TEST_PRIMARY_FILE" ]; then
@@ -112,10 +114,10 @@ test_try_backup_restore_candidate_maps_read_format_and_row_statuses() {
 	result=$(
 		(
 			zxfer_read_local_backup_file() {
-				g_zxfer_backup_file_read_result=$valid
+				zxfer_write_runtime_artifact_file "$2" "$valid" || return
 				return 0
 			}
-			zxfer_backup_metadata_extract_properties_for_dataset_pair() { return 99; }
+			zxfer_load_backup_metadata_view() { return 99; }
 			zxfer_try_backup_restore_candidate "$g_backup_storage_root/tank/src" \
 				tank/src backup/dst tank/src backup/dst/src
 			printf '%s\n' "$?"
@@ -123,20 +125,20 @@ test_try_backup_restore_candidate_maps_read_format_and_row_statuses() {
 	)
 	assertEquals "Unexpected row statuses fail closed as read failures." 5 "$result"
 
-	# A valid file without a row for the pair (8) keeps its contents for the
-	# forwarded-alias loader; a pair outside its roots stays 3.
-	for case_spec in "8 contents|tank/src/other|backup/dst/src/other" "3 |tank/src|backup/other"; do
+	# A valid alias without a row for the pair (8) keeps its view; a pair
+	# outside its roots stays 3.
+	for case_spec in "8 view|tank/src/other|backup/dst/src/other" "3 |tank/src|backup/other"; do
 		expected=${case_spec%%|*}
 		pair=${case_spec#*|}
 		result=$(
 			(
 				zxfer_read_local_backup_file() {
-					g_zxfer_backup_file_read_result=$valid
+					zxfer_write_runtime_artifact_file "$2" "$valid" || return
 					return 0
 				}
 				zxfer_try_backup_restore_candidate "$g_backup_storage_root/tank/src" \
-					tank/src backup/dst "${pair%|*}" "${pair#*|}"
-				printf '%s %s\n' "$?" "${g_zxfer_backup_restore_candidate_contents_result:+contents}"
+					tank/src backup/dst "${pair%|*}" "${pair#*|}" '' source tank/src
+				printf '%s %s\n' "$?" "${g_zxfer_backup_view_result:+view}"
 			)
 		)
 		assertEquals "Pair ${pair%|*} -> ${pair#*|} maps to status and contents [$expected]." \
@@ -186,6 +188,8 @@ test_throw_backup_candidate_failure_routes_usage_and_plain_errors() {
 }
 
 test_read_local_backup_file_returns_missing_and_refuses_symlinked_components() {
+	zxfer_create_runtime_artifact_file backup-test
+	staging=$g_zxfer_runtime_artifact_path_result
 	real_dir="$TEST_TMPDIR_PHYSICAL/read_local_real"
 	link_dir="$TEST_TMPDIR_PHYSICAL/read_local_link"
 	mkdir -p "$real_dir"
@@ -194,19 +198,21 @@ test_read_local_backup_file_returns_missing_and_refuses_symlinked_components() {
 	ln -s "$real_dir" "$link_dir"
 	ln -s "$real_dir/backup.meta" "$real_dir/backup.link"
 
-	zxfer_read_local_backup_file "$real_dir/missing.meta" >/dev/null
+	zxfer_read_local_backup_file "$real_dir/missing.meta" "$staging" >/dev/null
 	assertEquals "A missing file is status 4." 4 "$?"
 
-	output=$(zxfer_read_local_backup_file "$link_dir/backup.meta" 2>&1)
+	output=$(zxfer_read_local_backup_file "$link_dir/backup.meta" "$staging" 2>&1)
 	assertEquals 1 "$?"
 	assertContains "$output" "Refusing to use backup metadata $link_dir/backup.meta because path component $link_dir is a symlink."
 
-	output=$(zxfer_read_local_backup_file "$real_dir/backup.link" 2>&1)
+	output=$(zxfer_read_local_backup_file "$real_dir/backup.link" "$staging" 2>&1)
 	assertEquals 1 "$?"
 	assertContains "$output" "Refusing to use backup metadata $real_dir/backup.link because it is a symlink."
 }
 
 test_read_local_backup_file_rejects_insecure_owner_mode_and_shared_directory() {
+	zxfer_create_runtime_artifact_file backup-test
+	staging=$g_zxfer_runtime_artifact_path_result
 	backup_dir="$TEST_TMPDIR_PHYSICAL/read_local_secure"
 	mkdir -p "$backup_dir"
 	chmod 700 "$backup_dir"
@@ -217,7 +223,7 @@ test_read_local_backup_file_rejects_insecure_owner_mode_and_shared_directory() {
 	output=$(
 		(
 			zxfer_get_path_owner_uid() { printf '4321\n'; }
-			zxfer_read_local_backup_file "$backup_file"
+			zxfer_read_local_backup_file "$backup_file" "$staging"
 		) 2>&1
 	)
 	assertEquals 1 "$?"
@@ -226,7 +232,7 @@ test_read_local_backup_file_rejects_insecure_owner_mode_and_shared_directory() {
 	chmod 644 "$backup_file"
 	output=$(
 		(
-			zxfer_read_local_backup_file "$backup_file"
+			zxfer_read_local_backup_file "$backup_file" "$staging"
 		) 2>&1
 	)
 	assertEquals 1 "$?"
@@ -236,22 +242,23 @@ test_read_local_backup_file_rejects_insecure_owner_mode_and_shared_directory() {
 	chmod 777 "$backup_dir"
 	output=$(
 		(
-			zxfer_read_local_backup_file "$backup_file"
+			zxfer_read_local_backup_file "$backup_file" "$staging"
 		) 2>&1
 	)
 	assertEquals "A directory other users can modify could swap the file between the check and the read." 1 "$?"
 	assertContains "$output" "Refusing to use backup metadata $backup_file because its directory $backup_dir is not a private directory owned by root or the current user."
 	chmod 700 "$backup_dir"
 
-	assertEquals "A private 0700 directory with a 0600 file reads back its contents." \
-		"trusted" "$(zxfer_read_local_backup_file "$backup_file")"
-	assertEquals "trusted" "$(
-		zxfer_read_local_backup_file "$backup_file" >/dev/null
-		printf '%s' "$g_zxfer_backup_file_read_result"
-	)"
+	zxfer_read_local_backup_file "$backup_file" "$staging"
+	status=$?
+	assertEquals "A private 0700 directory with a 0600 file reads successfully." 0 "$status"
+	assertEquals "trusted" "$(cat "$staging")"
+
 }
 
 test_read_local_backup_file_returns_cat_failures_after_security_checks() {
+	zxfer_create_runtime_artifact_file backup-test
+	staging=$g_zxfer_runtime_artifact_path_result
 	backup_dir="$TEST_TMPDIR_PHYSICAL/read_local_cat"
 	mkdir -p "$backup_dir"
 	backup_file="$backup_dir/backup.meta"
@@ -261,9 +268,175 @@ test_read_local_backup_file_returns_cat_failures_after_security_checks() {
 	status=$(
 		(
 			cat() { return 3; }
-			zxfer_read_local_backup_file "$backup_file" >/dev/null
+			zxfer_read_local_backup_file "$backup_file" "$staging" >/dev/null
 			printf '%s\n' "$?"
 		)
 	)
 	assertEquals "The literal cat status is preserved." 3 "$status"
+}
+
+test_metadata_view_preserves_format_priority_and_clears_failed_publications() {
+	zxfer_prepare_property_read_files || return
+	zxfer_create_runtime_artifact_file metadata-test
+	staging=$g_zxfer_runtime_artifact_path_result
+	valid=$(zxfer_backup_test_exact_pair_contents "$(zxfer_test_backup_metadata_row . compression=lz4=local)")
+	for case_spec in 'valid|5' 'bad-version|7' 'bad-header|6' 'missing-row|8'; do
+		kind=${case_spec%|*}
+		expected=${case_spec#*|}
+		contents=$valid
+		[ "$kind" != bad-version ] || contents="$ZXFER_BACKUP_METADATA_HEADER_LINE
+#format_version:1"
+		[ "$kind" != bad-header ] || contents="broken"
+		zxfer_write_runtime_artifact_file "$staging" "$contents"
+		output=$(
+			(
+				g_zxfer_backup_view_result=stale
+				zxfer_create_private_temp_dir() { return 17; }
+				if [ "$kind" = missing-row ]; then
+					zxfer_load_backup_metadata_view "$staging" tank/src/missing backup/dst/src/missing
+				else
+					zxfer_load_backup_metadata_view "$staging" tank/src backup/dst/src
+				fi
+				printf '%s <%s>' "$?" "$g_zxfer_backup_view_result"
+			)
+		)
+		assertEquals "Format failures precede row-directory allocation [$kind]." "$expected <>" "$output"
+	done
+
+	zxfer_write_runtime_artifact_file "$staging" "$valid"
+	output=$(
+		(
+			g_cmd_awk="awk"
+			# Export before the function prefix for FreeBSD sh/ksh93.
+			ZXFER_AWK_ROW_DIR=""
+			export ZXFER_AWK_ROW_DIR
+			awk() {
+				if [ -n "${ZXFER_AWK_ROW_DIR:-}" ]; then
+					printf partial >"$ZXFER_AWK_ROW_DIR/r1"
+					return 13
+				fi
+				command awk "$@"
+			}
+			zxfer_load_backup_metadata_view "$staging" tank/src backup/dst/src
+			printf '%s <%s>' "$?" "$g_zxfer_backup_view_result"
+		)
+	)
+	assertEquals "A partial row write publishes no view." '5 <>' "$output"
+}
+
+test_candidate_discards_partial_reads_and_allocation_failures() {
+	zxfer_backup_test_use_private_root candidate_partial
+	valid=$(zxfer_backup_test_exact_pair_contents "$(zxfer_test_backup_metadata_row . compression=lz4=local)")
+	for failure in read allocation; do
+		output=$(
+			(
+				zxfer_read_local_backup_file() {
+					zxfer_write_runtime_artifact_file "$2" "$valid"
+					return 12
+				}
+				zxfer_ensure_runtime_artifact_file() {
+					[ "$failure" != allocation ] || return 17
+					zxfer_create_runtime_artifact_file "$2"
+				}
+				g_zxfer_backup_view_result=stale
+				zxfer_try_backup_restore_candidate "$g_backup_storage_root/tank/src" \
+					tank/src backup/dst tank/src backup/dst/src
+				printf '%s <%s>' "$?" "$g_zxfer_backup_view_result"
+			)
+		)
+		assertEquals "$failure failure must not publish partial metadata." '5 <>' "$output"
+	done
+}
+
+test_forwarded_views_survive_pass_resets_and_restore_refreshes() {
+	zxfer_backup_test_use_private_root view_lifetimes
+	alias="$g_backup_storage_root/tank/src/$(zxfer_get_backup_metadata_filename tank/src tank/src)"
+	ZXFER_TEST_BACKUP_SOURCE_ROOT=tank/src
+	ZXFER_TEST_BACKUP_DESTINATION_ROOT=tank/src
+	zxfer_backup_test_write_file "$alias" "$(zxfer_test_render_current_backup_metadata_contents \
+		"$(zxfer_test_backup_metadata_row . compression=gzip=local)" \
+		"$(zxfer_test_backup_metadata_row child atime=off=local)")"
+	unset ZXFER_TEST_BACKUP_SOURCE_ROOT ZXFER_TEST_BACKUP_DESTINATION_ROOT
+	zxfer_resolve_forwarded_backup_metadata tank/src/child
+	status=$?
+	assertEquals 0 "$status"
+	assertEquals atime=off=local "$g_zxfer_backup_forwarded_properties"
+	assertNotContains "The alias index contains no property payload." "$g_zxfer_backup_forwarded_rows" 'atime='
+
+	zxfer_backup_test_write_file "$BACKUP_TEST_PRIMARY_FILE" "$(zxfer_backup_test_exact_pair_contents \
+		"$(zxfer_test_backup_metadata_row . compression=lz4=local)")"
+	zxfer_get_backup_properties
+	old_dir=$g_zxfer_backup_restore_row_dir
+	read_file=$g_zxfer_backup_read_file
+	zxfer_reset_property_iteration_caches
+	zxfer_backup_test_write_file "$BACKUP_TEST_PRIMARY_FILE" "$(zxfer_backup_test_exact_pair_contents \
+		"$(zxfer_test_backup_metadata_row . compression=off=local)")"
+	zxfer_get_backup_properties
+	assertFalse "Refresh retires the previous restore directory." "[ -d '$old_dir' ]"
+	assertEquals "Reads reuse one staging file." "$read_file" "$g_zxfer_backup_read_file"
+	zxfer_find_restored_backup_properties tank/src backup/dst/src
+	status=$?
+	assertEquals 0 "$status"
+	assertEquals compression=off=local "$g_zxfer_property_row_payload_result"
+	# A cached alias does not get reread after its file changes or disappears.
+	rm -f "$alias"
+	zxfer_resolve_forwarded_backup_metadata tank/src/child
+	status=$?
+	assertEquals 0 "$status"
+	assertEquals atime=off=local "$g_zxfer_backup_forwarded_properties"
+}
+
+test_empty_forwarded_alias_and_negative_memo_do_not_forge_rows() {
+	zxfer_backup_test_use_private_root empty_alias
+	alias="$g_backup_storage_root/tank/src/$(zxfer_get_backup_metadata_filename tank/src tank/src)"
+	ZXFER_TEST_BACKUP_SOURCE_ROOT=tank/src
+	ZXFER_TEST_BACKUP_DESTINATION_ROOT=tank/src
+	zxfer_backup_test_write_file "$alias" "$(zxfer_test_render_current_backup_metadata_contents)"
+	zxfer_resolve_forwarded_backup_metadata tank/src/child
+	status=$?
+	assertEquals "An empty alias is valid but supplies no dataset." 1 "$status"
+	assertEquals '' "$g_zxfer_backup_forwarded_rows"
+	assertEquals '' "$g_zxfer_backup_forwarded_properties"
+	child_alias="$g_backup_storage_root/tank/src/child/$(zxfer_get_backup_metadata_filename tank/src/child tank/src/child)"
+	ZXFER_TEST_BACKUP_SOURCE_ROOT=tank/src/child
+	ZXFER_TEST_BACKUP_DESTINATION_ROOT=tank/src/child
+	zxfer_backup_test_write_file "$child_alias" "$(zxfer_test_render_current_backup_metadata_contents \
+		"$(zxfer_test_backup_metadata_row . compression=gzip=local)")"
+	unset ZXFER_TEST_BACKUP_SOURCE_ROOT ZXFER_TEST_BACKUP_DESTINATION_ROOT
+	zxfer_resolve_forwarded_backup_metadata tank/src/child
+	status=$?
+	assertEquals "Absence is memoized for the session." 1 "$status"
+}
+
+test_forwarded_view_refuses_missing_and_truncated_selected_rows() {
+	zxfer_backup_test_use_private_root forwarded_row_failure
+	alias="$g_backup_storage_root/tank/src/$(zxfer_get_backup_metadata_filename tank/src tank/src)"
+	ZXFER_TEST_BACKUP_SOURCE_ROOT=tank/src
+	ZXFER_TEST_BACKUP_DESTINATION_ROOT=tank/src
+	zxfer_backup_test_write_file "$alias" "$(zxfer_test_render_current_backup_metadata_contents \
+		"$(zxfer_test_backup_metadata_row . compression=gzip=local)")"
+	unset ZXFER_TEST_BACKUP_SOURCE_ROOT ZXFER_TEST_BACKUP_DESTINATION_ROOT
+	zxfer_resolve_forwarded_backup_metadata tank/src
+	view_dir=${g_zxfer_backup_forwarded_roots##*"$ZXFER_TAB"}
+	for failure in truncated missing; do
+		printf 'compression=forged=local' >"$view_dir/r1"
+		[ "$failure" != missing ] || rm -f "$view_dir/r1"
+		output=$(zxfer_resolve_forwarded_backup_metadata tank/src 2>&1)
+		status=$?
+		assertEquals "$failure rows fail closed." 1 "$status"
+		assertContains "$output" "Failed to read forwarded backup property file $alias."
+	done
+}
+
+test_metadata_view_accepts_late_roots_and_literal_payload_bytes() {
+	contents="$ZXFER_BACKUP_METADATA_HEADER_LINE
+#format_version:2
+$(zxfer_test_backup_metadata_row . 'user:note=a\\nb=local')
+$(zxfer_test_backup_metadata_row 'a b/[c]*' 'user:note=C:\\temp=local')
+#source_root:tank/src
+#destination_root:backup/dst/src"
+	output=$(zxfer_test_check_metadata_pair "$contents" 'tank/src/a b/[c]*' 'backup/dst/src/a b/[c]*')
+	status=$?
+	assertEquals 0 "$status"
+	assertEquals 'user:note=C:\\temp=local' "$output"
 }

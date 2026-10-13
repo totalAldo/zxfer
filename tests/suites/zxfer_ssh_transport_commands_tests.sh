@@ -184,9 +184,9 @@ test_ssh_command_modes_fail_closed_before_ssh_runs() {
 		l_results="$l_results$l_mode empty_command=$?|$l_output
 "
 	done
-	g_zxfer_prepared_ssh_shell_command_result=stale
+	g_zxfer_shell_command_result=stale
 	zxfer_publish_prepared_ssh_shell_command_for_host_or_throw backup.example ""
-	l_published="$?|$g_zxfer_prepared_ssh_shell_command_result"
+	l_published="$?|$g_zxfer_shell_command_result"
 	unset FAKE_SSH_LOG
 
 	l_expected=""
@@ -201,6 +201,30 @@ $l_mode empty_command=1|
 		"$l_expected" "$l_results"
 	assertEquals "No failure may start ssh." "" "$(cat "$l_ssh_log")"
 	assertEquals "An empty command should clear the published command." "1|" "$l_published"
+}
+
+# The renderer shares quoting's result, so retain an input passed through that
+# same channel before any helper rewrites it; failed builders publish no text.
+test_prepared_ssh_renderer_keeps_input_and_clears_partial_results_on_failure() {
+	for builder_status in 0 37; do
+		output=$(
+			g_zxfer_shell_command_result="'zfs' 'list' 'tank/data'"
+			zxfer_ssh_shell_command_for_host() {
+				printf 'input=%s\n' "$3"
+				g_zxfer_shell_command_result='complete ssh argv'
+				return "$builder_status"
+			}
+			status=0
+			zxfer_publish_prepared_ssh_shell_command_for_host_or_throw backup.example \
+				"$g_zxfer_shell_command_result" || status=$?
+			printf 'status=%s result=<%s>\n' "$status" "$g_zxfer_shell_command_result"
+		)
+		expected_result='complete ssh argv'
+		[ "$builder_status" -eq 0 ] || expected_result=""
+		assertEquals "The canonical result retains only successful renderer output." \
+			"input='zfs' 'list' 'tank/data'
+status=$builder_status result=<$expected_result>" "$output"
+	done
 }
 
 test_zfs_and_ssh_runs_record_their_argv_as_the_last_command() {

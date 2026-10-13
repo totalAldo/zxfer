@@ -999,6 +999,21 @@ each one prints a warning.
 (v)erbose mode; property values are shown escaped: a backslash as \e\e,
 tab, carriage return and line feed as \et, \er and \en, and other control
 bytes and DEL as \exHH.
+Recursive snapshot delta summaries also list the full snapshot names and GUIDs
+behind missing/extra counts, using actual destination paths for destination-only
+snapshots. The \fBsnapshots_missing_on_destination\fR count measures source
+snapshot name/GUID identities absent from the destination.
+The \fBsnapshots_missing_on_source\fR count measures destination snapshot
+name/GUID identities absent from the source.
+A same-name GUID mismatch appears in both lists. These discovery
+differences do not imply that every listed snapshot will be sent or deleted;
+normal planning and safety checks still apply. Per-dataset skip reasons name
+the newest common snapshot when an older missing snapshot is outside the
+incremental send range: older gaps are not backfilled. No-send messages
+distinguish an already shared newest listed source snapshot from a dataset
+without source snapshot records. A single discovery no-send message names
+the source pool or primary dataset.
+Nonrecursive discovery identifies listed descendants outside the dataset queue.
 .TP 8n
 \fB\-V\fR
 (V)ery verbose mode, prints debugging messages to stderr and emits end-of-run

@@ -1,8 +1,8 @@
 #!/bin/sh
 #
 # shunit2 tests for src/zxfer_cli.sh: option defaults, switch parsing, and
-# the -z/-Z compression refresh it runs, with the resolver and the remote zfs
-# refresh stubbed. The usage errors of the consistency check and the parser
+# the -z/-Z compression refresh it owns. Parser cases stub the resolver and
+# remote zfs refresh; command lookup is also exercised through the real resolver. The usage errors of the consistency check and the parser
 # are pinned by the golden transcripts in tests/test_contract_cli_golden.sh.
 #
 # shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
@@ -13,6 +13,14 @@ TESTS_DIR=$(dirname "$0")
 . "$TESTS_DIR/test_helper.sh"
 
 zxfer_source_runtime_modules_through "zxfer_cli.sh"
+
+oneTimeSetUp() {
+	zxfer_test_create_tmpdir "zxfer_cli"
+}
+
+oneTimeTearDown() {
+	zxfer_test_cleanup_tmpdir
+}
 
 setUp() {
 	OPTIND=1
@@ -176,6 +184,54 @@ test_refresh_compression_commands_rejects_shell_quoted_decompression_command() {
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Quoted decompression command failures should explain the literal-token requirement." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Decompression command must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
+}
+
+# A blank decompressor is a runtime error; blank -Z is a usage error
+# pinned by the golden CLI suite.
+test_refresh_compression_commands_rejects_a_missing_or_blank_decompress_command() {
+	for l_decompress in "" "   "; do
+		set +e
+		output=$(
+			(
+				zxfer_test_stub_throw_error_to_stdout
+				g_option_z_compress=1
+				g_cmd_compress="zstd -3"
+				g_cmd_decompress=$l_decompress
+				zxfer_refresh_compression_commands
+			)
+		)
+		status=$?
+
+		assertEquals "Compression validation should fail for the decompressor [$l_decompress]." \
+			1 "$status"
+		assertContains "A missing decompressor should use the documented runtime error." \
+			"$output" "Compression requested but decompression command missing."
+	done
+}
+
+test_refresh_compression_commands_resolves_each_head_and_quotes_every_token() {
+	# A -Z command is resolved and quoted token by token, so the shell never
+	# runs the raw string; the decompressor resolves the same way.
+	zstd_dir="$TEST_TMPDIR/custom_pipeline_bin"
+	mkdir -p "$zstd_dir"
+	printf '#!/bin/sh\nexit 0\n' >"$zstd_dir/zstd"
+	chmod 755 "$zstd_dir/zstd"
+
+	result=$(
+		# Restore the real resolver within this case only.
+		zxfer_source_modules_for_tests "$ZXFER_ROOT"
+		g_zxfer_secure_path=$zstd_dir
+		g_option_z_compress=1
+		g_cmd_compress="zstd -3;touch /tmp/pwn"
+		g_cmd_decompress="zstd -d"
+		zxfer_refresh_compression_commands
+		printf 'compress=%s\n' "$g_cmd_compress_safe"
+		printf 'decompress=%s\n' "$g_cmd_decompress_safe"
+	)
+
+	assertEquals "Both heads should resolve on the secure PATH, and every token should be quoted." \
+		"compress='$zstd_dir/zstd' '-3;' 'touch' '/tmp/pwn'
+decompress='$zstd_dir/zstd' '-d'" "$result"
 }
 
 # shellcheck source=tests/shunit2/shunit2

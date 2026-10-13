@@ -183,6 +183,7 @@ The project priority order still applies:
 - For runtime-temp-root artifacts, prefer the current-shell helpers in
   [../src/zxfer_runtime.sh](../src/zxfer_runtime.sh):
   `zxfer_create_runtime_artifact_file`,
+  `zxfer_ensure_runtime_artifact_file`,
   `zxfer_create_private_temp_dir`,
   `zxfer_write_runtime_artifact_file`,
   `zxfer_read_runtime_artifact_file`,
@@ -210,7 +211,7 @@ The project priority order still applies:
   files, not for every atomic publish flow in the tree.
 - Register short-lived background PIDs with `zxfer_register_cleanup_pid`
   (send/receive jobs use the job registry in
-  [../src/zxfer_send_jobs.sh](../src/zxfer_send_jobs.sh)); files under the
+  [../src/zxfer_send_receive.sh](../src/zxfer_send_receive.sh)); files under the
   run root need no registration.
 - Remove temporary files, FIFOs, queues, and cache directories on both success
   and failure paths unless they live under the per-run temp root, which the
@@ -229,7 +230,7 @@ The project priority order still applies:
 
 ```sh
 # Purpose: Allocate one scratch file under the run root, or stop the run.
-# Usage: zxfer_get_temp_file; publishes g_zxfer_temp_file_result.
+# Usage: zxfer_get_temp_file; publishes g_zxfer_runtime_artifact_path_result.
 zxfer_get_temp_file() {
 ```
 

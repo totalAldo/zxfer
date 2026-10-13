@@ -17,7 +17,7 @@ zxfer_test_runtime_fixture_setup() {
 	unset ZXFER_BACKUP_DIR
 	TMPDIR="$TEST_TMPDIR"
 	zxfer_reset_runtime_artifact_state
-	zxfer_reset_send_job_state
+	zxfer_reset_send_receive_state
 	zxfer_reset_cleanup_pid_tracking
 	zxfer_reset_failure_context "unit"
 	zxfer_reset_path_security_state

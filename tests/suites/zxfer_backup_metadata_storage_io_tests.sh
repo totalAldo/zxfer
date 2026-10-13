@@ -7,7 +7,7 @@
 # Stub the ssh transport so a rendered remote program runs locally.
 zxfer_backup_test_stub_local_transport() {
 	zxfer_build_remote_sh_c_command() {
-		g_zxfer_remote_sh_c_command_result=$1
+		g_zxfer_shell_command_result=$1
 		printf '%s\n' "$1"
 	}
 	zxfer_invoke_ssh_shell_command_for_host() { sh -c "$2"; }
@@ -589,7 +589,7 @@ test_list_remote_backup_storage_dirs_needs_find_only_for_an_existing_root_direct
 			(
 				g_zxfer_secure_path=$no_find_bin
 				zxfer_build_remote_sh_c_command() {
-					g_zxfer_remote_sh_c_command_result=$1
+					g_zxfer_shell_command_result=$1
 					printf '%s\n' "$1"
 				}
 				zxfer_invoke_ssh_shell_command_for_host() { sh -c "$2"; }
@@ -611,6 +611,8 @@ test_list_remote_backup_storage_dirs_needs_find_only_for_an_existing_root_direct
 }
 
 test_read_remote_backup_file_maps_program_statuses_to_documented_errors() {
+	zxfer_create_runtime_artifact_file backup-test
+	staging=$g_zxfer_runtime_artifact_path_result
 	# remote status | throw or return:<status> | expected message
 	for case_spec in \
 		"91|throw|Refusing to use backup metadata /tmp/backup.meta on origin.example because its directory is not a private directory owned by root or the ssh user." \
@@ -638,7 +640,7 @@ test_read_remote_backup_file_maps_program_statuses_to_documented_errors() {
 					fi
 					return "$REMOTE_STATUS"
 				}
-				zxfer_read_remote_backup_file "origin.example" "/tmp/backup.meta" source >/dev/null
+				zxfer_read_remote_backup_file "origin.example" "/tmp/backup.meta" source "$staging" >/dev/null
 				printf 'status=%s\n' "$?"
 			) 2>&1
 		)
@@ -654,11 +656,28 @@ test_read_remote_backup_file_maps_program_statuses_to_documented_errors() {
 			zxfer_invoke_ssh_shell_command_for_host() {
 				printf 'remote payload'
 			}
-			zxfer_read_remote_backup_file "origin.example" "/tmp/backup.meta" source >/dev/null
-			printf '%s' "$g_zxfer_backup_file_read_result"
+			zxfer_read_remote_backup_file "origin.example" "/tmp/backup.meta" source "$staging" >/dev/null
+			cat "$staging"
 		)
 	)
 	assertEquals "Successful reads publish the payload." "remote payload" "$result"
+}
+
+test_backup_script_body_emits_literal_bytes_and_preserves_renderer_state() {
+	l_body_input="$TEST_TMPDIR/backup_body.input"
+	l_body_output="$TEST_TMPDIR/backup_body.output"
+	# shellcheck disable=SC2016  # Literal shell syntax must not expand here.
+	printf '%s\n' '  $1; $(touch NEVER); `touch NEVER`;' '' 'printf '\''%s\\n'\'' "quoted";' >"$l_body_input"
+	printf '%s' 'last line without LF;' >>"$l_body_input"
+	g_zxfer_shell_command_result='caller-owned argv'
+	zxfer_print_backup_script_body <"$l_body_input" >"$l_body_output"
+	printf '\n' >>"$l_body_input"
+	assertTrue "Blank lines, indentation, quotes and shell syntax stay literal." \
+		"cmp -s '$l_body_input' '$l_body_output'"
+	assertEquals 'caller-owned argv' "$g_zxfer_shell_command_result"
+	zxfer_print_backup_script_body </dev/null >"$l_body_output"
+	assertEquals "An empty body succeeds without printing a line." 0 "$?"
+	assertFalse "An empty body has no bytes." "[ -s '$l_body_output' ]"
 }
 
 test_remote_backup_protocol_renderers_match_readable_golden_output() {

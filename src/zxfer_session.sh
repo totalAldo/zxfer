@@ -43,7 +43,8 @@
 #   initialization; zxfer_trap_exit also reads g_zxfer_run_umask and the
 #   quoting line constants.
 # writes dependency-owned globals: g_cmd_cat (-e), g_cmd_awk (gawk on SunOS)
-#   and the endpoint g_origin_cmd_compress_safe/g_target_cmd_decompress_safe.
+#   and endpoint codec defaults. Publishes g_origin_cmd_zfs, g_target_cmd_zfs,
+#   g_destination_operating_system and the endpoint-safe codecs directly.
 # mutates caches: invokes each owner module's reset, startup, and cleanup APIs.
 # returns via stdout: none.
 #
@@ -70,13 +71,12 @@ zxfer_reset_session_state() {
 	# Dropping the run-root handles first leaves the snapshot-discovery reset
 	# no owned cache path to remove.
 	zxfer_discard_runtime_cleanup_state
-	zxfer_reset_send_job_state
+	zxfer_reset_send_receive_state
 	zxfer_reset_background_shell_spawn_mode
 	zxfer_reset_ssh_transport_state
 	zxfer_reset_migration_service_state
 	zxfer_reset_profile_state
 	zxfer_reset_replication_runtime_state
-	zxfer_reset_send_receive_state
 	zxfer_reset_destination_existence_cache
 	zxfer_reset_live_destination_listing_state
 	zxfer_reset_snapshot_producer_session_state
@@ -199,31 +199,34 @@ zxfer_trap_exit() {
 # its compression command: the origin compresses, the target decompresses.
 # Usage: zxfer_init_endpoint_execution_context origin|target; called by
 # zxfer_init_variables once g_zxfer_local_os is set. A dry run never contacts
-# the remote host and renders the local command names instead.
+# the remote host and renders the local command names instead. Returns 2
+# for an invalid role, before changing endpoint state.
 zxfer_init_endpoint_execution_context() {
-	if [ "$1" = origin ]; then
+	case "$1" in
+	origin)
 		l_endpoint_host=$g_option_O_origin_host
 		l_endpoint_side=source
 		l_endpoint_zfs=${g_origin_cmd_zfs:-$g_cmd_zfs}
 		l_endpoint_codec=$g_cmd_compress
 		l_endpoint_codec_label="compression command"
 		l_endpoint_codec_safe=${g_origin_cmd_compress_safe:-}
-	else
+		;;
+	target)
 		l_endpoint_host=$g_option_T_target_host
 		l_endpoint_side=destination
 		l_endpoint_zfs=${g_target_cmd_zfs:-$g_cmd_zfs}
 		l_endpoint_codec=$g_cmd_decompress
 		l_endpoint_codec_label="decompression command"
 		l_endpoint_codec_safe=${g_target_cmd_decompress_safe:-}
-	fi
-
-	if [ -z "$l_endpoint_host" ]; then
-		zxfer_publish_endpoint_runtime_context "$1" "$g_zxfer_local_os" "$g_cmd_zfs"
-		return
-	fi
+		;;
+	*) return 2 ;;
+	esac
 
 	l_endpoint_os=""
-	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
+	if [ -z "$l_endpoint_host" ]; then
+		l_endpoint_os=$g_zxfer_local_os
+		l_endpoint_zfs=$g_cmd_zfs
+	elif [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
 		if [ "$g_option_z_compress" -eq 1 ] && [ -z "$l_endpoint_codec_safe" ]; then
 			zxfer_quote_cli_tokens "$l_endpoint_codec" "$l_endpoint_codec_label" ||
 				zxfer_throw_error "$g_zxfer_literal_token_error_result"
@@ -245,12 +248,18 @@ zxfer_init_endpoint_execution_context() {
 		fi
 	fi
 
-	zxfer_publish_endpoint_runtime_context "$1" "$l_endpoint_os" "$l_endpoint_zfs"
-	if [ "$1" = origin ]; then
+	# Publish only after this endpoint's required lookups have all succeeded.
+	case "$1" in
+	origin)
+		g_origin_cmd_zfs=$l_endpoint_zfs
 		g_origin_cmd_compress_safe=$l_endpoint_codec_safe
-	else
+		;;
+	target)
+		g_destination_operating_system=$l_endpoint_os
+		g_target_cmd_zfs=$l_endpoint_zfs
 		g_target_cmd_decompress_safe=$l_endpoint_codec_safe
-	fi
+		;;
+	esac
 }
 
 # Purpose: Resolve the cat helper that -e reads backup metadata with, locally
@@ -310,7 +319,7 @@ zxfer_prepare_remote_host_connections() {
 		fi
 	else
 		zxfer_ensure_local_ssh_command ||
-			zxfer_throw_dependency_error "$g_zxfer_resolved_local_ssh_command_result"
+			zxfer_throw_dependency_error "$g_zxfer_required_tool_result"
 		zxfer_refresh_ssh_control_socket_support_state
 		zxfer_open_ssh_control_sockets
 		if [ -n "$g_option_O_origin_host" ]; then
@@ -331,7 +340,8 @@ zxfer_init_variables() {
 	zxfer_get_os "" >/dev/null ||
 		zxfer_throw_dependency_error "Failed to determine the local operating system." "$?"
 	g_zxfer_local_os=$g_zxfer_os_result
-	zxfer_reset_endpoint_compression_commands
+	g_origin_cmd_compress_safe=$g_cmd_compress_safe
+	g_target_cmd_decompress_safe=$g_cmd_decompress_safe
 	zxfer_init_endpoint_execution_context origin
 	zxfer_init_endpoint_execution_context target
 	zxfer_refresh_remote_zfs_commands

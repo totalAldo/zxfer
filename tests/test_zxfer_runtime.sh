@@ -118,95 +118,101 @@ test_running_test_is_in_sees_the_current_test() {
 		1 "$l_running_test_status"
 }
 
-test_zxfer_create_temp_file_group_publishes_requested_paths() {
-	group_output_file="$TEST_TMPDIR/runtime-temp-group.out"
-
-	zxfer_create_temp_file_group 3 >"$group_output_file"
-	group_status=$?
-	group_count=$(printf '%s\n' "$g_zxfer_temp_file_group_result" | awk 'NF {count++} END {print count + 0}')
-	missing_count=0
-	while IFS= read -r group_path || [ -n "$group_path" ]; do
-		[ -n "$group_path" ] || continue
-		if [ ! -f "$group_path" ]; then
-			missing_count=$((missing_count + 1))
-		fi
-	done <<EOF
+test_runtime_workspace_names_paths_and_preserves_private_creation_state() {
+	(
+		umask 027
+		set -C
+		zxfer_create_runtime_artifact_workspace discovery source-error sorted raw || exit "$?"
+		workspace=$g_zxfer_runtime_artifact_path_result
+		assertEquals "A workspace publishes its primary and every named sibling." \
+			"$workspace
+$workspace.source-error
+$workspace.sorted
+$workspace.raw" "$g_zxfer_temp_file_group_result"
+		while IFS= read -r artifact; do
+			printf '%s\n' "$(zxfer_get_path_mode_octal "$artifact")"
+		done <<EOF
 $g_zxfer_temp_file_group_result
 EOF
-
-	assertEquals "Temp-file group allocation should succeed for a valid count." \
-		0 "$group_status"
-	assertEquals "Temp-file group allocation should publish one path per requested file." \
-		3 "$group_count"
-	assertEquals "Temp-file group allocation should print nothing." \
-		"" "$(cat "$group_output_file")"
-	assertEquals "Temp-file group allocation should create every published file." \
-		0 "$missing_count"
+		printf 'umask=%s\n' "$(umask)"
+		case $- in *C*) printf 'noclobber=on\n' ;; *) printf 'noclobber=off\n' ;; esac
+	) >"$TEST_TMPDIR/workspace-modes.out"
+	output=$(cat "$TEST_TMPDIR/workspace-modes.out")
+	assertEquals "All family files are 0600; the caller's umask and noclobber survive." \
+		"600
+600
+600
+600
+umask=0027
+noclobber=on" "$output"
 }
 
-test_zxfer_create_temp_file_group_cleans_partial_allocations_on_failure() {
+test_runtime_workspace_skips_retained_siblings_and_cleans_only_its_family() {
 	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
-	first_path="$g_zxfer_run_tmp_root/runtime-temp-group-partial-one"
-	second_path="$g_zxfer_run_tmp_root/runtime-temp-group-partial-two"
-	call_count=0
+	# Simulate a subshell whose primary was released but whose raw cache survives.
+	retained="$g_zxfer_run_tmp_root/discovery.1.raw"
+	printf cache >"$retained"
+	g_zxfer_run_tmp_counter=0
+	set -f
+	zxfer_create_runtime_artifact_workspace discovery sorted raw
+	workspace=$g_zxfer_runtime_artifact_path_result
+	case $- in *f*) restored_noglob=yes ;; *) restored_noglob=no ;; esac
+	set +f
+	assertEquals "Namespace collision checks restore the caller's noglob flag." yes "$restored_noglob"
+	assertEquals "A retained sibling makes allocation choose another stem." \
+		"$g_zxfer_run_tmp_root/discovery.2" "$workspace"
+	assertEquals "The previous cache is preserved." cache "$(cat "$retained")"
+	zxfer_cleanup_runtime_artifact_path_list "$g_zxfer_temp_file_group_result" "$workspace.raw"
+	assertEquals "Retention cleanup succeeds." 0 "$?"
+	assertFalse "The primary is released." "[ -e '$workspace' ]"
+	assertFalse "The sort scratch is released." "[ -e '$workspace.sorted' ]"
+	assertTrue "Only the published raw sibling survives." "[ -f '$workspace.raw' ]"
+	assertEquals "Cleanup leaves the other family's cache untouched." cache "$(cat "$retained")"
+}
 
+test_runtime_workspace_rejects_invalid_names_and_fixed_file_collisions() {
+	for invalid_name in '' . .. ../escape 'two words' "bad$ZXFER_TAB"; do
+		g_zxfer_temp_file_group_result=stale
+		g_zxfer_runtime_artifact_path_result=stale
+		zxfer_create_runtime_artifact_workspace discovery "$invalid_name" >/dev/null 2>&1
+		assertEquals "Unsafe workspace names are rejected before allocation." 1 "$?"
+		assertEquals "Rejected names publish no group." "" "$g_zxfer_temp_file_group_result"
+		assertEquals "Rejected names publish no stem." "" "$g_zxfer_runtime_artifact_path_result"
+	done
+	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
+	sentinel="$TEST_TMPDIR/workspace-sentinel"
+	printf untouched >"$sentinel"
+	ln -s "$sentinel" "$g_zxfer_run_tmp_root/discovery.1.raw"
+	zxfer_create_runtime_artifact_file discovery.1 raw >/dev/null 2>&1
+	assertEquals "Fixed named allocation refuses a symlink collision." 1 "$?"
+	assertEquals "A failed allocation publishes nothing." "" "$g_zxfer_runtime_artifact_path_result"
+	assertEquals "No write follows the symlink." untouched "$(cat "$sentinel")"
+}
+
+test_runtime_workspace_partial_failure_preserves_status_and_releases_allocated_paths() {
+	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
+	calls=0
+	# shellcheck disable=SC2120 # Called indirectly by the workspace allocator.
 	zxfer_get_temp_file() {
-		call_count=$((call_count + 1))
-		case "$call_count" in
-		1)
-			g_zxfer_temp_file_result=$first_path
-			: >"$g_zxfer_temp_file_result"
-			return 0
-			;;
-		2)
-			g_zxfer_temp_file_result=$second_path
-			: >"$g_zxfer_temp_file_result"
-			return 0
-			;;
-		esac
-		return 73
+		calls=$((calls + 1))
+		[ "$calls" -ne 3 ] || return 73
+		zxfer_create_runtime_artifact_file "$@"
 	}
-
-	set +e
-	zxfer_create_temp_file_group 4 >/dev/null
-	group_status=$?
+	g_zxfer_temp_file_group_result=stale
+	status=0
+	zxfer_create_runtime_artifact_workspace partial sorted raw || status=$?
 	group_result=$g_zxfer_temp_file_group_result
-	if [ -e "$first_path" ]; then
-		first_exists=yes
-	else
-		first_exists=no
-	fi
-	if [ -e "$second_path" ]; then
-		second_exists=yes
-	else
-		second_exists=no
-	fi
-
+	stem_result=$g_zxfer_runtime_artifact_path_result
+	leaked=0
+	for artifact in "$g_zxfer_run_tmp_root/partial.1" "$g_zxfer_run_tmp_root/partial.1.sorted"; do
+		[ ! -e "$artifact" ] || leaked=$((leaked + 1))
+	done
 	unset -f zxfer_get_temp_file
 	zxfer_source_runtime_modules_through "zxfer_replication.sh"
-	setUp
-
-	assertEquals "Temp-file group allocation should preserve the failed allocation status." \
-		73 "$group_status"
-	assertEquals "Temp-file group allocation should not publish a complete group on failure." \
-		"" "$group_result"
-	assertFalse "Temp-file group allocation should clean the first partial file on failure." \
-		"[ \"$first_exists\" = yes ]"
-	assertFalse "Temp-file group allocation should clean the second partial file on failure." \
-		"[ \"$second_exists\" = yes ]"
-}
-
-test_zxfer_create_temp_file_group_rejects_invalid_counts() {
-	g_zxfer_temp_file_group_result="stale-group"
-
-	set +e
-	zxfer_create_temp_file_group 0 >/dev/null
-	group_status=$?
-
-	assertEquals "Temp-file group allocation should reject zero as an invalid group size." \
-		1 "$group_status"
-	assertEquals "Temp-file group allocation should clear stale group results on invalid input." \
-		"" "$g_zxfer_temp_file_group_result"
+	assertEquals "A partial family preserves the allocation failure status." 73 "$status"
+	assertEquals "A partial family publishes no group." "" "$group_result"
+	assertEquals "A partial family publishes no stem." "" "$stem_result"
+	assertEquals "Every successfully allocated file is released." 0 "$leaked"
 }
 
 test_zxfer_register_cleanup_pid_tracks_direct_children_without_identity_captures() {
@@ -645,7 +651,7 @@ test_zxfer_discard_runtime_cleanup_state_drops_inherited_handles_without_acting_
 	g_zxfer_cleanup_pid_records="424242	operator helper"
 	g_zxfer_effective_tmpdir=$external_root
 	g_zxfer_effective_tmpdir_requested=$external_root
-	g_zxfer_temp_file_result="$external_root/inherited-temp-result"
+	g_zxfer_runtime_artifact_path_result="$external_root/inherited-temp-result"
 
 	zxfer_discard_runtime_cleanup_state
 
@@ -660,7 +666,7 @@ test_zxfer_discard_runtime_cleanup_state_drops_inherited_handles_without_acting_
 	assertEquals "Runtime initialization should discard an inherited effective-temp-directory memo." \
 		"" "$g_zxfer_effective_tmpdir"
 	assertEquals "Runtime initialization should discard inherited temp-file result state." \
-		"" "$g_zxfer_temp_file_result"
+		"" "$g_zxfer_runtime_artifact_path_result"
 }
 
 test_zxfer_remove_run_tmp_root_rejects_a_forged_or_unsafe_owner_shape() {
@@ -778,12 +784,18 @@ test_zxfer_find_default_tmpdir_skips_missing_and_unsafe_candidates() {
 				printf '%s\n' "$physical_tmpdir/default_candidate_missing" "$unsafe_tmp" "$safe_tmp"
 			}
 			zxfer_find_default_tmpdir
-			printf 'status=%s result=%s\n' "$?" "$g_zxfer_default_tmpdir_result"
+			printf 'status=%s result=%s\n' "$?" "$g_zxfer_temp_root_candidate_result"
 			zxfer_list_default_tmpdir_candidates() {
 				printf '%s\n' "$unsafe_tmp"
 			}
 			zxfer_find_default_tmpdir
-			printf 'none=%s result=<%s>\n' "$?" "$g_zxfer_default_tmpdir_result"
+			printf 'none=%s result=<%s>\n' "$?" "$g_zxfer_temp_root_candidate_result"
+			g_zxfer_temp_root_candidate_result=stale
+			zxfer_list_default_tmpdir_candidates() {
+				printf '%s\n' "$physical_tmpdir/default_candidate_missing"
+			}
+			zxfer_find_default_tmpdir
+			printf 'missing_only=%s result=<%s>\n' "$?" "$g_zxfer_temp_root_candidate_result"
 		)
 	)
 	chmod 0700 "$unsafe_tmp"
@@ -792,6 +804,8 @@ test_zxfer_find_default_tmpdir_skips_missing_and_unsafe_candidates() {
 		"$output" "status=0 result=$safe_tmp"
 	assertContains "No safe default candidate should fail with an empty result." \
 		"$output" "none=1 result=<>"
+	assertContains "Missing candidates must not leave a stale validated path." \
+		"$output" "missing_only=1 result=<>"
 }
 
 test_zxfer_run_tmp_root_safe_shape_rejects_untrusted_parent_relationships() {
@@ -937,9 +951,11 @@ test_runtime_artifact_allocators_skip_taken_names_after_subshell_allocations() {
 	# The root exists first, as the eager session root does, so both
 	# substitutions allocate in it rather than each in a root of its own.
 	zxfer_ensure_run_tmp_root || fail "Unable to create the per-run temp root."
-	first_path=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
+	# shellcheck disable=SC2119 # Use the default unnamed allocation in a subshell.
+	first_path=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_runtime_artifact_path_result")
 	printf 'first payload\n' >"$first_path"
-	second_path=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
+	# shellcheck disable=SC2119 # Use the default unnamed allocation in a subshell.
+	second_path=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_runtime_artifact_path_result")
 
 	assertEquals "Both subshell allocations should use the shared run root." \
 		"$g_zxfer_run_tmp_root $g_zxfer_run_tmp_root" "${first_path%/*} ${second_path%/*}"
@@ -1180,24 +1196,7 @@ test_runtime_artifact_allocators_reject_path_components_in_prefixes() {
 		"[ -e '$escape_path' ]"
 }
 
-test_zxfer_cleanup_runtime_artifact_paths_removes_multiple_paths() {
-	zxfer_create_runtime_artifact_file "runtime-cleanup-file" >/dev/null
-	file_path=$g_zxfer_runtime_artifact_path_result
-	zxfer_create_private_temp_dir "runtime-cleanup-dir" >/dev/null
-	dir_path=$g_zxfer_runtime_artifact_path_result
-
-	zxfer_cleanup_runtime_artifact_paths "$file_path" "$dir_path"
-	cleanup_status=$?
-
-	assertEquals "Multi-path runtime artifact cleanup should succeed when every path can be deleted." \
-		0 "$cleanup_status"
-	assertFalse "Multi-path runtime artifact cleanup should remove the files." \
-		"[ -e \"$file_path\" ]"
-	assertFalse "Multi-path runtime artifact cleanup should remove the directories." \
-		"[ -e \"$dir_path\" ]"
-}
-
-test_zxfer_cleanup_runtime_artifact_paths_preserves_failures_when_one_path_cannot_be_removed() {
+test_zxfer_cleanup_runtime_artifact_path_list_preserves_failures_when_one_path_cannot_be_removed() {
 	output_file="$TEST_TMPDIR/runtime_cleanup_paths_failure.out"
 
 	(
@@ -1209,16 +1208,19 @@ test_zxfer_cleanup_runtime_artifact_paths_preserves_failures_when_one_path_canno
 			return 0
 		}
 		set +e
-		zxfer_cleanup_runtime_artifact_paths "fail-path" "ok-path"
+		zxfer_cleanup_runtime_artifact_path_list "
+fail-path
+
+ok-path"
 		status=$?
 		set -e
 		command printf 'status=%s\n' "$status"
 	) >"$output_file"
 	output=$(cat "$output_file")
 
-	assertContains "Multi-path runtime artifact cleanup should still attempt later paths after an earlier failure." \
+	assertContains "List-based runtime artifact cleanup should still attempt later paths after an earlier failure." \
 		"$output" "cleaned=ok-path"
-	assertContains "Multi-path runtime artifact cleanup should return failure when any one path cannot be removed." \
+	assertContains "List-based runtime artifact cleanup should return failure when any one path cannot be removed." \
 		"$output" "status=1"
 }
 
@@ -1256,7 +1258,7 @@ test_runtime_file_list_cleanup_batches_rm_and_retains_unowned_paths() {
 		}
 		zxfer_cleanup_runtime_artifact_path_list "$first_path
 $outside_path
-$second_path"
+$second_path" "$outside_path"
 	)
 	cleanup_status=$?
 	assertEquals "An unowned path makes cleanup fail closed." 1 "$cleanup_status"
@@ -1283,19 +1285,6 @@ $second_path"
 	assertEquals "A partial rm failure is preserved." 1 "$cleanup_status"
 	assertFalse "A file removed before the failure stays removed." "[ -e '$first_path' ]"
 	assertTrue "The failed file remains for whole-root cleanup." "[ -f '$second_path' ]"
-}
-
-test_zxfer_cleanup_runtime_artifact_path_list_and_return_preserves_original_status() {
-	zxfer_create_runtime_artifact_file "runtime-cleanup-list-return" >/dev/null
-	file_path=$g_zxfer_runtime_artifact_path_result
-
-	zxfer_cleanup_runtime_artifact_path_list_and_return 37 "$file_path"
-	cleanup_status=$?
-
-	assertEquals "List cleanup return helper should preserve the caller's original status." \
-		37 "$cleanup_status"
-	assertFalse "List cleanup return helper should still remove listed artifacts." \
-		"[ -e \"$file_path\" ]"
 }
 
 test_zxfer_write_and_read_runtime_artifact_file_preserve_multiline_payloads() {
@@ -1503,6 +1492,43 @@ test_try_get_effective_tmpdir_fails_cleanly_when_no_safe_default_exists() {
 		"status=1
 requested=__ZXFER_DEFAULT_TMPDIR__
 effective=<>" "$output"
+}
+
+# Reuse retains owned bytes and allocation counters; inherited outside paths
+# are never adopted, even when they point to an existing operator file.
+test_runtime_artifact_reuse_keeps_owned_files_and_replaces_outside_paths() {
+	zxfer_ensure_runtime_artifact_file "" reusable || return
+	reusable_file=$g_zxfer_runtime_artifact_path_result
+	printf 'owned bytes\n' >"$reusable_file"
+	allocation_count=$g_zxfer_run_tmp_counter
+	zxfer_ensure_runtime_artifact_file "$reusable_file" reusable || return
+	assertEquals "Reuse should return the owned path without allocating." \
+		"$reusable_file|$allocation_count" "$g_zxfer_runtime_artifact_path_result|$g_zxfer_run_tmp_counter"
+	assertEquals "Reuse must preserve the file's contents." "owned bytes" "$(cat "$reusable_file")"
+
+	outside_file="$TEST_TMPDIR/reusable-operator-file"
+	printf 'operator bytes\n' >"$outside_file"
+	ln -s "$outside_file" "$TEST_TMPDIR/reusable-outside-link"
+	zxfer_ensure_runtime_artifact_file "$TEST_TMPDIR/reusable-outside-link" reusable || return
+	assertNotEquals "An outside path is replaced with a fresh owned file." \
+		"$TEST_TMPDIR/reusable-outside-link" "$g_zxfer_runtime_artifact_path_result"
+	assertContains "The replacement belongs to this run's root." \
+		"$g_zxfer_runtime_artifact_path_result" "$g_zxfer_run_tmp_root/"
+	assertEquals "Replacement files remain owner-only." \
+		600 "$(zxfer_get_path_mode_octal "$g_zxfer_runtime_artifact_path_result")"
+	assertEquals "The outside file is untouched." "operator bytes" "$(cat "$outside_file")"
+}
+
+test_runtime_artifact_reuse_preserves_allocation_failure_status_and_clears_result() {
+	output=$(
+		g_zxfer_runtime_artifact_path_result=stale
+		zxfer_create_runtime_artifact_file() { return 47; }
+		status=0
+		zxfer_ensure_runtime_artifact_file "" reusable || status=$?
+		printf 'status=%s path=<%s>\n' "$status" "$g_zxfer_runtime_artifact_path_result"
+	)
+	assertEquals "A failed allocation has no reusable path and retains its status." \
+		"status=47 path=<>" "$output"
 }
 
 # zxfer-test-fragment: suites/zxfer_runtime_tmpdir_tests.sh

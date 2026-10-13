@@ -221,6 +221,103 @@ test_recursive_discovery_pins_guid_identity_listings() {
 		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
 }
 
+# Invariant: -v identifies the missing snapshot records after exclusions,
+# while empty delta directions, quiet runs and proven no-ops stay silent.
+test_recursive_verbose_delta_lists_missing_snapshots_and_respects_excludes() {
+	planning_setup_env
+	planning_run_zxfer "$FIXTURE_DIR/incremental" -v -x child1 -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "Verbose replication must succeed; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	assertTrue "-v must list the source snapshot identities behind the count" \
+		"grep -Fqx 'Recursive source snapshots absent from destination (name/GUID):' '$CASE_DIR/zxfer.stdout'"
+	while IFS="$ZXFER_TAB" read -r l_snapshot_name l_snapshot_guid; do
+		case $l_snapshot_name in
+		*/child1@* | *@snap1 | *@snap2) continue ;;
+		esac
+		assertTrue "-v must name the missing snapshot $l_snapshot_name" \
+			"grep -Fqx '  $l_snapshot_name (GUID: $l_snapshot_guid)' '$CASE_DIR/zxfer.stdout'"
+	done <"$FIXTURE_DIR/incremental/src_snapshots.list"
+	assertFalse "Excluded snapshots must not appear in the delta details" \
+		"grep -Fq '$ZXFER_MOCKBIN_SOURCE_ROOT/child1@' '$CASE_DIR/zxfer.stdout'"
+	assertFalse "An empty destination-only delta must have no detail section" \
+		"grep -q '^Recursive destination snapshots absent' '$CASE_DIR/zxfer.stdout'"
+}
+
+# Discovery may find an older gap even when the newest snapshot is shared.
+# -v must name the missing identity and the newer anchor that excludes it;
+# quiet mode and -g preflight must keep the same send/delete decisions.
+test_verbose_explains_old_missing_snapshots_without_backfilling_them() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/noop" older_gap
+	for l_gap_file in dst_snapshots.list dst_d1_0.list; do
+		grep -v "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap1" "$FIXTURE_DIR/noop/$l_gap_file" \
+			>"$STATE_DIR/$l_gap_file" || fail "Unable to create the older snapshot gap."
+	done
+	for l_gap_mode in verbose quiet grandfather; do
+		: >"$ZFS_LOG"
+		set --
+		case $l_gap_mode in
+		verbose) set -- -v ;;
+		grandfather) set -- -v -g 1 ;;
+		esac
+		planning_run_zxfer "$STATE_DIR" "$@" -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		l_run_status=$?
+		assertEquals "An older gap must remain a safe no-send run [mode:$l_gap_mode]; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
+			0 "$l_run_status"
+		planning_assert_no_mutations
+		planning_assert_no_send_receive
+		if [ "$l_gap_mode" = quiet ]; then
+			assertFalse "Quiet mode must not print skip reasons." "[ -s '$CASE_DIR/zxfer.stdout' ]"
+			continue
+		fi
+		assertEquals "The older missing snapshot must be explained once, including with -g." 1 \
+			"$(grep -Fc "  $ZXFER_MOCKBIN_SOURCE_ROOT@snap1 (GUID: 1000000001000000007): before newest common snapshot $ZXFER_MOCKBIN_SOURCE_ROOT@snap3 (GUID: 1000000003000000007) in source creation order; older gaps are not backfilled." "$CASE_DIR/zxfer.stdout")"
+		assertTrue "The dataset no-send message must identify the shared newest snapshot." \
+			"grep -Fqx 'No new snapshots to transfer for [$ZXFER_MOCKBIN_SOURCE_ROOT] -> [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT]: newest listed source snapshot is already shared: $ZXFER_MOCKBIN_SOURCE_ROOT@snap3 (GUID: 1000000003000000007).' '$CASE_DIR/zxfer.stdout'"
+	done
+}
+
+test_verbose_explains_an_old_gap_while_transferring_newer_snapshots() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" older_gap_and_newer_work
+	for l_gap_file in dst_snapshots.list dst_d1_0.list; do
+		grep -v "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap1" "$FIXTURE_DIR/incremental/$l_gap_file" \
+			>"$STATE_DIR/$l_gap_file" || fail "Unable to create the older snapshot gap."
+	done
+	planning_run_zxfer "$STATE_DIR" -v -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	l_run_status=$?
+	assertEquals "The newer snapshots must still transfer; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
+	assertTrue "-v must explain the skipped older snapshot using the actual shared anchor." \
+		"grep -Fq '$ZXFER_MOCKBIN_SOURCE_ROOT@snap1 (GUID: 1000000001000000007): before newest common snapshot $ZXFER_MOCKBIN_SOURCE_ROOT@snap2 (GUID: 1000000002000000007)' '$CASE_DIR/zxfer.stdout'"
+	planning_assert_log_has_line "send -I $ZXFER_MOCKBIN_SOURCE_ROOT@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT@snap3"
+	assertEquals "All three datasets still transfer exactly once." 3 "$(grep -c '^send ' "$ZFS_LOG")"
+	assertFalse "The explanation must not claim that a transferring dataset has no new snapshots." \
+		"grep -q '^No new snapshots to transfer for' '$CASE_DIR/zxfer.stdout'"
+	planning_assert_no_mutations
+}
+
+test_recursive_delta_details_are_silent_without_verbose_or_without_differences() {
+	planning_setup_env
+	for l_delta_mode in quiet noop; do
+		set -- "$FIXTURE_DIR/incremental"
+		[ "$l_delta_mode" != noop ] || set -- "$FIXTURE_DIR/noop" -v
+		planning_run_zxfer "$@" -R \
+			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		assertEquals "Replication must succeed [mode:$l_delta_mode]." 0 $?
+		assertFalse "Delta details must stay silent [mode:$l_delta_mode]." \
+			"grep -q '^Recursive .*snapshots absent' '$CASE_DIR/zxfer.stdout'"
+		if [ "$l_delta_mode" = noop ]; then
+			assertEquals "A proven no-op must name the source once in its discovery message." 1 \
+				"$(grep -Fxc "No new snapshots to transfer during discovery for [$ZXFER_MOCKBIN_SOURCE_ROOT]." "$CASE_DIR/zxfer.stdout")"
+			assertFalse "The concise discovery message must replace both old lines." \
+				"grep -Eq '^Snapshot discovery for|^No new snapshots to transfer\\.$' '$CASE_DIR/zxfer.stdout'"
+		fi
+	done
+}
+
 # Invariant: identical source/destination guid sets are a proven no-op —
 # exit 0 with zero mutating, send, or receive argv. Since Phase 8 the fast
 # recursive proof covers local sources too: a clean no-op is proven from the
@@ -456,7 +553,7 @@ test_same_name_divergent_guid_fails_closed_without_d_and_f() {
 		planning_make_destination_diverged
 
 		# shellcheck disable=SC2086  # flag word is intentionally unquoted
-		planning_run_zxfer "$STATE_DIR" $l_guiddiv_flags -R \
+		planning_run_zxfer "$STATE_DIR" $l_guiddiv_flags -v -R \
 			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 		assertEquals "divergence without both -d and -F must fail closed [flags:$l_guiddiv_flags]" \
 			1 $?
@@ -471,6 +568,12 @@ test_same_name_divergent_guid_fails_closed_without_d_and_f() {
 			"Destination dataset [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT] has diverged from source dataset [$ZXFER_MOCKBIN_SOURCE_ROOT]"
 		assertTrue "the fail-closed error should state the -d -F remediation [flags:$l_guiddiv_flags]" \
 			"grep -Fq 'Re-run with BOTH -d and -F' '$CASE_DIR/zxfer.stderr'"
+		assertTrue "-v must show the source identity behind the same-name mismatch" \
+			"grep -Fqx '  $ZXFER_MOCKBIN_SOURCE_ROOT@snap3 (GUID: 1000000003000000007)' '$CASE_DIR/zxfer.stdout'"
+		assertTrue "-v must show the conflicting destination identity using its destination path" \
+			"grep -Fqx '  $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap3 (GUID: 9999900003000000007)' '$CASE_DIR/zxfer.stdout'"
+		assertFalse "A blocked divergence must not be described as a successful no-send decision." \
+			"grep -q '^No new snapshots to transfer for' '$CASE_DIR/zxfer.stdout'"
 	done
 }
 
@@ -602,7 +705,7 @@ test_delete_option_live_destroys_only_extra_destination_snapshot() {
 	planning_clone_state "$FIXTURE_DIR/noop" extradst_live
 	planning_add_extra_destination_snapshot
 
-	planning_run_zxfer "$STATE_DIR" -d -R \
+	planning_run_zxfer "$STATE_DIR" -v -d -R \
 		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
 	assertEquals "-d live run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
@@ -616,6 +719,8 @@ test_delete_option_live_destroys_only_extra_destination_snapshot() {
 		"grep -q '^send ' '$ZFS_LOG'"
 	assertTrue "deletion planning should query candidate creation times" \
 		"grep -q '^get -H -o name,value -p creation $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@' '$ZFS_LOG'"
+	assertTrue "-v must identify the extra snapshot using its actual destination path" \
+		"grep -Fqx '  $ZXFER_MOCKBIN_DEST_MAPPED_ROOT@snap9 (GUID: 9999900009000000007)' '$CASE_DIR/zxfer.stdout'"
 }
 
 # Invariant: target-only datasets and their snapshots are preserved, including
@@ -1174,6 +1279,25 @@ test_guidless_source_row_fails_its_dataset_plan_closed() {
 		"grep -Fqx 'failure_stage: replication' '$CASE_DIR/zxfer.stderr'"
 	assertFalse "nothing may be received into the dataset with the guid-less row" \
 		"grep -q '^receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1\$' '$ZFS_LOG'"
+	planning_assert_log_has_line "receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
+	planning_assert_no_mutations
+}
+
+# A prepared identity failure is still refused during -g preflight, before
+# any earlier dataset sends, using the same dataset diagnostic and status.
+test_grandfather_preflight_refuses_deferred_guidless_identity_before_any_send() {
+	planning_setup_env
+	planning_clone_state "$FIXTURE_DIR/incremental" preflight_guidless
+	awk -F'\t' -v row="$ZXFER_MOCKBIN_SOURCE_ROOT/child1@snap3" \
+		'$1 == row { print $1; next } { print }' \
+		"$FIXTURE_DIR/incremental/src_snapshots.list" >"$STATE_DIR/src_snapshots.list" ||
+		fail "Unable to strip the child snapshot GUID."
+	planning_run_zxfer "$STATE_DIR" -g 1 -R \
+		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	assertEquals "Preflight preserves the deferred identity status." 3 "$?"
+	planning_assert_failure_report replication \
+		"Failed to determine the last common snapshot for [$ZXFER_MOCKBIN_SOURCE_ROOT/child1] and [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1]."
+	planning_assert_no_send_receive
 	planning_assert_no_mutations
 }
 
@@ -1236,7 +1360,7 @@ test_prefix_snapshot_names_never_match_as_prefixes() {
 test_nonrecursive_option_replicates_only_the_named_dataset() {
 	planning_setup_env
 
-	planning_run_zxfer "$FIXTURE_DIR/incremental" -N \
+	planning_run_zxfer "$FIXTURE_DIR/incremental" -v -N \
 		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
 	assertEquals "-N run should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
@@ -1248,6 +1372,8 @@ test_nonrecursive_option_replicates_only_the_named_dataset() {
 		1 "$(grep -c '^send ' "$ZFS_LOG")"
 	assertEquals "-N must receive only the named dataset" \
 		1 "$(grep -c '^receive ' "$ZFS_LOG")"
+	assertEquals "-v must explain why both listed descendant snapshots are outside the -N queue." 2 \
+		"$(grep -Fc "    Not scheduled: nonrecursive mode (-N) selects only [$ZXFER_MOCKBIN_SOURCE_ROOT]; this descendant is outside the dataset queue." "$CASE_DIR/zxfer.stdout")"
 	planning_assert_no_mutations
 }
 
@@ -1642,7 +1768,7 @@ test_delete_option_rechecks_the_source_before_deleting_every_destination_snapsho
 
 	planning_clone_state "$FIXTURE_DIR/noop" wipe_live
 	planning_empty_child1_source_listing "$l_wipe_source@snap1" 0
-	planning_run_zxfer "$STATE_DIR" -d -R \
+	planning_run_zxfer "$STATE_DIR" -v -d -R \
 		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
 	assertEquals "a skipped wipe should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
@@ -1650,7 +1776,10 @@ test_delete_option_rechecks_the_source_before_deleting_every_destination_snapsho
 	planning_assert_log_has_line "list -H -d 1 -o name -t snapshot $l_wipe_source"
 	assertTrue "the skip must warn that the cached source listing was incomplete" \
 		"grep -Fq 'WARNING: skipping destination snapshot deletion for [$l_wipe_source]' '$CASE_DIR/zxfer.stderr'"
+	assertTrue "The no-send reason must describe the discovery listing, not claim proven source absence." \
+		"grep -Fqx 'No new snapshots to transfer for [$l_wipe_source] -> [$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1]: no source snapshots were listed for this dataset in discovery.' '$CASE_DIR/zxfer.stdout'"
 	planning_assert_no_mutations
+	planning_assert_no_send_receive
 
 	for l_wipe_case in empty noise; do
 		: >"$ZFS_LOG"
@@ -2058,12 +2187,16 @@ test_sunos_ambiguous_existence_probes_decide_from_recursive_listings() {
 	# os|parent rows|status|pool rows|status|outcome: "seed" or the message.
 	for l_amb_row in \
 		"SunOS|$l_amb_parent|0|-|0|seed" \
+		"SunOS|$l_amb_parent,${l_amb_root}ish|0|-|0|seed" \
 		"SunOS|$l_amb_parent,$l_amb_root|0|-|0|Failed to retrieve snapshot list from the destination." \
+		"SunOS|-|0|-|0|$l_amb_unknown: parent recursive listing for [$l_amb_parent] did not contain the parent dataset." \
 		"SunOS|otherpool/other|0|-|0|$l_amb_unknown: parent recursive listing for [$l_amb_parent] did not contain the parent dataset." \
+		"SunOS|$l_amb_parent|37|-|0|$l_amb_failed: $l_amb_parent" \
 		"SunOS|permission denied|1|-|0|$l_amb_failed: permission denied" \
 		"SunOS|cannot open '$l_amb_parent': dataset does not exist|1|-|0|seed" \
 		"SunOS|-|1|$l_amb_pool|0|seed" \
 		"SunOS|-|1|-|1|$l_amb_failed." \
+		"SunOS|-|1|permission denied|1|$l_amb_failed." \
 		"SunOS|-|1|$l_amb_pool,$l_amb_parent|0|$l_amb_failed." \
 		"SunOS|-|1|otherpool|0|$l_amb_failed." \
 		"SunOS|-|1|cannot open '$l_amb_pool': no such pool or dataset|1|seed" \
@@ -2343,7 +2476,7 @@ EOF_PARALLEL
 	assertEquals "the proof must cost exactly the two identity listings; zfs log: $(cat "$ZFS_LOG")" \
 		2 "$(wc -l <"$ZFS_LOG" | tr -d ' ')"
 	assertTrue "-v must report that nothing needs transfer" \
-		"grep -Fqx 'No new snapshots to transfer.' '$CASE_DIR/zxfer.stdout'"
+		"grep -Fqx 'No new snapshots to transfer during discovery for [$ZXFER_MOCKBIN_SOURCE_ROOT].' '$CASE_DIR/zxfer.stdout'"
 
 	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
@@ -2375,8 +2508,10 @@ EOF_PARALLEL
 		0 "$l_run_status"
 	planning_assert_log_has_line \
 		"list -Hr -o name,guid -s creation -t snapshot $ZXFER_MOCKBIN_SOURCE_ROOT"
-	assertTrue "-v must report that nothing needs transfer after the fallback" \
-		"grep -Fqx 'No new snapshots to transfer.' '$CASE_DIR/zxfer.stdout'"
+	assertEquals "Full discovery must name the source once after exclusions." 1 \
+		"$(grep -Fxc "No new snapshots to transfer during discovery for [$ZXFER_MOCKBIN_SOURCE_ROOT]." "$CASE_DIR/zxfer.stdout")"
+	assertFalse "Full discovery must replace both old no-send lines." \
+		"grep -Eq '^Snapshot discovery for|^No new snapshots to transfer\\.$' '$CASE_DIR/zxfer.stdout'"
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
 
@@ -2389,7 +2524,7 @@ EOF_PARALLEL
 	assertFalse "full discovery must drop excluded records before it reports a delta; stdout: $(cat "$CASE_DIR/zxfer.stdout")" \
 		"grep -q 'Recursive snapshot delta summary' '$CASE_DIR/zxfer.stdout'"
 	assertTrue "-v must report that nothing needs transfer" \
-		"grep -Fqx 'No new snapshots to transfer.' '$CASE_DIR/zxfer.stdout'"
+		"grep -Fqx 'No new snapshots to transfer during discovery for [$ZXFER_MOCKBIN_SOURCE_ROOT].' '$CASE_DIR/zxfer.stdout'"
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
 }
@@ -2543,7 +2678,7 @@ test_parallel_jobs_very_verbose_reports_the_delta_profile_and_job_count() {
 	assertEquals "-j -V must replicate the tree; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
 		0 "$l_run_status"
 	assertEquals "the delta summary must count exactly the missing snapshots" \
-		"Recursive snapshot delta summary: source_missing_snapshots=3 destination_extra_snapshots=0 source_datasets=3 destination_extra_datasets=0" \
+		"Recursive snapshot delta summary: snapshots_missing_on_destination=3 snapshots_missing_on_source=0 source_datasets=3 destination_extra_datasets=0" \
 		"$(grep '^Recursive snapshot delta summary' "$CASE_DIR/zxfer.stdout")"
 	assertEquals "-v must name every queued dataset" \
 		"Recursive source datasets queued for transfer:

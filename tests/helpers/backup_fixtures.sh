@@ -71,15 +71,34 @@ zxfer_test_backup_metadata_row() {
 	printf '%s\t%s\n' "$l_relative_path" "$l_properties"
 }
 
-# Purpose: Load -e rows as startup does once it has validated the file:
-# render current-format contents for the roots and store their rows.
-# Usage: zxfer_test_load_backup_restore_rows SOURCE_ROOT DESTINATION_ROOT
-# ROW...; needs a run root. Returns the loader's status.
+# Publish a validated metadata view as the restore entrypoint does.
+zxfer_test_publish_backup_restore_view() {
+	g_zxfer_backup_restore_row_dir=${g_zxfer_backup_view_result%%"$ZXFER_LF"*}
+	l_test_restore_view=${g_zxfer_backup_view_result#*"$ZXFER_LF"}
+	g_zxfer_backup_restore_source_root=${l_test_restore_view%%"$ZXFER_LF"*}
+	l_test_restore_view=${l_test_restore_view#*"$ZXFER_LF"}
+	g_zxfer_backup_restore_destination_root=${l_test_restore_view%%"$ZXFER_LF"*}
+	g_zxfer_backup_restore_index=$ZXFER_LF${l_test_restore_view#*"$ZXFER_LF"}
+}
+
+# Check an arbitrary file's grammar and pair lookup through the shared loader.
+zxfer_test_check_metadata_pair() {
+	zxfer_create_runtime_artifact_file metadata-fixture || return
+	l_test_metadata_file=$g_zxfer_runtime_artifact_path_result
+	zxfer_write_runtime_artifact_file "$l_test_metadata_file" "$1" || return
+	zxfer_load_backup_metadata_view "$l_test_metadata_file" "$2" "$3" || return
+	zxfer_test_publish_backup_restore_view
+	zxfer_find_restored_backup_properties "$2" "$3" || return
+	printf '%s\n' "$g_zxfer_property_row_payload_result"
+}
+
+# Render and load the view used by focused restore lookup tests.
 zxfer_test_load_backup_restore_rows() {
 	ZXFER_TEST_BACKUP_SOURCE_ROOT=$1
 	ZXFER_TEST_BACKUP_DESTINATION_ROOT=$2
 	shift 2
-	set -- "$(zxfer_test_render_current_backup_metadata_contents "$@")"
+	set -- "$(zxfer_test_render_current_backup_metadata_contents "$@")" \
+		"$ZXFER_TEST_BACKUP_SOURCE_ROOT" "$ZXFER_TEST_BACKUP_DESTINATION_ROOT"
 	unset ZXFER_TEST_BACKUP_SOURCE_ROOT ZXFER_TEST_BACKUP_DESTINATION_ROOT
-	zxfer_load_backup_restore_rows "$1"
+	zxfer_test_check_metadata_pair "$@" >/dev/null
 }

@@ -7,6 +7,43 @@
 # black-box in tests/test_contract_remote.sh.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
+# Required-tool results are transient: another lookup may overwrite the channel
+# between uses of ssh. Cache hits must republish it, and failures must leave no
+# command cached so a later attempt can retry.
+test_local_ssh_lookup_publishes_paths_and_errors_without_an_alias() {
+	result=$(
+		g_cmd_ssh=""
+		l_ssh_lookup_test_calls=0
+		zxfer_find_required_tool() {
+			l_ssh_lookup_test_calls=$((l_ssh_lookup_test_calls + 1))
+			if [ "$l_ssh_lookup_test_calls" -eq 2 ]; then
+				g_zxfer_required_tool_result="ssh lookup failed"
+				return 37
+			fi
+			g_zxfer_required_tool_result="/trusted/ssh"
+		}
+		g_zxfer_required_tool_result=stale
+		zxfer_ensure_local_ssh_command || exit 11
+		printf 'lookup=%s|%s|%s\n' "$g_zxfer_required_tool_result" "$g_cmd_ssh" "$l_ssh_lookup_test_calls"
+		g_zxfer_required_tool_result="another helper"
+		zxfer_ensure_local_ssh_command || exit 12
+		printf 'cached=%s|%s\n' "$g_zxfer_required_tool_result" "$l_ssh_lookup_test_calls"
+		g_cmd_ssh=""
+		g_zxfer_required_tool_result=stale
+		zxfer_ensure_local_ssh_command
+		printf 'failed=%s|%s|%s|%s\n' "$?" "$g_zxfer_required_tool_result" "$g_cmd_ssh" "$l_ssh_lookup_test_calls"
+		zxfer_ensure_local_ssh_command || exit 13
+		printf 'retry=%s|%s|%s\n' "$g_zxfer_required_tool_result" "$g_cmd_ssh" "$l_ssh_lookup_test_calls"
+	)
+	status=$?
+
+	assertEquals "Successful lookups and cache hits should publish paths; failure should preserve its diagnostic and allow retry." \
+		"0|lookup=/trusted/ssh|/trusted/ssh|1
+cached=/trusted/ssh|1
+failed=1|ssh lookup failed||2
+retry=/trusted/ssh|/trusted/ssh|3" "$status|$result"
+}
+
 # Run zxfer_ensure_ssh_control_socket_dir in a subshell for one failure CASE
 # of the short-directory fallback under ROOT, and print
 # "CASE=STATUS handle=<SHORT_DIR> dir=<RESULT>".
@@ -27,9 +64,9 @@ zxfer_test_socket_dir_failure_case() {
 		}
 		zxfer_find_default_tmpdir() {
 			[ "$l_case" != no_default_root ] || return 1
-			g_zxfer_default_tmpdir_result=$l_root/default
+			g_zxfer_temp_root_candidate_result=$l_root/default
 			[ "$l_case" != mktemp_fails ] ||
-				g_zxfer_default_tmpdir_result=$l_root/missing-parent
+				g_zxfer_temp_root_candidate_result=$l_root/missing-parent
 		}
 		[ "$l_case" != foreign_answer ] || PATH="$l_root/fake-mktemp:$PATH"
 		zxfer_ensure_ssh_control_socket_dir

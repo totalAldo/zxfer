@@ -173,13 +173,12 @@ test_failed_source_discovery_wait_stops_descendants_after_group_leader_exit() {
 					printf 'status=%s records=<%s>\n' \
 						"$fast_wait_status" "$g_zxfer_cleanup_pid_records"
 				else
-					g_source_snapshot_list_pid=$source_pid
-					source_file="$g_zxfer_run_tmp_root/source"
-					error_file="$g_zxfer_run_tmp_root/error"
-					destination_file="$g_zxfer_run_tmp_root/destination"
-					sorted_file="$g_zxfer_run_tmp_root/sorted"
-					printf 'source listing failed\n' >"$error_file"
-					zxfer_wait_for_full_source_snapshot_discovery "$source_file" "$error_file" ""
+					zxfer_write_source_snapshot_list_to_file() {
+						g_source_snapshot_list_pid=$source_pid
+						printf 'source listing failed\n' >"$2"
+					}
+					zxfer_write_destination_snapshot_list_to_files() { :; }
+					zxfer_run_full_snapshot_discovery
 					full_wait_status=$?
 					printf 'status=%s records=<%s> diagnostic=<%s>\n' \
 						"$full_wait_status" "$g_zxfer_cleanup_pid_records" "$g_zxfer_snapshot_discovery_failure_result"
@@ -267,13 +266,11 @@ test_failed_source_discovery_never_signals_a_reaped_producer_pid() {
 					zxfer_wait_for_snapshot_discovery_producer "$VICTIM" "" source
 					;;
 				full)
-					g_source_snapshot_list_pid=$VICTIM
-					source_file="$g_zxfer_run_tmp_root/source"
-					error_file="$g_zxfer_run_tmp_root/error"
-					destination_file="$g_zxfer_run_tmp_root/destination"
-					sorted_file="$g_zxfer_run_tmp_root/sorted"
-					: >"$error_file"
-					zxfer_wait_for_full_source_snapshot_discovery "$source_file" "$error_file" ""
+					zxfer_write_source_snapshot_list_to_file() {
+						g_source_snapshot_list_pid=$VICTIM
+					}
+					zxfer_write_destination_snapshot_list_to_files() { :; }
+					zxfer_run_full_snapshot_discovery
 					;;
 				deststart)
 					zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
@@ -314,20 +311,6 @@ test_snapshot_discovery_need_helpers_cover_recursive_shortcuts() {
 			g_option_U_skip_unsupported_properties=0
 
 			g_recursive_source_list="tank/src"
-			zxfer_snapshot_discovery_needs_record_caches
-			printf 'record_source=%s\n' "$?"
-			g_recursive_source_list=""
-			g_option_d_delete_destination_snapshots=1
-			g_recursive_destination_extra_dataset_list="tank/src"
-			zxfer_snapshot_discovery_needs_record_caches
-			printf 'record_delete=%s\n' "$?"
-			g_recursive_destination_extra_dataset_list=""
-			g_option_d_delete_destination_snapshots=0
-			g_option_o_override_property="compression=lz4"
-			zxfer_snapshot_discovery_needs_record_caches
-			printf 'record_props=%s\n' "$?"
-
-			g_recursive_source_list="tank/src"
 			zxfer_snapshot_discovery_needs_destination_dataset_inventory
 			printf 'dest_source=%s\n' "$?"
 			g_recursive_source_list=""
@@ -350,12 +333,6 @@ test_snapshot_discovery_need_helpers_cover_recursive_shortcuts() {
 		"$output" "source_unsupported_noop=1"
 	assertContains "Unsupported-property scanning should require source dataset inventory when source work may need create filtering." \
 		"$output" "source_unsupported_work=0"
-	assertContains "Pending transfers should retain snapshot record caches." \
-		"$output" "record_source=0"
-	assertContains "Pending delete inspection should retain snapshot record caches." \
-		"$output" "record_delete=0"
-	assertContains "Property work should retain snapshot record caches." \
-		"$output" "record_props=0"
 	assertContains "Pending transfers should require destination dataset inventory." \
 		"$output" "dest_source=0"
 	assertContains "Pending destination deletes should require destination dataset inventory." \
@@ -404,11 +381,80 @@ test_report_recursive_snapshot_delta_counts_lists_larger_than_argument_limits() 
 
 	assertEquals "Reporting a large recursive delta should succeed." 0 "$status"
 	assertContains "Verbose output should keep the delta summary for a source list larger than the argument limits." \
-		"$output" "Recursive snapshot delta summary: source_missing_snapshots=3 destination_extra_snapshots=1 source_datasets=20000 destination_extra_datasets=2"
+		"$output" "Recursive snapshot delta summary: snapshots_missing_on_destination=3 snapshots_missing_on_source=1 source_datasets=20000 destination_extra_datasets=2"
 	assertContains "Very verbose output should count every source dataset." \
 		"$output" "Source dataset count: 20000"
 	assertEquals "Reporting a large recursive delta should not write to stderr." \
 		"" "$(cat "$stderr_file")"
+}
+
+test_report_recursive_snapshot_delta_preserves_literal_names_guids_and_destination_mapping() {
+	missing_file="$TEST_TMPDIR/literal_delta_missing.txt"
+	extra_file="$TEST_TMPDIR/literal_delta_extra.txt"
+	l_snapshot_tail='child with spaces@snap\c%literal'
+	printf 'tank/src/%s\t18446744073709551615\n' "$l_snapshot_tail" >"$missing_file"
+	printf 'tank/src/%s\t18446744073709551614\n' "$l_snapshot_tail" >"$extra_file"
+	g_recursive_source_list='tank/src/child with spaces'
+	g_recursive_destination_extra_dataset_list=$g_recursive_source_list
+	g_option_v_verbose=1
+
+	for l_trailing_slash in 0 1; do
+		g_initial_source_had_trailing_slash=$l_trailing_slash
+		l_destination_root=backup/dst
+		[ "$l_trailing_slash" -eq 1 ] || l_destination_root=$l_destination_root/src
+		output=$(zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file")
+		assertContains "The normal verbose summary must name both missing sides and count GUID conflicts." \
+			"$output" "Recursive snapshot delta summary: snapshots_missing_on_destination=1 snapshots_missing_on_source=1 source_datasets=1 destination_extra_datasets=1"
+		assertContains "Source names and maximum-width GUIDs must print literally." \
+			"$output" "  tank/src/$l_snapshot_tail (GUID: 18446744073709551615)"
+		assertContains "Destination records must show the actual mapped path [trailing slash:$l_trailing_slash]." \
+			"$output" "  $l_destination_root/$l_snapshot_tail (GUID: 18446744073709551614)"
+	done
+}
+
+test_nonrecursive_delta_skip_reasons_respect_exact_destination_cleanup_queue_membership() {
+	missing_file="$TEST_TMPDIR/nonrecursive_missing.txt"
+	extra_file="$TEST_TMPDIR/nonrecursive_extra.txt"
+	printf 'tank/src/child@s1\t1\n' >"$missing_file"
+	printf 'tank/src/child@s0\t0\n' >"$extra_file"
+	g_option_v_verbose=1
+	g_option_d_delete_destination_snapshots=1
+	g_recursive_source_list=tank/src/child
+	for l_cleanup_dataset in tank/src/child tank/src/childish tank/src; do
+		g_recursive_destination_extra_dataset_list=$l_cleanup_dataset
+		output=$(zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file")
+		if [ "$l_cleanup_dataset" = tank/src/child ]; then
+			assertNotContains "A descendant that cleanup will visit must not be labeled skipped." \
+				"$output" "Not scheduled: nonrecursive mode"
+		else
+			assertContains "Cleanup membership must use literal full dataset names [$l_cleanup_dataset]." \
+				"$output" "Not scheduled: nonrecursive mode"
+		fi
+	done
+}
+
+test_report_recursive_snapshot_delta_fails_closed_when_counted_records_disappear() {
+	missing_file="$TEST_TMPDIR/delta_read_failure_missing.txt"
+	extra_file="$TEST_TMPDIR/delta_read_failure_extra.txt"
+	fake_awk="$TEST_TMPDIR/delta_read_failure_awk.sh"
+	stdout_file="$TEST_TMPDIR/delta_read_failure.stdout"
+	stderr_file="$TEST_TMPDIR/delta_read_failure.stderr"
+	printf 'tank/src@s1\t123\n' >"$missing_file"
+	: >"$extra_file"
+	cat >"$fake_awk" <<'EOF'
+#!/bin/sh
+rm "$2" || exit 7
+printf '1 0 1 0\n'
+EOF
+	chmod +x "$fake_awk"
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
+		g_cmd_awk='$fake_awk'
+		g_option_v_verbose=1
+		zxfer_report_recursive_snapshot_delta '$missing_file' '$extra_file'
+	"
+	assertEquals "A delta file lost after counting must fail closed." 1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "An unreadable delta must report which side failed on stderr." \
+		"$(cat "$stderr_file")" "Failed to read the recursive source snapshot delta."
 }
 
 test_report_recursive_snapshot_delta_fails_closed_when_counting_fails() {

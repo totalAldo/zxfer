@@ -114,6 +114,12 @@ has one) and reads each forwarded alias found there with `id`, `ls`, `awk` and
 `cat`. `-T` destination discovery runs no script: it needs only the resolved
 target `zfs`.
 
+Local helper lookup and resolved-path validation live in the dependency module.
+Remote hosts coordinate local or remote command-head resolution and quoting;
+CLI prepares the local `-z`/`-Z` commands before any SSH connection. Session
+initialization publishes each endpoint's OS, zfs path and codec after its
+required lookups succeed. This ownership adds no tools or remote probes.
+
 ## Direct Integration Harness Dependencies
 
 These tools are used by [run_integration_zxfer.sh](../tests/run_integration_zxfer.sh),

@@ -109,7 +109,6 @@ test_zxfer_session_initialize_discards_inherited_cleanup_handles_before_early_fa
 			g_option_T_target_host="operator@target"
 			g_ssh_origin_control_socket="$external_root/origin.sock"
 			g_ssh_target_control_socket="$external_root/target.sock"
-			g_services_need_relaunch=1
 			g_zxfer_services_to_restart="svc:/operator/service:default"
 			g_zxfer_run_tmp_root=$external_root
 			g_zxfer_owned_run_tmp_root=$external_root

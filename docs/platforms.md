@@ -223,6 +223,17 @@ resolved target `zfs` over the target's control master, so discovery needs
 only `zfs` on the target: no `mktemp`, `grep`, `rm` or `cat`. Local and
 `-T` destination discovery share one code path.
 
+On SunOS (Solaris/illumos), an exact destination existence probe can fail
+without a diagnostic. zxfer resolves that case with one recursive
+parent-to-pool listing loop. A listing naming the requested dataset proves
+presence. A successful listing naming the probed parent while omitting its
+child, or a recognized missing-dataset diagnostic, proves absence.
+Whitespace-only failures advance to another ancestor. An operational
+error or incomplete listing fails closed, retaining the first parent's
+diagnostic and the existing `-V` trace labels. Literal line membership uses
+shell builtins, so the fallback needs no local `grep` processes. Other
+platforms continue to fail closed on an ambiguous exact probe.
+
 Recursive property prefetch (`-P` and related options) uses
 `zfs get -r -t filesystem,volume`. OpenZFS on Linux, FreeBSD, and macOS, and
 illumos support `-t`; on a platform that rejects it, the tree read fails and

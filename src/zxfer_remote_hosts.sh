@@ -40,10 +40,11 @@
 # owns globals: one capability slot per role, g_origin_remote_capabilities_*
 #   and g_target_remote_capabilities_* (host, tools, os, tool_records); the
 #   selected slot g_zxfer_remote_capability_slot_result, parser scratch OS and
-#   tool records, and tool lookup results; the
+#   tool records, and g_zxfer_resolved_cli_command_result (a resolved,
+#   quoted local or remote command, or its lookup diagnostic); the
 #   probe results g_zxfer_remote_probe_stdout, _stderr and _capture_failed;
-#   and the destination's g_destination_operating_system and
-#   g_{origin,target}_cmd_zfs.
+#   and the endpoint reset defaults (g_destination_operating_system and
+#   g_{origin,target}_cmd_zfs), published by session initialization.
 # reads globals: -O/-T and the options that shape the tool scope (-j, -e, -k,
 #   -z with g_cmd_compress/g_cmd_decompress), g_zxfer_secure_path, and the ssh
 #   transport, runtime temp-file and profile helpers.
@@ -81,28 +82,6 @@ zxfer_reset_remote_host_state() {
 	g_destination_operating_system=""
 	g_origin_cmd_zfs=$g_cmd_zfs
 	g_target_cmd_zfs=$g_cmd_zfs
-}
-
-# Purpose: Publish endpoint zfs commands and the destination OS policy input.
-# Usage: zxfer_publish_endpoint_runtime_context origin|target OS ZFS_COMMAND;
-# returns 2 for any other role.
-zxfer_publish_endpoint_runtime_context() {
-	l_endpoint_role=$1
-	l_endpoint_os=${2:-}
-	l_endpoint_zfs_command=${3:-}
-
-	case "$l_endpoint_role" in
-	origin)
-		g_origin_cmd_zfs=$l_endpoint_zfs_command
-		;;
-	target)
-		g_destination_operating_system=$l_endpoint_os
-		g_target_cmd_zfs=$l_endpoint_zfs_command
-		;;
-	*)
-		return 2
-		;;
-	esac
 }
 
 ################################################################################
@@ -342,9 +321,11 @@ zxfer_build_remote_capability_probe_script() {
 }
 
 # Purpose: Run one remote probe command and capture its output in this shell.
-# Usage: zxfer_capture_remote_probe_output HOST_SPEC REMOTE_CMD [PROFILE_SIDE];
-# returns the remote status and publishes g_zxfer_remote_probe_stdout
-# (trailing newlines dropped) and g_zxfer_remote_probe_stderr. When the staged
+# Usage: zxfer_capture_remote_probe_output HOST_SPEC REMOTE_CMD [PROFILE_SIDE]
+# [STDOUT_FILE]; an allocated private file captures metadata without retaining
+# stdout in memory and leaves g_zxfer_remote_probe_stdout empty. Otherwise
+# publishes that string result with trailing newlines dropped. Returns the
+# remote status and publishes g_zxfer_remote_probe_stderr. When the staged
 # stderr cannot be read it drops stdout, sets
 # g_zxfer_remote_probe_capture_failed=1 and returns the read status. The ssh
 # argv becomes the failure report's last command. An invalid ssh policy or
@@ -361,13 +342,22 @@ zxfer_capture_remote_probe_output() {
 	zxfer_profile_record_ssh_invocation "$1" "${3:-}"
 	zxfer_ssh_shell_command_for_host record "$1" "$2" "${3:-}" || return
 	zxfer_get_temp_file
-	l_probe_stderr_file=$g_zxfer_temp_file_result
+	l_probe_stderr_file=$g_zxfer_runtime_artifact_path_result
 	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
 		zxfer_echoV "Running remote probe [$(zxfer_get_remote_command_context_label "$1" "${3:-}")]: $2"
 	fi
 	l_probe_status=0
-	g_zxfer_remote_probe_stdout=$(zxfer_invoke_ssh_shell_command_for_host \
-		"$1" "$2" "${3:-}" 2>|"$l_probe_stderr_file") || l_probe_status=$?
+	if [ -n "${4:-}" ]; then
+		# Metadata reads stay file-backed; ordinary capability probes retain
+		# their string result and trailing-newline behavior.
+		# Keep invocation scratch and its profiling increments in the same
+		# subshell as string capture; the parent already recorded this call.
+		(zxfer_invoke_ssh_shell_command_for_host "$1" "$2" "${3:-}" \
+			>|"$4" 2>|"$l_probe_stderr_file") || l_probe_status=$?
+	else
+		g_zxfer_remote_probe_stdout=$(zxfer_invoke_ssh_shell_command_for_host \
+			"$1" "$2" "${3:-}" 2>|"$l_probe_stderr_file") || l_probe_status=$?
+	fi
 
 	# The run root owns the file; an empty capture needs no read.
 	[ -s "$l_probe_stderr_file" ] || return "$l_probe_status"
@@ -402,7 +392,7 @@ zxfer_run_remote_probe_script() {
 	zxfer_escape_single_quotes_into_result "${g_zxfer_secure_path:-$ZXFER_DEFAULT_SECURE_PATH}"
 	zxfer_build_remote_sh_c_command \
 		"PATH='$g_zxfer_escaped_single_quotes_result'; export PATH; $3" >/dev/null
-	zxfer_capture_remote_probe_output "$1" "$g_zxfer_remote_sh_c_command_result" "$2"
+	zxfer_capture_remote_probe_output "$1" "$g_zxfer_shell_command_result" "$2"
 }
 
 # Purpose: Probe a host live for its capabilities and parse the answer.
@@ -414,7 +404,7 @@ zxfer_fetch_remote_host_capabilities_live() {
 	zxfer_build_remote_capability_probe_script "$3" >/dev/null || return 1
 	zxfer_build_remote_sh_c_command \
 		"$g_zxfer_remote_capability_probe_script_result" >/dev/null
-	if ! zxfer_capture_remote_probe_output "$1" "$g_zxfer_remote_sh_c_command_result" "$2"; then
+	if ! zxfer_capture_remote_probe_output "$1" "$g_zxfer_shell_command_result" "$2"; then
 		zxfer_emit_remote_probe_failure_message >&2
 		return 1
 	fi
@@ -540,6 +530,43 @@ zxfer_get_os() {
 		return 1
 	fi
 	printf '%s\n' "$g_zxfer_os_result"
+}
+
+# Purpose: Resolve a CLI command's first token, on the local secure PATH or on
+# a remote host, and requote the command around the resolved path.
+# Usage: zxfer_resolve_cli_command_safe HOST_SPEC STRING [LABEL]
+# [PROFILE_SIDE]; an empty HOST_SPEC resolves locally. Publishes the command,
+# each token single-quoted, in g_zxfer_resolved_cli_command_result, or
+# returns 1 with the operator message there.
+zxfer_resolve_cli_command_safe() {
+	l_cli_label=${3:-command}
+	if ! zxfer_check_literal_token_string "$2" "$l_cli_label"; then
+		g_zxfer_resolved_cli_command_result=$g_zxfer_literal_token_error_result
+		return 1
+	fi
+	zxfer_split_tokens_into_result "$2"
+	l_cli_tokens=$g_zxfer_split_tokens_result
+	if [ -z "$l_cli_tokens" ]; then
+		g_zxfer_resolved_cli_command_result="Required dependency \"$l_cli_label\" must not be empty or whitespace-only."
+		return 1
+	fi
+	if [ -n "$1" ]; then
+		zxfer_resolve_remote_required_tool "$1" "${l_cli_tokens%%"$ZXFER_LF"*}" \
+			"$l_cli_label" "${4:-}"
+	else
+		zxfer_find_required_tool "${l_cli_tokens%%"$ZXFER_LF"*}" "$l_cli_label"
+	fi || {
+		g_zxfer_resolved_cli_command_result=$g_zxfer_required_tool_result
+		return 1
+	}
+
+	zxfer_split_begin "$ZXFER_LF"
+	# shellcheck disable=SC2086 # One checked token per line.
+	set -- $l_cli_tokens
+	zxfer_split_end
+	shift
+	zxfer_render_shell_command_from_argv "$g_zxfer_required_tool_result" "$@"
+	g_zxfer_resolved_cli_command_result=$g_zxfer_shell_command_result
 }
 
 # Purpose: Resolve one helper on a remote host to its absolute path.

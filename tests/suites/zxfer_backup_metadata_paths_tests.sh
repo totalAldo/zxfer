@@ -63,7 +63,7 @@ test_check_backup_storage_dir_if_needed_remote_allows_trusted_absolute_root_syml
 
 	(
 		zxfer_build_remote_sh_c_command() {
-			g_zxfer_remote_sh_c_command_result=$1
+			g_zxfer_shell_command_result=$1
 			printf '%s\n' "$1"
 		}
 		zxfer_invoke_ssh_shell_command_for_host() {
@@ -100,6 +100,38 @@ test_check_backup_storage_dir_if_needed_preserves_remote_dry_run_render_failures
 
 	assertEquals "Remote dry-run backup preflight should preserve prepared renderer failures." \
 		46 "$ZXFER_TEST_CAPTURE_STATUS"
+}
+
+test_remote_backup_preview_retains_canonical_input_and_clears_failed_results() {
+	for l_preview_builder_status in 0 37; do
+		l_preview_output=$(
+			zxfer_ssh_shell_command_for_host() {
+				printf 'input=%s\n' "$3"
+				g_zxfer_shell_command_result="prepared ssh"
+				return "$l_preview_builder_status"
+			}
+			g_zxfer_shell_command_result="printf '%s' value;
+
+printf '%s' end;"
+			l_preview_status=0
+			zxfer_render_remote_backup_dry_run_shell_command target.example \
+				"$g_zxfer_shell_command_result" || l_preview_status=$?
+			printf 'status=%s result=<%s>\n' "$l_preview_status" "$g_zxfer_shell_command_result"
+		)
+		l_preview_expected_result="prepared ssh"
+		[ "$l_preview_builder_status" -eq 0 ] || l_preview_expected_result=""
+		assertEquals "A preview keeps its input and only publishes successful rendering." \
+			"input=printf '%s' value; printf '%s' end;
+status=$l_preview_builder_status result=<$l_preview_expected_result>" "$l_preview_output"
+	done
+}
+
+test_remote_backup_preview_clears_stale_results_for_an_empty_program() {
+	g_zxfer_shell_command_result="stale preview"
+	zxfer_render_remote_backup_dry_run_shell_command target.example "$ZXFER_LF"
+	l_preview_empty_status=$?
+	assertEquals "An empty preview keeps its failure status." 1 "$l_preview_empty_status"
+	assertEquals "An empty preview publishes no stale command." "" "$g_zxfer_shell_command_result"
 }
 
 test_check_backup_storage_dir_if_needed_preserves_remote_dry_run_builder_failures() {

@@ -177,14 +177,14 @@ ${l_x128}xx
 		"cmp '$TEST_TMPDIR/plain-expected' '$TEST_TMPDIR/plain-rendered' >/dev/null 2>&1"
 	assertEquals "A multi-line script should become quoted chunk words: a quote escaped as '\\'', one n word per newline, and at most 128 script bytes per d word." \
 		"'sh' '-c' '$l_bootstrap' 'sh' 'da'\\''b' 'n' 'n' 'd$l_x128' 'dxx' 'n'" \
-		"$g_zxfer_remote_sh_c_command_result"
+		"$g_zxfer_shell_command_result"
 }
 
 test_build_remote_sh_c_command_restores_lc_all_and_publishes_its_result() {
 	l_lc_all_output=$(
 		LC_ALL=POSIX
 		zxfer_build_remote_sh_c_command 'exit 7' >/dev/null
-		printf 'set=%s result=%s\n' "${LC_ALL-unset}" "$g_zxfer_remote_sh_c_command_result"
+		printf 'set=%s result=%s\n' "${LC_ALL-unset}" "$g_zxfer_shell_command_result"
 		unset LC_ALL
 		zxfer_build_remote_sh_c_command 'a
 b' >/dev/null
@@ -194,6 +194,22 @@ b' >/dev/null
 	assertEquals "The renderer should restore a set LC_ALL, clear an unset one, and publish its result in the current shell." \
 		"set=POSIX result='sh' '-c' 'exit 7'
 unset=unset" "$l_lc_all_output"
+}
+
+test_build_remote_sh_c_command_retains_input_from_the_canonical_result() {
+	# The chunked script must keep stdin and its status even when the input
+	# arrives through the same result channel that rendering overwrites.
+	g_zxfer_shell_command_result='IFS= read -r l_input;
+printf "%s\n" "$l_input";
+exit 7;'
+	zxfer_build_remote_sh_c_command "$g_zxfer_shell_command_result" >/dev/null
+	printf '%s\n' "kept 'quoted' input" |
+		/bin/sh -c "$g_zxfer_shell_command_result" >"$TEST_TMPDIR/canonical-input"
+	l_canonical_status=$?
+	assertEquals "Rendering from the canonical channel keeps the script's status." \
+		7 "$l_canonical_status"
+	assertEquals "The remote bootstrap keeps the script and stdin intact." \
+		"kept 'quoted' input" "$(cat "$TEST_TMPDIR/canonical-input")"
 }
 
 test_build_remote_sh_c_command_chunks_long_scripts_that_run_intact() {

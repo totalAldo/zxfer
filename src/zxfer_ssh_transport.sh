@@ -42,10 +42,12 @@
 #   the per-role control sockets and their directory (with
 #   g_zxfer_ssh_control_socket_short_dir, the short directory this module
 #   creates and removes when the run root's socket path is too long), the
-#   control-socket action results, the host/command/prepared-command result
-#   globals.
+#   control-socket action results and host-resolution results. Rendered SSH
+#   argv uses quoting's g_zxfer_shell_command_result directly; the full remote
+#   command stays in the dispatch's l_ssh_* scratch.
 # reads globals: g_option_O_origin_host, g_option_T_target_host, g_cmd_zfs,
 #   g_origin_cmd_zfs, g_target_cmd_zfs, ZXFER_SSH_*, and runtime state.
+#   Short socket directories consume path-security's validated candidate result.
 # mutates caches: sets g_cmd_ssh on first remote use; opens the per-run ssh
 #   control masters (each open is in the runtime cleanup-PID registry until
 #   it finishes) and closes them at exit.
@@ -82,15 +84,12 @@ zxfer_refresh_ssh_control_socket_support_state() {
 # Usage: Called by zxfer_reset_session_state after the dependency reset, so
 # g_cmd_ssh is empty and no ssh runs.
 zxfer_reset_ssh_transport_state() {
-	g_zxfer_resolved_local_ssh_command_result=""
 	g_zxfer_ssh_transport_error=""
 	g_zxfer_ssh_transport_ready=""
 	g_zxfer_ssh_policy_options=""
 	g_zxfer_ssh_policy_error=""
 	g_zxfer_ssh_shell_host_result=""
-	g_zxfer_ssh_shell_full_remote_command_result=""
 	g_zxfer_ssh_shell_context_error_result=""
-	g_zxfer_prepared_ssh_shell_command_result=""
 	zxfer_reset_ssh_control_socket_action_state
 
 	# -O/-T host specs parsed by zxfer_refresh_remote_zfs_commands.
@@ -112,23 +111,19 @@ zxfer_reset_ssh_transport_state() {
 
 # Purpose: Resolve the local ssh on first remote use, so local-only runs never
 # require ssh.
-# Usage: zxfer_ensure_local_ssh_command; sets g_cmd_ssh and
-# g_zxfer_resolved_local_ssh_command_result, or returns 1 with the lookup
-# diagnostic in g_zxfer_resolved_local_ssh_command_result.
+# Usage: zxfer_ensure_local_ssh_command; caches the command in g_cmd_ssh and
+# publishes its path in g_zxfer_required_tool_result, or returns 1 with the
+# lookup diagnostic there. A cache hit also refreshes this result channel.
 zxfer_ensure_local_ssh_command() {
-	g_zxfer_resolved_local_ssh_command_result=""
+	g_zxfer_required_tool_result=""
 
 	if [ -n "${g_cmd_ssh:-}" ]; then
-		g_zxfer_resolved_local_ssh_command_result=$g_cmd_ssh
+		g_zxfer_required_tool_result=$g_cmd_ssh
 		return 0
 	fi
 
-	zxfer_find_required_tool ssh ssh || {
-		g_zxfer_resolved_local_ssh_command_result=$g_zxfer_required_tool_result
-		return 1
-	}
+	zxfer_find_required_tool ssh ssh || return 1
 	g_cmd_ssh=$g_zxfer_required_tool_result
-	g_zxfer_resolved_local_ssh_command_result=$g_cmd_ssh
 }
 
 # Purpose: Validate the ZXFER_SSH_* policy and publish the ssh options it adds.
@@ -188,7 +183,7 @@ zxfer_prepare_ssh_transport() {
 		return 1
 	fi
 	if ! zxfer_ensure_local_ssh_command; then
-		g_zxfer_ssh_transport_error=$g_zxfer_resolved_local_ssh_command_result
+		g_zxfer_ssh_transport_error=$g_zxfer_required_tool_result
 		return 1
 	fi
 	g_zxfer_ssh_transport_ready=1
@@ -272,28 +267,6 @@ zxfer_resolve_ssh_host_spec() {
 	fi
 }
 
-# Purpose: Resolve a host spec and put its wrapper tokens in front of a remote
-# shell command.
-# Usage: zxfer_prepare_ssh_shell_command_context HOST_SPEC REMOTE_CMD;
-# publishes g_zxfer_ssh_shell_host_result and
-# g_zxfer_ssh_shell_full_remote_command_result. Returns 1 with the rejection
-# text in g_zxfer_ssh_shell_context_error_result for a spec that needs shell
-# quoting, and 1 with no text for an empty spec or command.
-zxfer_prepare_ssh_shell_command_context() {
-	g_zxfer_ssh_shell_full_remote_command_result=""
-	if [ -z "$2" ]; then
-		g_zxfer_ssh_shell_host_result=""
-		g_zxfer_ssh_shell_context_error_result=""
-		return 1
-	fi
-	zxfer_resolve_ssh_host_spec "$1" || return
-	[ -n "$g_zxfer_ssh_shell_host_result" ] || return 1
-
-	g_zxfer_ssh_shell_full_remote_command_result=$2
-	[ -z "$g_zxfer_ssh_wrapper_result" ] ||
-		g_zxfer_ssh_shell_full_remote_command_result="$g_zxfer_ssh_wrapper_result $2"
-}
-
 ################################################################################
 # SSH COMMANDS
 ################################################################################
@@ -373,12 +346,15 @@ zxfer_ssh_shell_command_for_host() {
 		zxfer_profile_record_ssh_invocation "$l_ssh_host_spec" "$l_ssh_profile_side"
 	zxfer_prepare_ssh_transport ||
 		zxfer_throw_error "$g_zxfer_ssh_transport_error"
-	zxfer_prepare_ssh_shell_command_context "$l_ssh_host_spec" "$l_ssh_remote_cmd" || {
+	zxfer_resolve_ssh_host_spec "$l_ssh_host_spec" || {
 		l_ssh_context_status=$?
 		[ -z "$g_zxfer_ssh_shell_context_error_result" ] ||
 			zxfer_throw_error "$g_zxfer_ssh_shell_context_error_result"
 		return "$l_ssh_context_status"
 	}
+	[ -n "$g_zxfer_ssh_shell_host_result" ] || return 1
+	[ -z "$g_zxfer_ssh_wrapper_result" ] ||
+		l_ssh_remote_cmd="$g_zxfer_ssh_wrapper_result $l_ssh_remote_cmd"
 	zxfer_select_ssh_control_socket "$l_ssh_host_spec"
 
 	zxfer_split_begin "$ZXFER_LF"
@@ -388,7 +364,7 @@ zxfer_ssh_shell_command_for_host() {
 	[ -z "$g_zxfer_ssh_control_socket_result" ] ||
 		set -- "$@" -S "$g_zxfer_ssh_control_socket_result"
 	set -- "$@" "$g_zxfer_ssh_shell_host_result" \
-		"$g_zxfer_ssh_shell_full_remote_command_result"
+		"$l_ssh_remote_cmd"
 
 	if [ "$l_ssh_mode" = render ]; then
 		zxfer_render_shell_command_from_argv "$@"
@@ -411,7 +387,7 @@ zxfer_invoke_ssh_shell_command_for_host() {
 # Purpose: Render `sh -c SCRIPT` for a remote login shell, csh included,
 # without changing the script bytes or consuming its stdin.
 # Usage: zxfer_build_remote_sh_c_command SCRIPT; publishes and prints
-# g_zxfer_remote_sh_c_command_result. A single-line command of at most 768
+# g_zxfer_shell_command_result. A single-line command of at most 768
 # bytes keeps the plain form; a longer or multi-line script travels as tagged
 # chunks that a fixed bootstrap reassembles, so no word reaches illumos csh's
 # 1020-byte lexical buffer.
@@ -485,18 +461,17 @@ zxfer_build_remote_sh_c_command() {
 	else
 		unset LC_ALL
 	fi
-	g_zxfer_remote_sh_c_command_result=$g_zxfer_shell_command_result
-	printf '%s' "$g_zxfer_remote_sh_c_command_result"
+	printf '%s' "$g_zxfer_shell_command_result"
 }
 
 # Purpose: Render the ssh command for a remote shell command and publish it,
 # or throw.
 # Usage: zxfer_publish_prepared_ssh_shell_command_for_host_or_throw HOST_SPEC
-# REMOTE_CMD; publishes g_zxfer_prepared_ssh_shell_command_result. Invalid
+# REMOTE_CMD; publishes g_zxfer_shell_command_result. Invalid
 # specs, policy and ssh lookup failures throw; an empty spec or command
 # returns 1.
 zxfer_publish_prepared_ssh_shell_command_for_host_or_throw() {
-	g_zxfer_prepared_ssh_shell_command_result=""
+	g_zxfer_shell_command_result=""
 	[ -n "$2" ] || return 1
 	zxfer_resolve_ssh_host_spec "$1" ||
 		zxfer_throw_error "$g_zxfer_ssh_shell_context_error_result"
@@ -506,10 +481,14 @@ zxfer_publish_prepared_ssh_shell_command_for_host_or_throw() {
 	# `sh -c` to run the whole remote pipeline under the wrapper.
 	if [ -n "$g_zxfer_ssh_wrapper_result" ]; then
 		zxfer_build_remote_sh_c_command "$l_prepared_remote_cmd" >/dev/null
-		l_prepared_remote_cmd=$g_zxfer_remote_sh_c_command_result
+		l_prepared_remote_cmd=$g_zxfer_shell_command_result
 	fi
-	zxfer_ssh_shell_command_for_host render "$1" "$l_prepared_remote_cmd" || return
-	g_zxfer_prepared_ssh_shell_command_result=$g_zxfer_shell_command_result
+	zxfer_ssh_shell_command_for_host render "$1" "$l_prepared_remote_cmd" || {
+		l_prepared_status=$?
+		# A failed builder may have left an intermediate quoted wrapper.
+		g_zxfer_shell_command_result=""
+		return "$l_prepared_status"
+	}
 }
 
 ################################################################################
@@ -650,11 +629,11 @@ zxfer_ensure_ssh_control_socket_dir() {
 	# one.
 	zxfer_find_default_tmpdir || return 1
 	l_socket_short_dir=$(umask 077 && exec mktemp -d \
-		"$g_zxfer_default_tmpdir_result/zxfer.ssh.XXXXXX" 2>/dev/null) ||
+		"$g_zxfer_temp_root_candidate_result/zxfer.ssh.XXXXXX" 2>/dev/null) ||
 		return 1
 	# Only a name from the template is ours; anything else is left alone.
 	case $l_socket_short_dir in
-	"$g_zxfer_default_tmpdir_result"/zxfer.ssh.?*) ;;
+	"$g_zxfer_temp_root_candidate_result"/zxfer.ssh.?*) ;;
 	*) return 1 ;;
 	esac
 	if ! zxfer_is_ssh_control_socket_path_short_enough \

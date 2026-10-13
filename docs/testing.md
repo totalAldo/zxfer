@@ -10,7 +10,9 @@ belong here.
 - Contract suites (`tests/test_contract_*.sh`) run the real `./zxfer`
   launcher against the canned zfs of `tests/mock_toolchain_helper.sh` and pin
   what an operator sees: argv, output, exit codes and failure reports.
-- Module suites (`tests/test_zxfer_*.sh`) unit-test `src/` functions.
+- Module suites (`tests/test_zxfer_*.sh`) unit-test `src/` functions. The
+  send/receive entry includes the job-supervision fragment with its own
+  spawn/status-file fixture, alongside pipeline preparation tests.
 - Tool self-tests (`tests/test_run_*.sh`, `tests/test_validate.sh`,
   `tests/test_ci_*.sh`, `tests/test_generate_solaris_manpage.sh`) test the
   runners, `validate.sh`, the CI workflow contracts and the man-page
@@ -78,7 +80,9 @@ neither it nor `tests/validation_map.tsv` is evaluated as shell.
   contract suite, `@self` the changed suite), integration groups, perf cases
   and doc surfaces.
 - `full` runs the pinned lint stack, every unit suite and report-only
-  bash-xtrace coverage.
+  bash-xtrace coverage. Shell lint includes tracked and non-ignored untracked
+  files that still exist in the worktree, so module moves can be checked before
+  staging their additions and deletions.
 - `portable` runs the static POSIX portability lint targets.
 - `docs` runs actionlint, codespell, the budget gate and the man-page
   rendering check; it may populate the pinned lint-tool cache.
@@ -389,7 +393,11 @@ the baseline comes from `git archive` of any commit-ish, a canned zfs answers
 every zfs command, and a mock ssh sleeps `--latency-ms` (default 80) per new
 connection. For each `--sizes` value (children, `--snapshots N` deep,
 default 4) it times `noop`, `incr`, `remote_noop` and `remote_incr`, or the
-`--scenarios` list with the opt-in `props`, with one warm-up per tree and
+`--scenarios` list with the opt-in `props`, `restore`, `remote_restore`,
+`forward` and `remote_forward`. The metadata scenarios use populated v2 files
+with 68 properties per dataset: restore exercises `-e`, forwarding exercises
+`-k -P`, and their remote variants use `-O localhost -T localhost` through the
+mock SSH. Each scenario gets one warm-up per tree and
 `--reps` alternating runs under `--shell PATH` (default `/bin/sh`). It prints
 median, min, max and the ratio as TSV, appends Markdown with `--summary`,
 and exits 0 whatever the ratios, 1 for a harness error, 2 for a usage error.

@@ -68,7 +68,7 @@ $(zxfer_test_backup_metadata_row "child" "atime=off=local")" \
 	done
 }
 
-test_backup_metadata_extract_properties_for_dataset_pair_validates_the_file_and_resolves_relative_rows() {
+test_backup_metadata_view_validates_the_file_and_resolves_relative_rows() {
 	header=$ZXFER_BACKUP_METADATA_HEADER_LINE
 	roots="#source_root:tank/src
 #destination_root:backup/dst"
@@ -139,7 +139,7 @@ broken-row
 		rest=${rest#*|}
 		pair_destination=${rest%%|*}
 		contents=${rest#*|}
-		output=$(zxfer_backup_metadata_extract_properties_for_dataset_pair "$contents" \
+		output=$(zxfer_test_check_metadata_pair "$contents" \
 			"$pair_source" "$pair_destination")
 		assertEquals "Contents [$contents] for $pair_source -> $pair_destination." \
 			"$expected" "$? $output"

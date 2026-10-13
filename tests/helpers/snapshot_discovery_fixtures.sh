@@ -156,13 +156,11 @@ zxfer_test_reset_snapshot_discovery_result_fixture() {
 	g_zxfer_destination_snapshot_record_cache_file=""
 	g_recursive_dest_list=""
 	g_recursive_destination_extra_dataset_list=""
-	g_zxfer_snapshot_discovery_file_read_result=""
 	g_zxfer_recursive_dataset_list_result=""
 	g_ssh_origin_control_socket=""
 	g_ssh_target_control_socket=""
 	g_last_background_pid=""
 	g_source_snapshot_list_pid=""
-	g_zxfer_temp_file_result=""
 }
 
 # Purpose: Reset every discovery input and output before a case.

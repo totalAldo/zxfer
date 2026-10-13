@@ -61,8 +61,8 @@ test_run_coverage_rejects_the_removed_enforce_option_and_accepts_report_only() {
 test_run_coverage_default_suite_resolution_includes_coverage_overlays() {
 	output=$(run_coverage_helper 'ZXFER_ROOT=$(cd "$(dirname "$RUN_COVERAGE_BIN")/.." && pwd); TEST_DIR="$ZXFER_ROOT/tests"; resolve_suites | while IFS= read -r suite; do case "$suite" in "$ZXFER_ROOT"/*) printf "%s\n" "${suite#$ZXFER_ROOT/}" ;; *) printf "%s\n" "$suite" ;; esac; done')
 
-	assertContains "The default coverage run should include the send-job coverage suite." \
-		"$output" "tests/test_zxfer_send_jobs.sh"
+	assertContains "The default coverage run should include the send/receive suite covering pipeline and job supervision." \
+		"$output" "tests/test_zxfer_send_receive.sh"
 	assertContains "The default coverage run should include the remote host suite." \
 		"$output" "tests/test_zxfer_remote_hosts.sh"
 	assertContains "The default coverage run should include the property transfer suite that exercises the in-memory property tables." \

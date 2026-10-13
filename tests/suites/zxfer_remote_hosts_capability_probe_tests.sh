@@ -327,8 +327,6 @@ test_remote_host_capabilities_are_cached_per_host_and_tool_scope() {
 			zxfer_ensure_remote_host_capabilities "" source >/dev/null && exit 19
 			# A failed lookup leaves nothing of the last host in the channel.
 			printf 'selected_slot=<%s>\n' "$g_zxfer_remote_capability_slot_result"
-			zxfer_publish_endpoint_runtime_context invalid Linux /sbin/zfs
-			printf 'publish_invalid=%s\n' "$?"
 			# A failed probe keeps its status and fills no slot.
 			zxfer_fetch_remote_host_capabilities_live() {
 				return 37
@@ -348,7 +346,6 @@ test_remote_host_capabilities_are_cached_per_host_and_tool_scope() {
 	assertEquals "Four scopes should cost four probes and four memory hits." \
 		"resolved_cat=/remote/bin/cat direct_probes=0
 selected_slot=<>
-publish_invalid=2
 failed_probe=37 target_slot=target.example
 live=4 memory=4
 origin_slot=unlisted.example|zfs target_slot=target.example|zfs" "$output"
@@ -671,4 +668,29 @@ test_resolve_remote_required_tool_maps_each_direct_probe_outcome() {
 		"$output" "noise=1|Failed to query dependency \"compression command\" on host origin.example."
 	assertContains "A relative path should be rejected by path validation." \
 		"$output" "relative=1|Required dependency \"compression command\" on host origin.example resolved to \"bin/zstd\""
+}
+
+test_remote_probe_file_capture_preserves_bytes_status_and_empty_string_result() {
+	zxfer_create_runtime_artifact_file probe-stdout
+	staging=$g_zxfer_runtime_artifact_path_result
+	for probe_status in 0 12; do
+		output=$(
+			(
+				g_option_V_very_verbose=1
+				g_zxfer_profile_source_ssh_shell_invocations=0
+				zxfer_echoV() { :; }
+				zxfer_invoke_ssh_shell_command_for_host() {
+					zxfer_profile_record_ssh_invocation "$1" source
+					printf 'partial\n\n'
+					return "$probe_status"
+				}
+				g_zxfer_remote_probe_stdout=stale
+				zxfer_capture_remote_probe_output origin.example "'true'" source "$staging"
+				printf '%s <%s> ssh=%s' "$?" "$g_zxfer_remote_probe_stdout" \
+					"$g_zxfer_profile_source_ssh_shell_invocations"
+			)
+		)
+		assertEquals "File capture preserves the producer status." "$probe_status <> ssh=1" "$output"
+		assertEquals "Trailing newlines are retained in staging." 9 "$(wc -c <"$staging" | tr -d ' ')"
+	done
 }

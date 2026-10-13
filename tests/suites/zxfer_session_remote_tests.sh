@@ -4,12 +4,76 @@
 # tests/test_zxfer_session.sh under the remote-host fixture.
 # shellcheck disable=SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
+test_endpoint_initialization_rejects_invalid_roles_before_lookup_or_publication() {
+	result=$(
+		zxfer_get_os() { printf 'unexpected OS lookup\n'; }
+		zxfer_resolve_remote_required_tool() { printf 'unexpected tool lookup\n'; }
+		g_option_O_origin_host=origin.example
+		g_option_T_target_host=target.example
+		g_origin_cmd_zfs=old-origin
+		g_target_cmd_zfs=old-target
+		g_destination_operating_system=OldOS
+		zxfer_init_endpoint_execution_context invalid
+		printf '%s|%s|%s|%s\n' "$?" "$g_origin_cmd_zfs" "$g_target_cmd_zfs" "$g_destination_operating_system"
+	)
+
+	assertEquals "An invalid role should return 2 without looking up or publishing an endpoint." \
+		"2|old-origin|old-target|OldOS" "$result"
+}
+
+# An endpoint is published only after all of its lookups succeed. Check both
+# roles and each failing stage, including the original nonzero lookup status.
+test_endpoint_initialization_preserves_context_and_status_when_a_lookup_fails() {
+	for l_init_test_role in origin target; do
+		while IFS='|' read -r l_init_test_failure l_init_test_status; do
+			result=$(
+				g_option_O_origin_host=origin.example
+				g_option_T_target_host=target.example
+				g_option_z_compress=1
+				g_origin_cmd_zfs=old-origin
+				g_target_cmd_zfs=old-target
+				g_destination_operating_system=OldOS
+				g_origin_cmd_compress_safe=old-compressor
+				g_target_cmd_decompress_safe=old-decompressor
+				zxfer_get_os() {
+					[ "$l_init_test_failure" != os ] || return "$l_init_test_status"
+					g_zxfer_os_result=NewOS
+				}
+				zxfer_resolve_remote_required_tool() {
+					g_zxfer_required_tool_result=/remote/zfs
+					[ "$l_init_test_failure" != zfs ] || return "$l_init_test_status"
+				}
+				zxfer_resolve_cli_command_safe() {
+					g_zxfer_resolved_cli_command_result="'/remote/zstd'"
+					return "$l_init_test_status"
+				}
+				zxfer_throw_error() {
+					printf '%s|%s|%s|%s|%s|%s\n' "$g_zxfer_failure_class" \
+						"$g_origin_cmd_zfs" "$g_target_cmd_zfs" "$g_destination_operating_system" \
+						"$g_origin_cmd_compress_safe" "$g_target_cmd_decompress_safe"
+					exit "${2:-1}"
+				}
+				zxfer_init_endpoint_execution_context "$l_init_test_role"
+			)
+			status=$?
+
+			assertEquals "[$l_init_test_role/$l_init_test_failure] must leave endpoint state intact and preserve the lookup status." \
+				"$l_init_test_status|dependency|old-origin|old-target|OldOS|old-compressor|old-decompressor" \
+				"$status|$result"
+		done <<EOF
+os|31
+zfs|37
+codec|45
+EOF
+	done
+}
+
 test_prepare_remote_host_connections_fails_with_dependency_class_without_ssh() {
 	set +e
 	output=$(
 		(
 			zxfer_ensure_local_ssh_command() {
-				g_zxfer_resolved_local_ssh_command_result="ssh dependency missing"
+				g_zxfer_required_tool_result="ssh dependency missing"
 				return 1
 			}
 			zxfer_open_ssh_control_sockets() {

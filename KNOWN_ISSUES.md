@@ -146,26 +146,6 @@ provides it. Reading the name list, or the machine view, a second time costs
 one more `zfs get` per read but only narrows the window: a property created
 and removed again at the right moments still passes.
 
-### Medium: large property lists can exceed the operating system's execution limits
-
-`zxfer_plan_property_changes` (`src/zxfer_property_transfer.sh`) exports
-the complete encoded source and destination property lists into
-`ZXFER_AWK_SOURCE_PVS` and `ZXFER_AWK_DEST_PVS` before starting `awk`.
-Both lists, the planner program and the remaining arguments/environment
-must fit the operating system's exec limits; property count is not bounded
-to keep them below that limit. Percent encoding can further expand values.
-The child-create filter and inheritance planner use the same environment
-transport for their complete lists.
-
-An offline macOS helper reproduction with 80 user properties, each containing
-an 8,000-byte value, produced 641,287-byte source and destination lists.
-With `ARG_MAX=1048576`, even identical lists failed to launch `awk` with
-`Argument list too long`, followed by `Failed to plan dataset properties.`
-The planner fails closed, but cannot reconcile such a dataset through the
-normal property-transfer path. Exact limits vary by platform and by the
-rest of the environment. Pass large inputs through private staged files
-or stdin, preserving the existing encoding and failure propagation.
-
 ### Low: report escaping passes C1 controls, and the `-U` warning prints values raw
 
 `zxfer_escape_report_value` (`src/zxfer_reporting.sh`) escapes C0 control
@@ -230,7 +210,7 @@ when the root shell starts it, and zxfer cannot cheaply tell a subshell spawn
 apart, so without a `setsid` command FreeBSD and illumos use the wrapper for
 every spawn:
 
-- `zxfer_abort_all_send_jobs` in `src/zxfer_send_jobs.sh` sends no teardown
+- `zxfer_abort_all_send_jobs` in `src/zxfer_send_receive.sh` sends no teardown
   signal to a job that has written its status file, so an abort does not stop
   a descendant that outlived the job shell. A job shell that died without
   writing its status still gets a bare-PID TERM and a wrapper STOP/KILL; if the

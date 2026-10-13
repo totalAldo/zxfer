@@ -133,6 +133,19 @@ Use remote compression:
   exists through the secure-PATH model, so operators and packages must provide
   an implementation compatible with the GNU Parallel-style options used by the
   rendered source-discovery pipeline
+- `-v`: show progress and recursive delta details, including the full snapshot
+  names and GUIDs behind missing/extra counts. The
+  `snapshots_missing_on_destination` count measures source snapshot identities
+  absent from the destination; `snapshots_missing_on_source` counts destination
+  snapshot identities absent from the source. Destination-only snapshots use
+  their actual destination paths; a same-name GUID mismatch appears on both
+  sides. Per-dataset reasons name the shared snapshot that leaves an older
+  missing snapshot outside the incremental send range, and distinguish a
+  shared newest listed snapshot from a dataset absent from the source snapshot
+  listing. Discovery no-send messages name the source pool or primary dataset
+  in one line. Nonrecursive runs
+  explain which listed descendants are outside the dataset queue. These are
+  discovery differences; normal planning and safety checks govern transfers
 - `-V`: enable very verbose debug output and end-of-run profiling counters,
   including startup latency, trap-cleanup timing, per-phase listing times,
   ssh/zfs invocation counts, runtime temp-file counts, and live destination

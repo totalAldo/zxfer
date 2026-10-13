@@ -108,7 +108,7 @@ EOF
 }
 
 # shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_run_lint_shell_targets_include_nonignored_untracked_sources_once() {
+test_run_lint_shell_targets_include_existing_sources_once_and_skip_deletions() {
 	l_fake_root="$TEST_TMPDIR/source-list-root"
 	l_tool_root="$TEST_TMPDIR/source-list-tools"
 	l_fake_bin="$TEST_TMPDIR/source-list-bin"
@@ -121,15 +121,18 @@ test_run_lint_shell_targets_include_nonignored_untracked_sources_once() {
 	mkdir -p "$l_fake_root/src" "$l_fake_root/tests/split fragments"
 	printf '%s\n' '#!/bin/sh' >"$l_fake_root/zxfer"
 	printf '%s\n' '#!/bin/sh' >"$l_fake_root/src/tracked.sh"
+	printf '%s\n' '#!/bin/sh' >"$l_fake_root/src/deleted.sh"
 	printf '%s\n' '#!/bin/sh' >"$l_fake_root/src/untracked.sh"
 	printf '%s\n' '#!/bin/sh' >"$l_fake_root/tests/split fragments/untracked helper.sh"
 	printf '%s\n' '#!/bin/sh' >"$l_fake_root/ignored.sh"
 	printf '%s\n' 'ignored.sh' >"$l_fake_root/.gitignore"
 	(
 		cd "$l_fake_root"
-		git add .gitignore zxfer src/tracked.sh tests/run_lint.sh
+		git add .gitignore zxfer src/tracked.sh src/deleted.sh tests/run_lint.sh
 		git commit -qm baseline
 	)
+
+	rm "$l_fake_root/src/deleted.sh"
 
 	PATH="$l_fake_bin:${PATH:-/usr/bin:/bin}" \
 		LINT_CAPTURE_LOG="$l_capture_log" \
@@ -141,6 +144,8 @@ test_run_lint_shell_targets_include_nonignored_untracked_sources_once() {
 		assertEquals "Each shell target should receive $l_path exactly once." \
 			3 "$(lint_capture_path_count "$l_capture_log" "$l_path")"
 	done
+	assertEquals "Unstaged deletions must remain outside every lint target." \
+		0 "$(lint_capture_path_count "$l_capture_log" src/deleted.sh)"
 	assertEquals "Ignored shell sources must remain outside every lint target." \
 		0 "$(lint_capture_path_count "$l_capture_log" ignored.sh)"
 }

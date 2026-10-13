@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # shunit2 entry point for src/zxfer_remote_hosts.sh: the remote capability
-# handshake and cache, and remote helper resolution.
+# handshake and cache, helper lookup, and local/remote CLI command resolution.
 #
 # Test definitions live in the behavior fragment below, under the remote-host
 # fixture. The fragment has a "zxfer-test-fragment" marker, a source line and
@@ -40,10 +40,15 @@ tearDown() {
 # shellcheck source=tests/suites/zxfer_remote_hosts_capability_probe_tests.sh
 . "$TESTS_DIR/suites/zxfer_remote_hosts_capability_probe_tests.sh"
 
+# zxfer-test-fragment: suites/zxfer_remote_hosts_cli_commands_tests.sh
+# shellcheck source=tests/suites/zxfer_remote_hosts_cli_commands_tests.sh
+. "$TESTS_DIR/suites/zxfer_remote_hosts_cli_commands_tests.sh"
+
 suite() {
 	zxfer_test_register_fragment_tests \
 		"$TESTS_DIR/test_zxfer_remote_hosts.sh" \
-		"$TESTS_DIR/suites/zxfer_remote_hosts_capability_probe_tests.sh"
+		"$TESTS_DIR/suites/zxfer_remote_hosts_capability_probe_tests.sh" \
+		"$TESTS_DIR/suites/zxfer_remote_hosts_cli_commands_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

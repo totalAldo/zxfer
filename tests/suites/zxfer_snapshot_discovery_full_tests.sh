@@ -11,7 +11,7 @@
 test_collect_destination_dataset_inventory_preserves_setup_and_publish_failures() {
 	temp_status=$(
 		(
-			zxfer_create_temp_file_group() {
+			zxfer_create_runtime_artifact_workspace() {
 				return 66
 			}
 			set +e
@@ -24,10 +24,11 @@ test_collect_destination_dataset_inventory_preserves_setup_and_publish_failures(
 			l_one="$TEST_TMPDIR/dest_inventory_publish.one"
 			l_two="$TEST_TMPDIR/dest_inventory_publish.two"
 			g_option_V_very_verbose=1
-			zxfer_create_temp_file_group() {
+			zxfer_create_runtime_artifact_workspace() {
 				: >"$l_one"
-				: >"$l_two"
-				g_zxfer_temp_file_group_result=$(printf '%s\n%s' "$l_one" "$l_two")
+				: >"$l_one.error"
+				g_zxfer_runtime_artifact_path_result=$l_one
+				g_zxfer_temp_file_group_result=$(printf '%s\n%s' "$l_one" "$l_one.error")
 			}
 			zxfer_run_destination_zfs_cmd() {
 				return 1
@@ -72,7 +73,7 @@ test_get_zfs_list_reports_destination_inventory_readback_failures() {
 				fi
 				return 1
 			}
-			zxfer_read_snapshot_discovery_capture_file() {
+			zxfer_read_runtime_artifact_file() {
 				return 27
 			}
 			zxfer_throw_error() {
@@ -115,7 +116,7 @@ test_get_zfs_list_reports_destination_inventory_stderr_readback_failures() {
 				printf '%s\n' "called" >>"$PROBE_LOG"
 				return 0
 			}
-			zxfer_read_snapshot_discovery_capture_file() {
+			zxfer_read_runtime_artifact_file() {
 				return 28
 			}
 			zxfer_throw_error() {
@@ -161,10 +162,10 @@ test_get_zfs_list_reports_source_snapshot_record_cache_stage_failures() {
 				fi
 				return 1
 			}
-			zxfer_read_snapshot_discovery_capture_file() {
+			zxfer_read_runtime_artifact_file() {
 				l_read_count=$((l_read_count + 1))
 				if [ "$l_read_count" -eq 1 ]; then
-					g_zxfer_snapshot_discovery_file_read_result="backup/dst"
+					g_zxfer_runtime_artifact_read_result="backup/dst"
 				else
 					return 1
 				fi
@@ -172,8 +173,8 @@ test_get_zfs_list_reports_source_snapshot_record_cache_stage_failures() {
 			}
 			zxfer_get_temp_file() {
 				l_temp_count=$((l_temp_count + 1))
-				g_zxfer_temp_file_result="$TEST_TMPDIR/get-zfs-source-cache-stage-$l_temp_count.tmp"
-				: >"$g_zxfer_temp_file_result"
+				g_zxfer_runtime_artifact_path_result="$TEST_TMPDIR/get-zfs-source-cache-stage-$l_temp_count.tmp"
+				: >"$g_zxfer_runtime_artifact_path_result"
 				return 0
 			}
 			zxfer_reverse_file_lines() {
@@ -259,7 +260,7 @@ test_try_fast_recursive_noop_discovery_preserves_setup_failures() {
 		(
 			g_option_O_origin_host="origin.example"
 			g_option_R_recursive="tank/src"
-			zxfer_create_temp_file_group() {
+			zxfer_create_runtime_artifact_workspace() {
 				return 42
 			}
 			set +e
@@ -284,7 +285,7 @@ test_try_fast_recursive_noop_discovery_preserves_setup_failures() {
 			g_option_O_origin_host="origin.example"
 			g_option_R_recursive="tank/src"
 			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'tank/src@snapA'"
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
 			zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
 				return 44
@@ -299,7 +300,7 @@ test_try_fast_recursive_noop_discovery_preserves_setup_failures() {
 			g_option_O_origin_host="origin.example"
 			g_option_R_recursive="tank/src"
 			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'tank/src@snapA'"
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
 			zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
 				sleep 5 &
@@ -341,14 +342,14 @@ test_try_fast_recursive_noop_discovery_reports_source_failures() {
 			g_option_O_origin_host="origin.example"
 			g_option_R_recursive="tank/src"
 			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="sh -c 'exit 17'"
+				g_zxfer_shell_command_result="sh -c 'exit 17'"
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=""
 				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
 			}
 			# The staged stderr is the first file this proof reads back.
-			zxfer_read_snapshot_discovery_capture_file() {
+			zxfer_read_runtime_artifact_file() {
 				return 68
 			}
 			zxfer_throw_error() {
@@ -364,7 +365,7 @@ test_try_fast_recursive_noop_discovery_reports_source_failures() {
 			g_option_O_origin_host="origin.example"
 			g_option_R_recursive="tank/src"
 			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'tank/src@snapA'"
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
@@ -405,7 +406,7 @@ test_try_fast_recursive_noop_discovery_reports_destination_fifo_status_failures(
 				g_option_O_origin_host="origin.example"
 				g_option_R_recursive="tank/src"
 				zxfer_build_source_snapshot_name_list_cmd() {
-					g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'tank/src@snapA'"
+					g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 				}
 				MALFORMED_FIELD=$l_malformed_field
 				zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
@@ -438,7 +439,7 @@ test_try_fast_recursive_noop_discovery_reports_destination_fifo_status_failures(
 			g_option_O_origin_host="origin.example"
 			g_option_R_recursive="tank/src"
 			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'tank/src@snapA'"
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
@@ -447,7 +448,7 @@ test_try_fast_recursive_noop_discovery_reports_destination_fifo_status_failures(
 				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
 			}
 			# The staged destination stderr is the first file read back.
-			zxfer_read_snapshot_discovery_capture_file() {
+			zxfer_read_runtime_artifact_file() {
 				return 70
 			}
 			zxfer_throw_error() {
@@ -462,7 +463,7 @@ test_try_fast_recursive_noop_discovery_reports_destination_fifo_status_failures(
 			g_option_O_origin_host="origin.example"
 			g_option_R_recursive="tank/src"
 			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'tank/src@snapA'"
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
@@ -478,7 +479,7 @@ test_try_fast_recursive_noop_discovery_reports_destination_fifo_status_failures(
 			g_option_O_origin_host="origin.example"
 			g_option_R_recursive="tank/src"
 			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'tank/src@snapA'"
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 				l_fifo=$1
@@ -515,7 +516,7 @@ test_try_fast_recursive_noop_discovery_reports_compare_failures() {
 			g_option_O_origin_host="origin.example"
 			g_option_R_recursive="tank/src"
 			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'tank/src@snapA'"
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
@@ -563,10 +564,10 @@ test_get_zfs_list_throws_on_stage_failures_that_did_not_throw() {
 			zxfer_write_source_snapshot_list_to_file() {
 				:
 			}
-			zxfer_collect_full_destination_snapshot_discovery() {
+			zxfer_write_destination_snapshot_list_to_files() {
 				return 9
 			}
-			zxfer_wait_for_full_source_snapshot_discovery() {
+			zxfer_wait_for_snapshot_discovery_producer() {
 				printf '%s\n' "unexpected source wait"
 			}
 			zxfer_throw_error() {
@@ -599,8 +600,8 @@ test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
 				idx=$(cat "$counter_file")
 				idx=$((idx + 1))
 				printf '%s\n' "$idx" >"$counter_file"
-				g_zxfer_temp_file_result="$TEST_TMPDIR/get_zfs_profile.$idx"
-				: >"$g_zxfer_temp_file_result"
+				g_zxfer_runtime_artifact_path_result="$TEST_TMPDIR/get_zfs_profile.$idx"
+				: >"$g_zxfer_runtime_artifact_path_result"
 			}
 			# One reading per clock read, in this shell: source start,
 			# destination start and end, source end, diff start and end.
@@ -661,14 +662,14 @@ test_fast_recursive_noop_reads_destination_status_once() {
 			g_option_R_recursive="-R"
 			status_reads=0
 			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'tank/src@snapA'"
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
 				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
 			}
 			read() {
-				if [ "$*" = '-r l_fast_noop_list_status l_fast_noop_normalize_status l_fast_noop_sort_status' ]; then
+				if [ "$*" = '-r l_fast_noop_owner_list_status l_fast_noop_owner_normalize_status l_fast_noop_owner_sort_status' ]; then
 					status_reads=$((status_reads + 1))
 				fi
 				# shellcheck disable=SC2162 # Forward the production read arguments.
@@ -690,7 +691,7 @@ test_fast_recursive_noop_owner_reports_failure_after_releasing_scratch() {
 		(
 			g_option_R_recursive="-R"
 			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' 'original source failure' >&2; exit 37"
+				g_zxfer_shell_command_result="printf '%s\n' 'original source failure' >&2; exit 37"
 			}
 			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
 				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED=""
@@ -714,24 +715,84 @@ test_fast_recursive_noop_owner_reports_failure_after_releasing_scratch() {
 		"status=37 diagnostic=<Failed to retrieve snapshots from the source: original source failure> released=1" "$output"
 }
 
+# Allocation scratch and result channels may change while the producers run.
+# The owner must still wait with the right timers, release its seven proof
+# files and retain the successful raw listing when the streams differ.
+test_fast_recursive_noop_owner_keeps_paths_pids_and_timers_across_helper_scratch_mutation() {
+	output=$(
+		(
+			g_option_R_recursive="-R"
+			owner_clock=0
+			owner_timers=""
+			zxfer_profile_start_timer() {
+				owner_clock=$((owner_clock + 1))
+				g_zxfer_profile_clock_ms=$owner_clock
+			}
+			zxfer_profile_stop_timer() {
+				owner_timers=${owner_timers:+$owner_timers,}$1
+				g_zxfer_profile_elapsed_ms=0
+				g_last_background_pid=clobbered
+			}
+			zxfer_build_source_snapshot_name_list_cmd() {
+				owner_proof_paths=$g_zxfer_temp_file_group_result
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				owner_raw_path=$4
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapB"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_RAW="tank/dst@snapB"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+				l_fast_noop_owner_source_file=clobbered
+				l_fast_noop_owner_status_file=clobbered
+				g_zxfer_runtime_artifact_path_result=clobbered
+				g_zxfer_temp_file_group_result=clobbered
+			}
+			status=0
+			zxfer_try_fast_recursive_noop_discovery || status=$?
+			printf 'status=%s timers=%s\n' "$status" "$owner_timers"
+			while IFS= read -r owner_proof_path; do
+				[ "$owner_proof_path" != "$owner_raw_path" ] || continue
+				[ ! -e "$owner_proof_path" ] || printf 'unreleased=%s\n' "$owner_proof_path"
+			done <<EOF
+$owner_proof_paths
+EOF
+			if [ "$g_zxfer_snapshot_discovery_destination_listing_file" = "$owner_raw_path" ] &&
+				[ "$(cat "$owner_raw_path")" = "tank/dst@snapB" ]; then
+				printf 'raw retained\n'
+			fi
+			printf 'producer records=<%s>\n' "$g_zxfer_cleanup_pid_records"
+		)
+	)
+	assertEquals "Fallback retains its raw listing and releases reaped proof resources despite helper scratch changes." \
+		"status=1 timers=1,2,3
+raw retained
+producer records=<>" "$output"
+}
+
 # A destination/setup failure can reach release before source wait. Keep the
 # unreaped producer's files for the immediate failure throw's ordered EXIT trap.
 test_full_discovery_release_preserves_unreaped_producer_files() {
-	zxfer_create_temp_file_group 2
-	{
-		IFS= read -r source_file
-		IFS= read -r error_file
-	} <<-EOF
-		$g_zxfer_temp_file_group_result
-	EOF
-	# Use an ownership marker instead of an extra child for the release decision.
-	g_source_snapshot_list_pid=12345
-	zxfer_cleanup_full_snapshot_discovery_operation_state 29 "$source_file" "$error_file" "" "" ""
-	assertTrue "An unreaped producer keeps its source stage until trap teardown." \
-		"[ -f '$source_file' ] && [ -f '$error_file' ]"
-	g_source_snapshot_list_pid=""
-	zxfer_cleanup_full_snapshot_discovery_operation_state 29 "$source_file" "$error_file" "" "" ""
-	assertFalse "A completed producer's stages are released." "[ -f '$source_file' ]"
+	for producer_pending in 1 0; do
+		output=$(
+			zxfer_write_source_snapshot_list_to_file() {
+				source_file=$1
+				error_file=$2
+				printf 'tank/src@snapA\n' >"$1"
+				# An ownership marker avoids an extra child just for this guard.
+				[ "$producer_pending" -eq 0 ] || g_source_snapshot_list_pid=12345
+				return 0
+			}
+			zxfer_write_destination_snapshot_list_to_files() { return 29; }
+			status=0
+			zxfer_run_full_snapshot_discovery || status=$?
+			retained=0
+			[ ! -f "$source_file" ] || retained=1
+			printf 'status=%s retained=%s\n' "$status" "$retained"
+			[ "$producer_pending" -eq 0 ] || [ -f "$error_file" ] || printf 'error file lost\n'
+		)
+		assertEquals "Only an unreaped producer keeps its stages for trap teardown." \
+			"status=29 retained=$producer_pending" "$output"
+	done
 }
 
 # Helper scratch and shared allocator result channels must not become the
@@ -739,6 +800,7 @@ test_full_discovery_release_preserves_unreaped_producer_files() {
 test_full_discovery_keeps_owned_paths_across_helper_scratch_mutation() {
 	output=$(
 		(
+			g_option_R_recursive="-R"
 			zxfer_write_source_snapshot_list_to_file() {
 				source_seen=$1
 				error_seen=$2
@@ -746,20 +808,22 @@ test_full_discovery_keeps_owned_paths_across_helper_scratch_mutation() {
 				printf 'tank/src@snapA\n' >"$1"
 				: >"$2"
 				printf 'tank/src@snapA\n' >"$3"
-				l_full_operation_source_file=clobbered
-				l_full_operation_sorted_file=clobbered
+				l_full_owner_source_file=clobbered
+				l_full_owner_sorted_file=clobbered
 				g_zxfer_temp_file_group_result=clobbered
 			}
-			zxfer_collect_full_destination_snapshot_discovery() {
+			zxfer_write_destination_snapshot_list_to_files() {
 				destination_seen=$1
 				destination_sorted_seen=$2
 				: >"$1"
 				: >"$2"
-				g_zxfer_temp_file_result=clobbered
+				g_zxfer_runtime_artifact_path_result=clobbered
 			}
-			zxfer_publish_full_snapshot_discovery_results() {
-				[ "$1" = "$source_seen" ] && [ "$2" = "$sorted_seen" ] &&
-					[ "$3" = "$destination_seen" ] && [ "$4" = "$destination_sorted_seen" ] || return 73
+			zxfer_set_g_recursive_source_list() {
+				[ "$1" = "$source_seen" ] && [ "$2" = "$destination_sorted_seen" ] &&
+					[ "$3" = "$sorted_seen" ] || return 73
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
 			}
 			zxfer_run_full_snapshot_discovery
 			printf 'status=%s\n' "$?"
@@ -771,4 +835,118 @@ test_full_discovery_keeps_owned_paths_across_helper_scratch_mutation() {
 	)
 	assertEquals "The owner retains and releases its real paths after helpers mutate scratch." \
 		"status=0" "$output"
+}
+
+# A failed best-effort release leaves artifacts for the run-root trap, while
+# the owner returns the discovery failure that made release necessary.
+test_full_discovery_cleanup_failure_keeps_the_operation_status() {
+	output=$(
+		zxfer_write_source_snapshot_list_to_file() { printf 'tank/src@snapA\n' >"$1"; }
+		zxfer_write_destination_snapshot_list_to_files() { return 37; }
+		zxfer_cleanup_runtime_artifact_path_list() { return 43; }
+		zxfer_cleanup_snapshot_record_cache_files() { printf 'caches discarded\n'; }
+		status=0
+		zxfer_run_full_snapshot_discovery || status=$?
+		printf 'status=%s\n' "$status"
+	)
+	assertEquals "Release failure cannot replace discovery's failure or skip cache disposal." \
+		"caches discarded
+status=37" "$output"
+}
+
+# Published records outlive full discovery even when a producer changes the
+# allocator result; transient files are still released before returning.
+test_full_discovery_retains_only_published_record_caches() {
+	output=$(
+		zxfer_write_source_snapshot_list_to_file() {
+			transient_source=$1
+			printf 'tank/src@snapA\t101\n' >"$1"
+		}
+		zxfer_write_destination_snapshot_list_to_files() {
+			retained_destination=$1
+			printf 'backup/dst@snapA\t101\n' >"$1"
+			g_zxfer_runtime_artifact_path_result=clobbered
+		}
+		zxfer_set_g_recursive_source_list() { g_recursive_source_list=""; }
+		zxfer_run_full_snapshot_discovery || exit "$?"
+		[ ! -e "$transient_source" ] || printf 'source stage leaked\n'
+		[ "$retained_destination" = "$g_zxfer_destination_snapshot_record_cache_file" ] || printf 'destination cache lost\n'
+		cat "$g_zxfer_source_snapshot_record_cache_file" "$g_zxfer_destination_snapshot_record_cache_file"
+	)
+	assertEquals "Planning retains the validated records, with transient source staging released." \
+		"$(printf 'tank/src@snapA\t101\nbackup/dst@snapA\t101')" "$output"
+}
+
+# Exercise retention through full discovery, using real delta planning,
+# inventory publication and cache staging over canned endpoint records.
+test_full_discovery_retention_follows_dataset_work_and_nonrecursive_mode() {
+	zxfer_test_run_full_discovery_retention_case() {
+		g_option_R_recursive="tank/src"
+		case $retention_case in
+		nonrecursive | nonrecursive_transfer) g_option_R_recursive="" ;;
+		delete) g_option_d_delete_destination_snapshots=1 ;;
+		property) g_option_P_transfer_property=1 ;;
+		override) g_option_o_override_property="compression=lz4" ;;
+		esac
+		zxfer_write_source_snapshot_list_to_file() {
+			printf 'tank/src@snapA\t101\n' >"$1"
+			printf 'tank/src@snapA\t101\n' >"$3"
+		}
+		zxfer_write_destination_snapshot_list_to_files() {
+			: >"$1"
+			case $retention_case in
+			transfer | nonrecursive_transfer) ;;
+			*) printf 'backup/dst/src@snapA\t101\n' >"$1" ;;
+			esac
+			case $retention_case in
+			delete | ignored_extra) printf 'backup/dst/src@extra\t102\n' >>"$1" ;;
+			esac
+			zxfer_normalize_destination_snapshot_list backup/dst/src "$1" "$2"
+		}
+		zxfer_run_source_zfs_cmd() { printf '%s\n' tank/src; }
+		zxfer_run_destination_zfs_cmd() { printf '%s\n' backup/dst backup/dst/src; }
+		zxfer_run_full_snapshot_discovery || exit "$?"
+		inventory_present=0
+		[ -z "$g_recursive_dest_list" ] || inventory_present=1
+		records_present=0
+		if [ -f "$g_zxfer_source_snapshot_record_cache_file" ] &&
+			[ -f "$g_zxfer_destination_snapshot_record_cache_file" ]; then
+			records_present=1
+		fi
+		printf 'inventory=%s records=%s\n' "$inventory_present" "$records_present"
+	}
+	for retention_case in noop nonrecursive nonrecursive_transfer transfer delete ignored_extra property override; do
+		output=$(zxfer_test_run_full_discovery_retention_case)
+		case $retention_case in
+		noop | ignored_extra) expected_retention="inventory=0 records=0" ;;
+		nonrecursive) expected_retention="inventory=0 records=1" ;;
+		*) expected_retention="inventory=1 records=1" ;;
+		esac
+		assertEquals "$retention_case retains only the inventories and records its work needs." \
+			"$expected_retention" "$output"
+	done
+}
+
+test_full_discovery_inventory_failure_never_publishes_record_caches() {
+	for retention_mode in recursive nonrecursive; do
+		output=$(
+			g_option_R_recursive="tank/src"
+			[ "$retention_mode" != nonrecursive ] || g_option_R_recursive=""
+			zxfer_write_source_snapshot_list_to_file() {
+				printf 'tank/src@snapA\t101\n' >"$1"
+				printf 'tank/src@snapA\t101\n' >"$3"
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				: >"$1"
+				: >"$2"
+			}
+			zxfer_collect_destination_dataset_inventory() { return 37; }
+			status=0
+			zxfer_run_full_snapshot_discovery || status=$?
+			printf 'status=%s source=<%s> destination=<%s>\n' "$status" \
+				"$g_zxfer_source_snapshot_record_cache_file" "$g_zxfer_destination_snapshot_record_cache_file"
+		)
+		assertEquals "$retention_mode cannot publish record files after a failed inventory." \
+			"status=37 source=<> destination=<>" "$output"
+	done
 }

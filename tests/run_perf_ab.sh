@@ -19,6 +19,8 @@
 #                anything); opt-in, because
 #                upstream-compat-final reads properties in per-property shell
 #                loops (about 15 s for 3 children on macOS)
+#   restore/remote_restore: incr with -e from a populated exact-pair file
+#   forward/remote_forward: incr with -k -P from a populated source alias
 # In the remote scenarios the mock ssh sleeps --latency-ms for each new
 # connection or master open and a sixteenth of it for each multiplexed call.
 # Each scenario runs once per tree as a warm-up, then --reps times
@@ -89,7 +91,8 @@ Usage: tests/run_perf_ab.sh --baseline-ref REF [--candidate-root DIR]
 Advisory wall-clock A/B of ./zxfer (the candidate, by default this checkout)
 against the tree of git ref REF, on a canned zfs and a mock ssh. Scenarios:
 noop, incr, remote_noop and remote_incr (-O localhost -T localhost) by
-default, and props (incr with -P and 68 matching properties per dataset).
+default; props (incr with -P), restore (-e) and forward (-k -P) use 68
+properties per dataset. remote_restore and remote_forward add -O/-T.
 
 Options:
   --baseline-ref REF    git commit-ish of the baseline tree, such as a
@@ -100,7 +103,8 @@ Options:
   --snapshots N         snapshots per dataset in the fixture, at least 2
                         (default 4)
   --scenarios LIST      comma-separated scenarios to run, in order, from
-                        noop, incr, remote_noop, remote_incr and props
+                        noop, incr, remote_noop, remote_incr, props, restore,
+                        remote_restore, forward and remote_forward
                         (default noop,incr,remote_noop,remote_incr)
   --shell PATH          interpreter that runs both launchers, such as
                         /bin/dash (default /bin/sh)
@@ -200,7 +204,7 @@ zxfer_perf_ab_parse_args() {
 		l_scenario=${l_scenarios_rest%%,*}
 		l_scenarios_rest=${l_scenarios_rest#*,}
 		case "$l_scenario" in
-		noop | incr | remote_noop | remote_incr | props) ;;
+		noop | incr | remote_noop | remote_incr | props | restore | remote_restore | forward | remote_forward) ;;
 		*) zxfer_perf_ab_usage_error "unknown scenario in --scenarios: $l_scenario" ;;
 		esac
 		case " $g_perf_ab_scenarios " in
@@ -391,10 +395,57 @@ zxfer_perf_ab_build_fixture() {
 		} >>"$l_fixture_dir/manifest" || return 1
 	done
 	case " $g_perf_ab_scenarios " in
-	*" props "*)
+	*" props "* | *" restore "* | *" remote_restore "* | *" forward "* | *" remote_forward "*)
 		cp -R "$l_fixture_root/incremental" "$l_fixture_root/props" &&
 			zxfer_mockbin_add_property_fixtures "$l_fixture_root/props" \
 				"$l_fixture_size" || return 1
+		;;
+	esac
+	case " $g_perf_ab_scenarios " in
+	*" restore "* | *" remote_restore "* | *" forward "* | *" remote_forward "*)
+		# Seed both exact-pair restore and source/source provenance files. The
+		# filename format is identical in both trees; all payloads are canned.
+		for l_metadata_destination in "$ZXFER_MOCKBIN_DEST_ROOT" "$ZXFER_MOCKBIN_SOURCE_ROOT"; do
+			# shellcheck disable=SC2016  # The nested shell expands positional inputs.
+			l_metadata_name=$("$g_perf_ab_shell" -c '
+. "$1/src/zxfer_backup_metadata.sh"
+g_backup_file_extension=.zxfer_backup_info
+zxfer_get_backup_metadata_filename "$2" "$3"
+' sh "$g_perf_ab_candidate_root" "$ZXFER_MOCKBIN_SOURCE_ROOT" "$l_metadata_destination") || return 1
+			l_metadata_file="$l_fixture_root/metadata/$ZXFER_MOCKBIN_SOURCE_ROOT/$l_metadata_name"
+			(
+				umask 077
+				mkdir -p "${l_metadata_file%/*}"
+			) || return 1
+			awk -F '\t' -v root="$ZXFER_MOCKBIN_SOURCE_ROOT" \
+				-v dest="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" '
+BEGIN {
+	print "#zxfer property backup file\n#format_version:2"
+	print "#source_root:" root
+	print "#destination_root:" dest
+}
+{
+	if ($1 != dataset && NR > 1) print key "\t" payload
+	if ($1 != dataset) {
+		dataset = $1
+		key = (dataset == root) ? "." : substr(dataset, length(root) + 2)
+		payload = ""
+	}
+	value = ($2 == "compression") ? "gzip" : $3
+	payload = payload ((payload == "") ? "" : ",") $2 "=" value "=" $4
+}
+END { print key "\t" payload }
+' "$l_fixture_root/props/src_props_tree.list" >"$l_metadata_file" || return 1
+			# The alias maps the source root to itself.
+			if [ "$l_metadata_destination" = "$ZXFER_MOCKBIN_SOURCE_ROOT" ]; then
+				sed "s|^#destination_root:.*|#destination_root:$ZXFER_MOCKBIN_SOURCE_ROOT|" \
+					"$l_metadata_file" >"$l_fixture_root/alias.tmp" &&
+					mv "$l_fixture_root/alias.tmp" "$l_metadata_file" || return 1
+			else
+				printf '%s\n' "$l_metadata_file" >"$l_fixture_root/metadata.primary" || return 1
+			fi
+			chmod 600 "$l_metadata_file" || return 1
+		done
 		;;
 	esac
 }
@@ -419,7 +470,7 @@ zxfer_perf_ab_run_once() {
 		l_run_state=noop
 		l_run_want=0
 		;;
-	props)
+	props | restore | remote_restore | forward | remote_forward)
 		l_run_state=props
 		l_run_want=$((l_run_size + 1))
 		;;
@@ -445,6 +496,11 @@ zxfer_perf_ab_run_once() {
 		l_run_mux=""
 		;;
 	esac
+
+	case "$l_run_scenario" in
+	*restore) set -- "$@" -e ;;
+	*forward) set -- "$@" -k -P ;;
+	esac
 	l_run_zfs_log="$g_perf_ab_workdir/zfs.log"
 	l_run_ssh_log="$g_perf_ab_workdir/ssh.log"
 	l_run_stderr="$g_perf_ab_workdir/zxfer.stderr"
@@ -460,6 +516,7 @@ zxfer_perf_ab_run_once() {
 		MOCK_SSH_LOG=$l_run_ssh_log \
 		MOCK_SSH_HANDSHAKE_S=$l_run_handshake \
 		MOCK_SSH_MUX_S=$l_run_mux \
+		ZXFER_BACKUP_DIR="$g_perf_ab_workdir/fx$l_run_size/metadata" \
 		ZXFER_SECURE_PATH=$g_perf_ab_secure_path \
 		ZXFER_SECURE_PATH_APPEND="" \
 		PATH="$g_perf_ab_mockdir:$PATH" \
@@ -489,6 +546,18 @@ zxfer_perf_ab_run_once() {
 		l_run_mutations=$(grep -c '^MUTATE ' "$l_run_zfs_log")
 		[ "$l_run_mutations" -eq 0 ] ||
 			zxfer_perf_ab_die "$l_run_label: $l_run_mutations mutating zfs command(s) besides the receives, expected none"
+		;;
+	esac
+	case "$l_run_scenario" in
+	*restore)
+		grep -q '^MUTATE set compression=gzip ' "$l_run_zfs_log" ||
+			zxfer_perf_ab_die "$l_run_label: recorded compression was not restored"
+		;;
+	*forward)
+		IFS= read -r l_run_metadata_file <"$g_perf_ab_workdir/fx$l_run_size/metadata.primary" ||
+			zxfer_perf_ab_die "$l_run_label: metadata fixture path is missing"
+		grep -q 'compression=gzip=local' "$l_run_metadata_file" ||
+			zxfer_perf_ab_die "$l_run_label: alias provenance was not forwarded"
 		;;
 	esac
 	[ "$l_run_rep" -eq 0 ] ||

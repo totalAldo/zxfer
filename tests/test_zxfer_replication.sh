@@ -174,8 +174,8 @@ test_copy_snapshots_skips_when_last_common_matches_final_snapshot() {
 	g_dest_has_snapshots=1
 	g_option_V_very_verbose=1
 	g_last_common_snap="tank/src@snap2	222"
-	g_src_snapshot_transfer_list="tank/src@snap1	111
-tank/src@snap2	222"
+	g_src_snapshot_transfer_first="tank/src@snap1	111"
+	g_src_snapshot_transfer_final="tank/src@snap2	222"
 	log="$TEST_TMPDIR/copy_skip_same.log"
 	: >"$log"
 
@@ -372,6 +372,31 @@ test_iteration_list_split_failure_clears_previous_result() {
 
 	assertEquals "A failed record split must propagate its status and publish neither the list nor slices." \
 		"status=7 published=<> slices=<>" "$output"
+}
+
+test_grandfather_preflight_reuses_full_queue_positions_in_original_snapshot_order() {
+	g_option_g_grandfather_protection=30
+	g_recursive_source_list="tank/src/z
+tank/src/a"
+	g_zxfer_replication_iteration_list_result="1	tank/src
+2	tank/src/a
+3	tank/src/p
+4	tank/src/z"
+	log="$TEST_TMPDIR/preflight_projection.log"
+	: >"$log"
+	(
+		PREFLIGHT_LOG=$log
+		zxfer_build_replication_iteration_list() { exit 91; }
+		zxfer_inspect_delete_snap() {
+			printf '%s:%s:%s\n' "$1" "$2" "$g_zxfer_snapshot_slice_key" >>"$PREFLIGHT_LOG"
+		}
+		g_zxfer_snapshot_slice_records=prepared
+		g_initial_source=tank/src
+		zxfer_perform_grandfather_protection_checks
+	)
+	assertEquals "Preflight reuses plans in snapshot-work order, omitting property-only rows." \
+		"0:tank/src/z:4
+0:tank/src/a:2" "$(cat "$log")"
 }
 
 test_copy_filesystems_replays_each_seeded_dataset_once_in_sorted_order() {

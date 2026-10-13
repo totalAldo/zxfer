@@ -349,10 +349,15 @@ run_actionlint() {
 }
 
 list_lint_shell_files() {
-	# A single Git query keeps tracked and non-ignored untracked shell sources
-	# NUL-delimited without reporting any path twice.
+	# Keep tracked and non-ignored untracked sources NUL-delimited, once each.
+	# Git also lists unstaged deletions; lint only files still in the worktree.
 	git ls-files -z --cached --others --exclude-standard -- \
-		'zxfer' '*.sh' ':!:tests/shunit2/shunit2'
+		'zxfer' '*.sh' ':!:tests/shunit2/shunit2' |
+		xargs -0 sh -c '
+			for l_file do
+				[ ! -f "$l_file" ] || printf "%s\000" "$l_file"
+			done
+		' sh
 }
 
 run_checkbashisms() {

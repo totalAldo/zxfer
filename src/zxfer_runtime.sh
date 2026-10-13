@@ -36,13 +36,14 @@
 ################################################################################
 
 # Module contract:
-# owns globals: temp-root selection (the g_zxfer_effective_tmpdir memo and
-#   g_zxfer_default_tmpdir_result); the per-run temp root, its validated
+# owns globals: the g_zxfer_effective_tmpdir selection memo; the per-run
+#   temp root, its validated
 #   parent and its creation record (g_zxfer_owned_run_tmp_root_identity:
 #   inode, owner and mode); the caller umask recorded with the root
 #   (g_zxfer_run_umask); the cleanup-PID rows (g_zxfer_cleanup_pid_records);
-#   the allocation and readback results (g_zxfer_temp_file_result,
-#   g_zxfer_temp_file_group_result, g_zxfer_runtime_artifact_*_result).
+#   the allocation, reuse and readback results (g_zxfer_temp_file_group_result,
+#   g_zxfer_runtime_artifact_*_result).
+#   Default selection publishes path-security's g_zxfer_temp_root_candidate_result.
 # reads globals: TMPDIR, g_option_V_very_verbose, ZXFER_SOURCE_MODULES_ROOT
 #   (once, when the module is sourced, for ZXFER_CLEANUP_CHILD_WRAPPER), and
 #   ZXFER_TAB/ZXFER_LF from zxfer_quoting.sh.
@@ -313,21 +314,21 @@ zxfer_list_default_tmpdir_candidates() {
 
 # Purpose: Find the first safe default temp directory, ignoring TMPDIR.
 # Usage: zxfer_find_default_tmpdir; publishes its physical path in
-# g_zxfer_default_tmpdir_result, or returns 1 when no candidate is safe.
+# g_zxfer_temp_root_candidate_result, or returns 1 with an empty result
+# when no candidate is safe.
 zxfer_find_default_tmpdir() {
-	g_zxfer_default_tmpdir_result=""
+	g_zxfer_temp_root_candidate_result=""
 	l_default_candidates=$(zxfer_list_default_tmpdir_candidates)
 	while IFS= read -r l_default_candidate; do
 		# A missing candidate (/dev/shm on macOS) costs no fork.
 		[ -d "$l_default_candidate" ] || continue
 		if zxfer_validate_temp_root_candidate "$l_default_candidate"; then
-			g_zxfer_default_tmpdir_result=$g_zxfer_temp_root_candidate_result
 			return 0
 		fi
 	done <<EOF
 $l_default_candidates
 EOF
-	g_zxfer_default_tmpdir_result=""
+	g_zxfer_temp_root_candidate_result=""
 	return 1
 }
 
@@ -367,7 +368,7 @@ zxfer_try_get_effective_tmpdir() {
 			g_zxfer_effective_tmpdir=""
 			return 1
 		fi
-		l_effective_tmpdir=$g_zxfer_default_tmpdir_result
+		l_effective_tmpdir=$g_zxfer_temp_root_candidate_result
 		if [ -n "$l_requested_tmpdir" ]; then
 			# The fallback decision can run before option parsing (the eager
 			# run temp root in zxfer_init_session_environment), so hold the
@@ -415,11 +416,9 @@ zxfer_discard_runtime_cleanup_state() {
 	g_zxfer_run_tmp_counter=0
 	g_zxfer_runtime_artifact_path_result=""
 	g_zxfer_runtime_artifact_read_result=""
-	g_zxfer_default_tmpdir_result=""
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
 	g_zxfer_tmpdir_fallback_note=""
-	g_zxfer_temp_file_result=""
 	g_zxfer_temp_file_group_result=""
 }
 
@@ -624,33 +623,23 @@ zxfer_cleanup_runtime_artifact_path() {
 	return 0
 }
 
-# Purpose: Remove several run-root children.
-# Usage: zxfer_cleanup_runtime_artifact_paths PATH...; empty arguments are
-# skipped, and it returns 1 when any path stays.
-zxfer_cleanup_runtime_artifact_paths() {
-	l_cleanup_status=0
-
-	for l_cleanup_runtime_artifact_paths_artifact_path in "$@"; do
-		[ -n "$l_cleanup_runtime_artifact_paths_artifact_path" ] || continue
-		if ! zxfer_cleanup_runtime_artifact_path "$l_cleanup_runtime_artifact_paths_artifact_path"; then
-			l_cleanup_status=1
-		fi
-	done
-
-	return "$l_cleanup_status"
-}
-
 # Purpose: Remove a newline-separated list of runtime artifacts.
-# Usage: zxfer_cleanup_runtime_artifact_path_list LIST; run-root files and
+# Usage: zxfer_cleanup_runtime_artifact_path_list LIST [RETAIN]; run-root files and
 # FIFOs share one non-recursive rm, and every other path goes through
-# zxfer_cleanup_runtime_artifact_path. Returns 1 when any path stays.
+# zxfer_cleanup_runtime_artifact_path. RETAIN is a published artifact whose
+# lifetime continues after this operation. Returns 1 when any other path stays.
 zxfer_cleanup_runtime_artifact_path_list() {
 	l_artifact_path_list=$1
+	l_cleanup_runtime_artifact_retained=${2:-}
 	l_cleanup_status=0
 	set --
 
 	while IFS= read -r l_cleanup_runtime_artifact_path_list_artifact_path || [ -n "$l_cleanup_runtime_artifact_path_list_artifact_path" ]; do
 		[ -n "$l_cleanup_runtime_artifact_path_list_artifact_path" ] || continue
+		if [ "$l_cleanup_runtime_artifact_path_list_artifact_path" = "$l_cleanup_runtime_artifact_retained" ]; then
+			zxfer_runtime_artifact_path_is_run_root_child "$l_cleanup_runtime_artifact_path_list_artifact_path" || l_cleanup_status=1
+			continue
+		fi
 		if zxfer_runtime_artifact_path_is_run_root_child "$l_cleanup_runtime_artifact_path_list_artifact_path" &&
 			{ [ -f "$l_cleanup_runtime_artifact_path_list_artifact_path" ] || [ -p "$l_cleanup_runtime_artifact_path_list_artifact_path" ]; }; then
 			set -- "$@" "$l_cleanup_runtime_artifact_path_list_artifact_path"
@@ -674,17 +663,6 @@ zxfer_cleanup_runtime_artifact_path_list() {
 	fi
 
 	return "$l_cleanup_status"
-}
-
-# Purpose: Remove a runtime artifact list and return the caller's status.
-# Usage: zxfer_cleanup_runtime_artifact_path_list_and_return STATUS LIST;
-# cleanup failures are ignored so STATUS survives.
-zxfer_cleanup_runtime_artifact_path_list_and_return() {
-	l_return_status=$1
-	l_cleanup_runtime_artifact_path_list_and_return_artifact_path_list=$2
-
-	zxfer_cleanup_runtime_artifact_path_list "$l_cleanup_runtime_artifact_path_list_and_return_artifact_path_list" >/dev/null 2>&1 || :
-	return "$l_return_status"
 }
 
 ################################################################################
@@ -722,16 +700,21 @@ zxfer_create_private_temp_dir() {
 }
 
 # Purpose: Create an empty 0600 scratch file under the per-run temp root.
-# Usage: zxfer_create_runtime_artifact_file [PREFIX]; publishes
+# Usage: zxfer_create_runtime_artifact_file [PREFIX [NAME]]; publishes
 # g_zxfer_runtime_artifact_path_result. The run-root removal covers it. It
 # restores g_zxfer_run_umask afterwards, so callers must not hold a temporary
-# umask across the call.
+# umask across the call. With NAME, PREFIX is a workspace stem basename and
+# the fixed sibling PREFIX.NAME is created once; a collision fails closed.
 zxfer_create_runtime_artifact_file() {
 	l_prefix=${1:-zxfer-temp}
+	l_artifact_name=${2:-}
 
 	g_zxfer_runtime_artifact_path_result=""
 	case "$l_prefix" in
 	'' | '.' | '..' | *[!A-Za-z0-9._-]*) return 1 ;;
+	esac
+	case $l_artifact_name in
+	'.' | '..' | *[!0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._-]*) return 1 ;;
 	esac
 	zxfer_ensure_run_tmp_root || return "$?"
 	# A root that zxfer_ensure_run_tmp_root did not create here has no recorded
@@ -753,12 +736,17 @@ zxfer_create_runtime_artifact_file() {
 	set -C
 	l_artifact_status=1
 	while :; do
-		g_zxfer_run_tmp_counter=$((g_zxfer_run_tmp_counter + 1))
-		l_artifact_file="$g_zxfer_run_tmp_root/$l_prefix.$g_zxfer_run_tmp_counter"
+		if [ -n "$l_artifact_name" ]; then
+			l_artifact_file="$g_zxfer_run_tmp_root/$l_prefix.$l_artifact_name"
+		else
+			g_zxfer_run_tmp_counter=$((g_zxfer_run_tmp_counter + 1))
+			l_artifact_file="$g_zxfer_run_tmp_root/$l_prefix.$g_zxfer_run_tmp_counter"
+		fi
 		if { printf '' >"$l_artifact_file"; } 2>/dev/null; then
 			l_artifact_status=0
 			break
 		fi
+		[ -z "$l_artifact_name" ] || break
 		[ -e "$l_artifact_file" ] || [ -L "$l_artifact_file" ] || break
 	done
 	[ "$l_artifact_noclobber_was_set" -eq 1 ] || set +C
@@ -766,6 +754,72 @@ zxfer_create_runtime_artifact_file() {
 	[ "$l_artifact_status" -eq 0 ] || return 1
 	g_zxfer_profile_runtime_artifact_files_created=$((g_zxfer_profile_runtime_artifact_files_created + 1))
 	g_zxfer_runtime_artifact_path_result=$l_artifact_file
+}
+
+# Purpose: Allocate a named file family without a directory or extra process.
+# Usage: zxfer_create_runtime_artifact_workspace PREFIX [NAME...]; publishes the
+# primary file/stem in g_zxfer_runtime_artifact_path_result and every path in
+# g_zxfer_temp_file_group_result. Siblings are STEM.NAME; every file uses the
+# existing exclusive 0600 allocator. Retain both results before another call.
+# Returns: Nonzero with empty results after releasing a partial family.
+zxfer_create_runtime_artifact_workspace() {
+	g_zxfer_temp_file_group_result=""
+	g_zxfer_runtime_artifact_path_result=""
+	[ "$#" -ge 1 ] || return 1
+	l_workspace_prefix=$1
+	shift
+	for l_workspace_name; do
+		case $l_workspace_name in
+		'' | '.' | '..' | *[!0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._-]*) return 1 ;;
+		esac
+	done
+	# A subshell may release its primary but retain a cache sibling. Check
+	# requested names before creating any sibling; this also works under set -f.
+	while :; do
+		zxfer_get_temp_file "$l_workspace_prefix" || return "$?"
+		l_workspace_stem=$g_zxfer_runtime_artifact_path_result
+		l_workspace_taken=""
+		for l_workspace_name; do
+			[ ! -e "$l_workspace_stem.$l_workspace_name" ] &&
+				[ ! -L "$l_workspace_stem.$l_workspace_name" ] || l_workspace_taken=1
+		done
+		[ -n "$l_workspace_taken" ] || break
+		l_workspace_status=0
+		zxfer_cleanup_runtime_artifact_path "$l_workspace_stem" || l_workspace_status=$?
+		g_zxfer_runtime_artifact_path_result=""
+		[ "$l_workspace_status" -eq 0 ] || return "$l_workspace_status"
+	done
+	l_workspace_paths=$l_workspace_stem
+	for l_workspace_name; do
+		zxfer_get_temp_file "${l_workspace_stem##*/}" "$l_workspace_name" || {
+			l_workspace_status=$?
+			zxfer_cleanup_runtime_artifact_path_list "$l_workspace_paths" >/dev/null 2>&1 || :
+			g_zxfer_temp_file_group_result=""
+			g_zxfer_runtime_artifact_path_result=""
+			return "$l_workspace_status"
+		}
+		l_workspace_paths=$l_workspace_paths$ZXFER_LF$g_zxfer_runtime_artifact_path_result
+	done
+	g_zxfer_temp_file_group_result=$l_workspace_paths
+	g_zxfer_runtime_artifact_path_result=$l_workspace_stem
+}
+
+# Purpose: Reuse a run-root scratch file or allocate a fresh one.
+# Usage: zxfer_ensure_runtime_artifact_file CURRENT_PATH NAME_PREFIX; publishes
+# g_zxfer_runtime_artifact_path_result. Reuse only a path under this run's
+# root, so callers never write through an inherited or stale outside path.
+# Returns: Zero with the reusable path, otherwise the allocation status.
+zxfer_ensure_runtime_artifact_file() {
+	g_zxfer_runtime_artifact_path_result=""
+	if [ -n "${g_zxfer_run_tmp_root:-}" ]; then
+		case ${1:-} in
+		"$g_zxfer_run_tmp_root"/?*)
+			g_zxfer_runtime_artifact_path_result=$1
+			return 0
+			;;
+		esac
+	fi
+	zxfer_create_runtime_artifact_file "$2"
 }
 
 # Purpose: Replace a runtime artifact file's contents with a payload.
@@ -836,45 +890,11 @@ zxfer_read_runtime_artifact_file_trimmed() {
 }
 
 # Purpose: Allocate one scratch file under the run root, or stop the run.
-# Usage: zxfer_get_temp_file; publishes g_zxfer_temp_file_result.
+# Usage: zxfer_get_temp_file [PREFIX [NAME]]; same allocation contract as
+# zxfer_create_runtime_artifact_file, but reports allocation failure centrally.
 zxfer_get_temp_file() {
-	g_zxfer_temp_file_result=""
-	zxfer_create_runtime_artifact_file "zxfer-temp" ||
+	zxfer_create_runtime_artifact_file "${1:-zxfer-temp}" "${2:-}" ||
 		zxfer_throw_error "Error creating temporary file." "$?"
 	zxfer_echoV "New temporary file: $g_zxfer_runtime_artifact_path_result"
-	g_zxfer_temp_file_result=$g_zxfer_runtime_artifact_path_result
-}
-
-# Purpose: Allocate COUNT scratch files as one group.
-# Usage: zxfer_create_temp_file_group COUNT; publishes the paths, one per line,
-# in g_zxfer_temp_file_group_result. A failed allocation removes the files
-# already made and returns its status.
-zxfer_create_temp_file_group() {
-	l_temp_file_count=$1
-	l_temp_file_index=0
-	l_temp_file_group_paths=""
-
-	g_zxfer_temp_file_group_result=""
-	case "$l_temp_file_count" in
-	'' | *[!0-9]* | 0)
-		return 1
-		;;
-	esac
-
-	while [ "$l_temp_file_index" -lt "$l_temp_file_count" ]; do
-		zxfer_get_temp_file || {
-			l_temp_file_status=$?
-			zxfer_cleanup_runtime_artifact_path_list "$l_temp_file_group_paths" >/dev/null 2>&1 || :
-			return "$l_temp_file_status"
-		}
-		if [ -n "$l_temp_file_group_paths" ]; then
-			l_temp_file_group_paths=$l_temp_file_group_paths'
-'$g_zxfer_temp_file_result
-		else
-			l_temp_file_group_paths=$g_zxfer_temp_file_result
-		fi
-		l_temp_file_index=$((l_temp_file_index + 1))
-	done
-
-	g_zxfer_temp_file_group_result=$l_temp_file_group_paths
+	return 0
 }

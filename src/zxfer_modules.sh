@@ -55,7 +55,6 @@ zxfer_property_state.sh
 zxfer_property_transfer.sh
 zxfer_snapshot_discovery.sh
 zxfer_migration_services.sh
-zxfer_send_jobs.sh
 zxfer_send_receive.sh
 zxfer_snapshot_plan.sh
 zxfer_replication.sh

@@ -155,6 +155,61 @@ What to inspect:
   under the secure PATH; discovery needs no other helper on the target
 - whether the destination pool exists
 
+## Recursive Snapshot Delta Counts
+
+With `-v` (also enabled by `-V`), each nonempty recursive delta summary lists
+the full snapshot names and GUIDs behind its counts:
+
+```text
+Recursive snapshot delta summary: snapshots_missing_on_destination=1 snapshots_missing_on_source=0 source_datasets=1 destination_extra_datasets=0
+Recursive source snapshots absent from destination (name/GUID):
+  tank/iocage/jails/sftp@daily-2026-10-12 (GUID: 123456789)
+```
+
+`snapshots_missing_on_destination` counts source snapshot identities absent
+from the destination. `snapshots_missing_on_source` counts destination
+identities absent from the source; that list shows actual destination paths.
+Identity includes both name and GUID, so a same-name GUID mismatch appears in
+both lists.
+
+Log parsers must replace `source_missing_snapshots` with
+`snapshots_missing_on_destination`, and `destination_extra_snapshots` with
+`snapshots_missing_on_source`. The counts and other summary fields are
+unchanged.
+
+Excluded datasets are omitted. The lists describe discovery differences;
+the dataset planner still decides the send range and applies deletion and
+divergence safety checks. `No new snapshots to transfer during discovery for
+[zroot].` names the source pool or primary dataset and means no included source
+snapshot identities were missing from the destination in that discovery pass.
+It may precede the `-s`/`-m` snapshot or belong to a `-Y` iteration, so a later
+pass can still find work. Dataset planning messages give their own no-send
+reasons separately.
+
+A missing snapshot may precede a newer snapshot shared by name and GUID.
+zxfer sends the range **after the newest common snapshot** in source creation
+order; it does not backfill older gaps. With `-v`/`-V`, the checked dataset plan
+names each such missing identity and its anchor, for example:
+
+```text
+Source snapshots not scheduled for transfer to [backup/iocage/jails/sftp]:
+  tank/iocage/jails/sftp@older (GUID: 100): before newest common snapshot tank/iocage/jails/sftp@newer (GUID: 200) in source creation order; older gaps are not backfilled.
+No new snapshots to transfer for [tank/iocage/jails/sftp] -> [backup/iocage/jails/sftp]: newest listed source snapshot is already shared: tank/iocage/jails/sftp@newer (GUID: 200).
+```
+
+If newer snapshots still need transfer, their normal sends proceed and only
+the older missing identities get skip reasons. A dataset without source snapshot
+records instead says `no source snapshots were listed for this dataset in discovery.`
+This describes the checked listing, not proof of live absence; the existing
+live source recheck still protects any deletion of all destination snapshots.
+Nonrecursive (`-N`)
+discovery explains missing descendants outside the dataset queue, accounting
+for any datasets also queued for `-d` cleanup. A safety refusal, such as a GUID
+conflict, missing eligible base or grandfather protection, still reports its
+existing warning/error and stops through the failure path; it is not reported
+as a successful no-send decision. These explanations do not authorize a
+rollback, deletion, older anchor or full receive.
+
 ## Destination Divergence Warnings And Failures
 
 Example:

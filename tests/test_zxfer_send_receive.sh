@@ -18,6 +18,8 @@ TESTS_DIR=$(dirname "$0")
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
+# shellcheck source=tests/helpers/send_job_fixtures.sh
+. "$TESTS_DIR/helpers/send_job_fixtures.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_send_receive"
@@ -28,6 +30,10 @@ oneTimeTearDown() {
 }
 
 setUp() {
+	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_send_receive_jobs_tests.sh"; then
+		zxfer_test_send_job_fixture_setup
+		return
+	fi
 	set +e
 	zxfer_test_reset_all_owner_state || return
 	TMPDIR="$TEST_TMPDIR"
@@ -196,7 +202,8 @@ test_zfs_send_receive_treats_local_zfs_path_as_literal() {
 
 	cmd=$(
 		zxfer_echoV() { :; }
-		zxfer_schedule_send_receive_pipeline() { printf '%s\n' "$1"; }
+		zxfer_execute_rendered_shell_command() { printf '%s\n' "$1"; }
+		zxfer_finish_destination_receive() { :; }
 		zxfer_zfs_send_receive "" "tank/fs@snap1" "tank/dst" 0
 	)
 	eval "$cmd" >/dev/null 2>&1
@@ -215,9 +222,10 @@ test_zfs_send_receive_adds_remote_wrappers_and_progress_pipeline() {
 	(
 		EXEC_LOG="$log"
 		zxfer_wrap_command_with_ssh() {
-			g_zxfer_wrapped_command_result="<$1:$2:$3:$4>"
+			g_zxfer_shell_command_result="<$1:$2:$3:$4>"
 		}
 		zxfer_handle_progress_bar_option() {
+			g_zxfer_shell_command_result="progress rendering scratch"
 			g_zxfer_progress_bar_command_result="| progress"
 		}
 		zxfer_execute_rendered_shell_command() {
@@ -286,7 +294,7 @@ test_zfs_send_receive_tracks_remote_ssh_profile_counters_when_very_verbose() {
 			(
 				zxfer_echoV() { :; }
 				zxfer_wrap_command_with_ssh() {
-					g_zxfer_wrapped_command_result="<$4 via $2>"
+					g_zxfer_shell_command_result="<$4 via $2>"
 				}
 				zxfer_execute_rendered_shell_command() {
 					printf '%s\n' "$1"
@@ -319,7 +327,8 @@ test_zfs_send_receive_records_startup_latency_once() {
 			g_zxfer_profile_startup_latency_recorded=0
 			g_zxfer_profile_zfs_send_calls=0
 			zxfer_echoV() { :; }
-			zxfer_schedule_send_receive_pipeline() { :; }
+			zxfer_execute_rendered_shell_command() { :; }
+			zxfer_finish_destination_receive() { :; }
 			zxfer_profile_read_clock_ms() {
 				g_zxfer_profile_clock_ms=1250
 			}
@@ -348,15 +357,12 @@ test_zxfer_reset_send_receive_state_clears_jobs_and_progress_scratch() {
 	g_zxfer_send_job_abort_failure_message="stale failure"
 	g_zxfer_progress_size_estimate_result=4096
 	g_zxfer_progress_bar_command_result="| pv"
-	g_zxfer_wrapped_command_result="ssh host cmd"
-	zxfer_reset_send_job_state
 	zxfer_reset_send_receive_state
 	assertEquals "Reset clears the active job count." 0 "$g_count_zfs_send_jobs"
 	assertEquals "Reset clears the active job records." "" "$g_zxfer_send_jobs"
 	assertEquals "Reset clears the abort diagnostic." "" "$g_zxfer_send_job_abort_failure_message"
 	assertEquals "Reset clears the cached estimate." "" "$g_zxfer_progress_size_estimate_result"
 	assertEquals "Reset clears the rendered progress command." "" "$g_zxfer_progress_bar_command_result"
-	assertEquals "Reset clears the wrapped command." "" "$g_zxfer_wrapped_command_result"
 }
 
 # ---------------------------------------------------------------------------
@@ -383,6 +389,39 @@ test_wrap_command_with_ssh_rejects_missing_safe_compression_commands() {
 		"$output" "Compression enabled but commands are not configured safely."
 }
 
+test_wrap_command_with_ssh_retains_input_from_the_canonical_result() {
+	l_wrap_output=$(
+		zxfer_publish_prepared_ssh_shell_command_for_host_or_throw() {
+			printf 'input=%s\n' "$2"
+			g_zxfer_shell_command_result="prepared ssh"
+		}
+		g_option_O_origin_host=origin.example
+		g_zxfer_shell_command_result="zfs send tank/src@snap"
+		zxfer_wrap_command_with_ssh "$g_zxfer_shell_command_result" \
+			origin.example 1 send
+		printf 'result=%s\n' "$g_zxfer_shell_command_result"
+	)
+	assertEquals "Wrapping retains its input and publishes the complete local decompression stage." \
+		"input=zfs send tank/src@snap | remote-gzip
+result=prepared ssh | gunzip" "$l_wrap_output"
+}
+
+test_wrap_command_with_ssh_clears_stale_results_on_rejected_input() {
+	for l_wrap_empty_part in host command; do
+		g_zxfer_shell_command_result="stale command"
+		if [ "$l_wrap_empty_part" = host ]; then
+			zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "" 0 send
+		else
+			zxfer_wrap_command_with_ssh "" origin.example 0 send
+		fi
+		l_wrap_reject_status=$?
+		assertEquals "An empty $l_wrap_empty_part keeps the builder failure status." \
+			1 "$l_wrap_reject_status"
+		assertEquals "An empty $l_wrap_empty_part publishes no stale command." \
+			"" "$g_zxfer_shell_command_result"
+	done
+}
+
 test_zfs_send_receive_stops_when_ssh_wrapping_fails_without_throwing() {
 	set +e
 	for side in send receive; do
@@ -397,7 +436,7 @@ test_zfs_send_receive_stops_when_ssh_wrapping_fails_without_throwing() {
 					printf 'throw=%s\n' "$1"
 					exit "${2:-1}"
 				}
-				zxfer_schedule_send_receive_pipeline() {
+				zxfer_execute_rendered_shell_command() {
 					printf 'scheduled=%s\n' "$1"
 				}
 				if [ "$side" = send ]; then
@@ -432,7 +471,7 @@ test_zfs_send_receive_throws_nonthrowing_progress_wrapper_failures() {
 				printf 'throw=%s\n' "$1"
 				exit "${2:-1}"
 			}
-			zxfer_schedule_send_receive_pipeline() {
+			zxfer_execute_rendered_shell_command() {
 				printf 'scheduled=%s\n' "$1"
 			}
 			g_option_D_display_progress_bar="pv -s %%size%% -N %%title%%"
@@ -465,6 +504,16 @@ test_zfs_send_receive_propagates_background_spawn_failure() {
 	assertEquals "Failure to start the shell preserves its status." 41 "$status"
 	assertEquals "Spawn failure names the transfer." \
 		"Failed to start the send/receive job for [tank/a@new -> backup/a]." "$output"
+}
+
+# zxfer-test-fragment: suites/zxfer_send_receive_jobs_tests.sh
+# shellcheck source=tests/suites/zxfer_send_receive_jobs_tests.sh
+. "$TESTS_DIR/suites/zxfer_send_receive_jobs_tests.sh"
+
+suite() {
+	zxfer_test_register_fragment_tests \
+		"$TESTS_DIR/test_zxfer_send_receive.sh" \
+		"$TESTS_DIR/suites/zxfer_send_receive_jobs_tests.sh"
 }
 
 # shellcheck source=tests/shunit2/shunit2

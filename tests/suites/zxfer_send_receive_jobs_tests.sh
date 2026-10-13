@@ -1,48 +1,19 @@
 #!/bin/sh
-#
-# shunit2 tests for the send/receive job supervision in src/zxfer_send_jobs.sh.
-# The background-shell helpers it runs jobs in (src/zxfer_exec.sh) are tested
-# in tests/suites/zxfer_exec_background_shell_tests.sh. Job success, a failed
-# job's status and report, the teardown of its running siblings, -j limits
-# and ancestry order through the replication queue, and the finish of a job's
-# receive are pinned black-box in tests/test_contract_send_receive.sh and
-# tests/test_contract_planning.sh.
-#
-# Pinned here: what the black-box runs cannot reach. The scheduler's own job
-# limit and ancestry waits (the replication queue defers first), a job shell
-# that dies before recording its status, a status recorded under ksh93,
-# foreground receives finishing in the scheduler, reaping every finished job
-# in one scan without letting a hook read the job list, and abort teardown:
-# every pipeline stage in each spawn mode, TERM before KILL, the first
-# failure kept, a recycled PID never signalled, and the grace knob never
-# evaluated.
-#
+# Job supervision cases for src/zxfer_send_receive.sh. The entry suite applies
+# zxfer_test_send_job_fixture_setup to these cases, preserving their spawn,
+# process-group and status-file fixtures.
 # shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
-TESTS_DIR=$(dirname "$0")
-
-# shellcheck source=tests/test_helper.sh
-. "$TESTS_DIR/test_helper.sh"
-# shellcheck source=tests/helpers/send_job_fixtures.sh
-. "$TESTS_DIR/helpers/send_job_fixtures.sh"
-
-zxfer_source_runtime_modules_through "zxfer_snapshot_plan.sh"
-
-oneTimeSetUp() {
-	zxfer_test_create_tmpdir "zxfer_send_jobs"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
-setUp() {
-	zxfer_test_send_job_fixture_setup
-}
-
-# Stub the post-receive hooks so reap-time bookkeeping is observable without
-# live snapshot state.
+# Supply bounded transfer stages and observable post-receive hooks without
+# touching ZFS.
 bgjob_test_stub_finalize_hooks() {
+	zxfer_render_shell_command_from_argv() {
+		case $2 in
+		send) g_zxfer_shell_command_result=${BGJOB_TEST_SEND:-sleep 1} ;;
+		receive) g_zxfer_shell_command_result=${BGJOB_TEST_RECEIVE:-cat >/dev/null} ;;
+		*) return 1 ;;
+		esac
+	}
 	zxfer_note_destination_receive_completed() {
 		printf 'completed %s\n' "$1" >>"${BGJOB_HOOK_LOG:?}"
 	}
@@ -162,21 +133,23 @@ test_reap_send_job_reports_a_job_shell_that_died_before_recording_status() {
 	assertContains "The abnormal death carries the fail-closed status." "$output" ", exit 125)."
 }
 
-test_schedule_send_receive_pipeline_runs_and_finishes_foreground_receives() {
+test_zfs_send_receive_dispatch_runs_and_finishes_foreground_receives() {
 	hook_log="$TEST_TMPDIR/bgjob_foreground.hooks"
 	: >"$hook_log"
 	output=$(
 		(
 			BGJOB_HOOK_LOG=$hook_log
+			BGJOB_TEST_SEND=send
+			BGJOB_TEST_RECEIVE=recv
 			bgjob_test_stub_finalize_hooks
 			zxfer_execute_rendered_shell_command() {
 				printf 'exec %s\n' "$1" >>"$BGJOB_HOOK_LOG"
 			}
 			g_is_performed_send_destroy=0
 			g_option_j_jobs=1
-			zxfer_schedule_send_receive_pipeline "send | recv" "tank/a@snap" "backup/a" 1
+			zxfer_zfs_send_receive "" "tank/a@snap" "backup/a" 1
 			g_option_j_jobs=3
-			zxfer_schedule_send_receive_pipeline "send | recv" "tank/b@snap" "backup/b" 0
+			zxfer_zfs_send_receive "" "tank/b@snap" "backup/b" 0
 			printf 'count=%s performed=%s\n' "$g_count_zfs_send_jobs" "$g_is_performed_send_destroy"
 		)
 	)
@@ -194,7 +167,7 @@ invalidate backup/b exact
 verify backup/b" "$(cat "$hook_log")"
 }
 
-test_schedule_send_receive_pipeline_waits_at_the_job_limit() {
+test_zfs_send_receive_dispatch_waits_at_the_job_limit() {
 	hook_log="$TEST_TMPDIR/bgjob_limit.hooks"
 	: >"$hook_log"
 	output=$(
@@ -203,10 +176,11 @@ test_schedule_send_receive_pipeline_waits_at_the_job_limit() {
 			bgjob_test_stub_finalize_hooks
 			zxfer_echov() { printf '%s\n' "$1"; }
 			g_option_j_jobs=2
-			zxfer_schedule_send_receive_pipeline "sleep 1" "tank/a@snap" "backup/a" 1
-			zxfer_schedule_send_receive_pipeline "sleep 1" "tank/b@snap" "backup/b" 1
+			zxfer_zfs_send_receive "" "tank/a@snap" "backup/a" 1
+			zxfer_zfs_send_receive "" "tank/b@snap" "backup/b" 1
 			printf 'count=%s\n' "$g_count_zfs_send_jobs"
-			zxfer_schedule_send_receive_pipeline "exit 0" "tank/c@snap" "backup/c" 1
+			BGJOB_TEST_SEND="exit 0"
+			zxfer_zfs_send_receive "" "tank/c@snap" "backup/c" 1
 			if zxfer_send_job_conflicts_with_destination backup/c; then
 				printf 'third_started=yes\n'
 			fi
@@ -223,7 +197,7 @@ test_schedule_send_receive_pipeline_waits_at_the_job_limit() {
 		"$(cat "$hook_log")" "completed backup/c"
 }
 
-test_schedule_send_receive_pipeline_waits_for_destination_ancestry_conflicts() {
+test_zfs_send_receive_dispatch_waits_for_destination_ancestry_conflicts() {
 	hook_log="$TEST_TMPDIR/bgjob_ancestry.hooks"
 	: >"$hook_log"
 	output=$(
@@ -232,10 +206,11 @@ test_schedule_send_receive_pipeline_waits_for_destination_ancestry_conflicts() {
 			bgjob_test_stub_finalize_hooks
 			zxfer_echov() { printf '%s\n' "$1"; }
 			g_option_j_jobs=4
-			zxfer_schedule_send_receive_pipeline "sleep 1" "tank/a@snap" "backup/a" 1
-			zxfer_schedule_send_receive_pipeline "exit 0" "tank/b@snap" "backup/b" 1
+			zxfer_zfs_send_receive "" "tank/a@snap" "backup/a" 1
+			BGJOB_TEST_SEND="exit 0"
+			zxfer_zfs_send_receive "" "tank/b@snap" "backup/b" 1
 			printf 'independent_count=%s\n' "$g_count_zfs_send_jobs"
-			zxfer_schedule_send_receive_pipeline "exit 0" "tank/a/child@snap" "backup/a/child" 1
+			zxfer_zfs_send_receive "" "tank/a/child@snap" "backup/a/child" 1
 			printf 'child_count=%s\n' "$g_count_zfs_send_jobs"
 			zxfer_wait_for_zfs_send_jobs "unit"
 		)
@@ -494,6 +469,3 @@ test_abort_all_send_jobs_never_evaluates_a_non_numeric_grace_knob() {
 
 	assertFalse "The grace knob never reaches arithmetic as an expression." "[ -e '$marker' ]"
 }
-
-# shellcheck source=tests/shunit2/shunit2
-. "$SHUNIT2_BIN"

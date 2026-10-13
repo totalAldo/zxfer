@@ -36,7 +36,8 @@
 ################################################################################
 
 # Module contract:
-# owns globals: g_option_* parse results and g_destination.
+# owns globals: g_option_* parse results, g_destination, and the local
+#   g_cmd_compress_safe/g_cmd_decompress_safe commands prepared after parsing.
 # reads globals: OPTARG and ZXFER_MAX_YIELD_ITERATIONS; -Z writes the
 #   dependency-owned g_cmd_compress, and the -o check publishes the property
 #   transfer module's g_zxfer_override_properties_result and prepared policy.
@@ -76,6 +77,33 @@ zxfer_init_cli_option_defaults() {
 	g_option_Y_yield_iterations=1
 	g_option_w_raw_send=0
 	g_option_z_compress=0
+}
+
+# Purpose: Validate -z/-Z and resolve the local compression and decompression
+# commands into g_cmd_compress_safe and g_cmd_decompress_safe.
+# Usage: Called once after option parsing. Without -z (which -Z implies) both
+# stay empty, since every consumer is gated on -z.
+zxfer_refresh_compression_commands() {
+	g_cmd_compress_safe=""
+	g_cmd_decompress_safe=""
+	[ "$g_option_z_compress" -eq 1 ] || return 0
+
+	zxfer_check_literal_token_string "$g_cmd_compress" "Compression command (-Z)" ||
+		zxfer_throw_usage_error "$g_zxfer_literal_token_error_result" 2
+	zxfer_split_tokens_into_result "$g_cmd_compress"
+	[ -n "$g_zxfer_split_tokens_result" ] ||
+		zxfer_throw_usage_error "Compression command (-Z) cannot be empty." 2
+	zxfer_check_literal_token_string "$g_cmd_decompress" "Decompression command" ||
+		zxfer_throw_error "$g_zxfer_literal_token_error_result"
+	zxfer_split_tokens_into_result "$g_cmd_decompress"
+	[ -n "$g_zxfer_split_tokens_result" ] ||
+		zxfer_throw_error "Compression requested but decompression command missing."
+	zxfer_resolve_cli_command_safe "" "$g_cmd_compress" "compression command" ||
+		zxfer_throw_dependency_error "$g_zxfer_resolved_cli_command_result"
+	g_cmd_compress_safe=$g_zxfer_resolved_cli_command_result
+	zxfer_resolve_cli_command_safe "" "$g_cmd_decompress" "decompression command" ||
+		zxfer_throw_dependency_error "$g_zxfer_resolved_cli_command_result"
+	g_cmd_decompress_safe=$g_zxfer_resolved_cli_command_result
 }
 
 # Purpose: Parse the command-line switches into the g_option_* state.

@@ -36,7 +36,7 @@
 ################################################################################
 
 # Module contract:
-# owns globals: the source listing's command, PID, flags and remote parallel
+# owns globals: the source listing's command, PID and remote parallel
 #   helper (g_source_snapshot_list_*, g_origin_parallel_cmd, _host), the fast
 #   no-op proof's destination listing handed to full discovery, the destination
 #   listing stderr scratch file, the staged snapshot record files
@@ -44,9 +44,7 @@
 #   g_zxfer_destination_snapshot_record_cache_file), the recursive work lists
 #   (g_recursive_source_list, g_recursive_source_dataset_list,
 #   g_recursive_destination_extra_dataset_list), and the in-shell results
-#   g_zxfer_source_snapshot_list_cmd_result,
 #   g_zxfer_parallel_source_job_check_result,
-#   g_zxfer_snapshot_discovery_file_read_result,
 #   g_zxfer_snapshot_discovery_status_file_result,
 #   g_zxfer_snapshot_discovery_failure_result,
 #   g_zxfer_recursive_dataset_list_result, g_zxfer_quoted_path_result and
@@ -59,9 +57,13 @@
 #   through the destination-state helpers.
 # returns via stdout: normalized snapshot streams, reversed record files and
 #   the -v/-V delta report; launches registered background producers.
+# Source command builders publish quoting's g_zxfer_shell_command_result;
+# launchers retain it before producer preparation can render another command.
 #
 # zxfer_get_zfs_list first tries the fast recursive no-op proof, then runs
-# full discovery: the creation-ordered source listing in the background while
+# full discovery. The fast proof has one owner for allocation, producer waits,
+# validation, publication and release; only its raw-listing handoff survives a
+# fallback. Full discovery starts the creation-ordered source listing while
 # the destination is listed, the diff that publishes the work lists, and the
 # record files per-dataset planning reads. Every destination listing runs
 # through zxfer_run_destination_zfs_cmd, so a -T target is listed like a local
@@ -114,10 +116,7 @@ ZXFER_SOURCE_DISCOVERY_SENTINEL='@@ZXFER_SOURCE_SNAPSHOT_DISCOVERY_COMPLETE@@'
 # cache survives it and is cleared only by the session reset below.
 zxfer_reset_snapshot_producer_state() {
 	g_source_snapshot_list_cmd=""
-	g_zxfer_source_snapshot_list_cmd_result=""
 	g_source_snapshot_list_pid=""
-	g_source_snapshot_list_uses_parallel=0
-	g_zxfer_snapshot_discovery_file_read_result=""
 	g_zxfer_snapshot_discovery_status_file_result=""
 	g_zxfer_parallel_source_job_check_result=""
 }
@@ -130,19 +129,6 @@ zxfer_reset_snapshot_producer_session_state() {
 	g_origin_parallel_cmd=""
 	g_origin_parallel_cmd_host=""
 	g_zxfer_destination_listing_error_file=""
-}
-
-# Purpose: Read a staged discovery file into the current shell.
-# Usage: zxfer_read_snapshot_discovery_capture_file PATH; publishes
-# g_zxfer_snapshot_discovery_file_read_result or returns the read status.
-zxfer_read_snapshot_discovery_capture_file() {
-	l_capture_path=$1
-
-	g_zxfer_snapshot_discovery_file_read_result=""
-	zxfer_read_runtime_artifact_file "$l_capture_path" || return "$?"
-	g_zxfer_snapshot_discovery_file_read_result=$g_zxfer_runtime_artifact_read_result
-
-	return 0
 }
 
 # Purpose: Print the first lines of a captured text for an error message.
@@ -239,13 +225,15 @@ zxfer_render_discovery_sentinel_filter_cmd() {
 # says whether PIPELINE ends its output with ZXFER_SOURCE_DISCOVERY_SENTINEL,
 # which a local filter then checks and strips. Under -z the origin compresses
 # the stream and the local side decompresses it. Publishes
-# g_zxfer_source_snapshot_list_cmd_result.
+# g_zxfer_shell_command_result. Retains PIPELINE before clearing the result;
+# a failed SSH render publishes no partial command and preserves its status.
 zxfer_render_origin_listing_command() {
 	l_origin_listing=$1
+	g_zxfer_shell_command_result=""
 	l_origin_listing_compressed=0
 	if [ "${g_option_z_compress:-0}" -eq 1 ]; then
 		if [ -z "${g_origin_cmd_compress_safe:-}" ]; then
-			g_zxfer_source_snapshot_list_cmd_result="The origin host compression command is not resolved."
+			g_zxfer_shell_command_result="The origin host compression command is not resolved."
 			return 1
 		fi
 		l_origin_listing_compressed=1
@@ -253,7 +241,11 @@ zxfer_render_origin_listing_command() {
 	fi
 	zxfer_build_remote_sh_c_command "$l_origin_listing" >/dev/null
 	zxfer_ssh_shell_command_for_host render "$g_option_O_origin_host" \
-		"$g_zxfer_remote_sh_c_command_result" || return
+		"$g_zxfer_shell_command_result" || {
+		set -- "$?"
+		g_zxfer_shell_command_result=""
+		return "$1"
+	}
 	l_origin_listing=$g_zxfer_shell_command_result
 	[ "$l_origin_listing_compressed" -eq 0 ] ||
 		l_origin_listing="$l_origin_listing | $g_cmd_decompress_safe"
@@ -261,24 +253,22 @@ zxfer_render_origin_listing_command() {
 		zxfer_render_discovery_sentinel_filter_cmd
 		l_origin_listing="$l_origin_listing | $g_zxfer_shell_command_result"
 	fi
-	g_zxfer_source_snapshot_list_cmd_result=$l_origin_listing
+	g_zxfer_shell_command_result=$l_origin_listing
 }
 
 # Purpose: Build the source listing for the recursive no-op proof: one
 # recursive name,guid stream of every source snapshot.
 # Usage: zxfer_build_source_snapshot_name_list_cmd; publishes the shell
-# command in g_zxfer_source_snapshot_list_cmd_result, or returns non-zero with
+# command in g_zxfer_shell_command_result, or returns non-zero with
 # an operator message (or nothing) there. The proof ignores -j, so it never
 # pays parallel and per-dataset zfs startup before it knows there is work.
 # GUIDs keep an exact-name divergence from passing as a no-op.
 zxfer_build_source_snapshot_name_list_cmd() {
-	g_source_snapshot_list_uses_parallel=0
-	g_zxfer_source_snapshot_list_cmd_result=""
+	g_zxfer_shell_command_result=""
 
 	if [ -z "$g_option_O_origin_host" ]; then
 		zxfer_render_shell_command_from_argv "$g_cmd_zfs" \
 			list -Hr -o name,guid -t snapshot "$g_initial_source"
-		g_zxfer_source_snapshot_list_cmd_result=$g_zxfer_shell_command_result
 		return 0
 	fi
 
@@ -343,65 +333,88 @@ zxfer_register_background_producer() {
 # otherwise 0.
 # Side effects: Publishes the registered producer PID in g_last_background_pid.
 zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
-	l_cmd=$1
-	l_sorted_output_file=$2
-	l_error_file=${3:-}
-	l_count_file=${4:-}
+	zxfer_start_source_snapshot_producer fast "$1" "$2" "${3:-}" "${4:-}"
+}
 
-	zxfer_get_temp_file || return "$?"
-	zxfer_quote_path_into_result "$g_zxfer_temp_file_result"
-	l_status_files=$g_zxfer_quoted_path_result
-	l_managed_cmd="{ ( $l_cmd ); printf '%s\n' \"\$?\" > $g_zxfer_quoted_path_result; }"
-	if [ -n "${g_option_x_exclude_datasets:-}" ]; then
+# Purpose: Render and start either source discovery pipeline, tracking every
+# stage before the shared byte-sort, status check and cleanup registration.
+# Usage: zxfer_start_source_snapshot_producer fast|full CMD SORTED ERR COPY.
+# COPY is the fast proof's optional presence file or full discovery's raw file.
+# The full listing keeps creation order through tee; only the fast proof applies
+# the exclude filter and presence probe. Builders own compression sentinels.
+zxfer_start_source_snapshot_producer() {
+	l_producer_mode=$1
+	l_producer_sorted=$3
+	l_producer_error=$4
+	l_producer_copy=$5
+	if [ "$l_producer_mode" = full ]; then
+		zxfer_create_runtime_artifact_workspace discovery-producer tee-status || return "$?"
+		l_producer_workspace=$g_zxfer_runtime_artifact_path_result
+		l_producer_purpose="background source snapshot discovery helper"
+	else
 		zxfer_get_temp_file || return "$?"
-		zxfer_quote_path_into_result "$g_zxfer_temp_file_result"
-		l_status_files="$l_status_files $g_zxfer_quoted_path_result"
+		l_producer_purpose="background source snapshot no-op proof helper"
+	fi
+	zxfer_quote_path_into_result "$g_zxfer_runtime_artifact_path_result"
+	l_producer_status_files=$g_zxfer_quoted_path_result
+	l_producer_command="{ ( $2 ); printf '%s\n' \"\$?\" > $g_zxfer_quoted_path_result; }"
+	if [ "$l_producer_mode" = full ]; then
+		zxfer_quote_path_into_result "$l_producer_workspace.tee-status"
+		l_producer_stage_status=$g_zxfer_quoted_path_result
+		l_producer_status_files="$l_producer_status_files $l_producer_stage_status"
+		zxfer_quote_path_into_result "$l_producer_copy"
+		l_producer_command="$l_producer_command | { tee $g_zxfer_quoted_path_result; printf '%s\n' \"\$?\" > $l_producer_stage_status; }"
+	elif [ -n "${g_option_x_exclude_datasets:-}" ]; then
+		zxfer_get_temp_file || return "$?"
+		zxfer_quote_path_into_result "$g_zxfer_runtime_artifact_path_result"
+		l_producer_status_files="$l_producer_status_files $g_zxfer_quoted_path_result"
 		zxfer_render_shell_command_from_argv "${g_cmd_awk:-awk}" \
 			-v "exclude_pattern=$g_option_x_exclude_datasets" "$ZXFER_SNAPSHOT_RECORD_AWK"
-		l_managed_cmd="$l_managed_cmd | { $g_zxfer_shell_command_result; printf '%s\n' \"\$?\" > $g_zxfer_quoted_path_result; }"
+		l_producer_command="$l_producer_command | { $g_zxfer_shell_command_result; printf '%s\n' \"\$?\" > $g_zxfer_quoted_path_result; }"
 	fi
-	if [ -n "$l_count_file" ]; then
+	if [ "$l_producer_mode" = fast ] && [ -n "$l_producer_copy" ]; then
 		zxfer_get_temp_file || return "$?"
-		zxfer_quote_path_into_result "$g_zxfer_temp_file_result"
-		l_count_status_file_q=$g_zxfer_quoted_path_result
-		l_status_files="$l_status_files $l_count_status_file_q"
-		zxfer_quote_path_into_result "$l_count_file"
-		l_managed_cmd="$l_managed_cmd | { l_count_status=0; if IFS= read -r l_first_snapshot; then printf '%s\n' 1 > $g_zxfer_quoted_path_result || l_count_status=\$?; printf '%s\n' \"\$l_first_snapshot\" || l_count_status=\$?; cat || l_count_status=\$?; else printf '%s\n' 0 > $g_zxfer_quoted_path_result || l_count_status=\$?; fi; printf '%s\n' \"\$l_count_status\" > $l_count_status_file_q; exit \"\$l_count_status\"; }"
+		zxfer_quote_path_into_result "$g_zxfer_runtime_artifact_path_result"
+		l_producer_stage_status=$g_zxfer_quoted_path_result
+		l_producer_status_files="$l_producer_status_files $l_producer_stage_status"
+		zxfer_quote_path_into_result "$l_producer_copy"
+		l_producer_command="$l_producer_command | { l_count_status=0; if IFS= read -r l_first_snapshot; then printf '%s\n' 1 > $g_zxfer_quoted_path_result || l_count_status=\$?; printf '%s\n' \"\$l_first_snapshot\" || l_count_status=\$?; cat || l_count_status=\$?; else printf '%s\n' 0 > $g_zxfer_quoted_path_result || l_count_status=\$?; fi; printf '%s\n' \"\$l_count_status\" > $l_producer_stage_status; exit \"\$l_count_status\"; }"
 	fi
-	zxfer_render_pipeline_status_check "$l_status_files"
-	zxfer_quote_path_into_result "$l_sorted_output_file"
-	l_managed_cmd="$l_managed_cmd | LC_ALL=C sort > $g_zxfer_quoted_path_result; $g_zxfer_pipeline_status_check_result"
+	zxfer_render_pipeline_status_check "$l_producer_status_files"
+	zxfer_quote_path_into_result "$l_producer_sorted"
+	l_producer_command="$l_producer_command | LC_ALL=C sort > $g_zxfer_quoted_path_result; $g_zxfer_pipeline_status_check_result"
 
-	zxfer_echoV "Executing command in the background: $l_managed_cmd"
-	zxfer_record_last_command_string "$l_managed_cmd"
-	zxfer_spawn_background_shell "$l_managed_cmd" /dev/null "$l_error_file" || return "$?"
-	zxfer_register_background_producer "background source snapshot no-op proof helper"
+	zxfer_echoV "Executing command in the background: $l_producer_command"
+	zxfer_record_last_command_string "$l_producer_command"
+	zxfer_spawn_background_shell "$l_producer_command" /dev/null "$l_producer_error" || return "$?"
+	zxfer_register_background_producer "$l_producer_purpose"
 }
 
 # Purpose: Build the creation-ordered source snapshot listing.
 # Usage: zxfer_build_source_snapshot_list_cmd; publishes the shell command in
-# g_zxfer_source_snapshot_list_cmd_result, or returns non-zero with an
+# g_zxfer_shell_command_result, or returns non-zero with an
 # operator message (or nothing) there. With -j the listing fans out over the
 # source datasets through parallel: the dataset list is captured first (exit
 # 70 on failure), and only a successful parallel run adds the success sentinel
 # that a local filter checks and strips.
 zxfer_build_source_snapshot_list_cmd() {
-	g_source_snapshot_list_uses_parallel=0
-	g_zxfer_source_snapshot_list_cmd_result=""
+	g_zxfer_shell_command_result=""
 
 	if [ "$g_option_j_jobs" -le 1 ]; then
 		zxfer_render_zfs_command_for_role source \
-			list -Hr -o name,guid -s creation -t snapshot "$g_initial_source" || return
-		g_zxfer_source_snapshot_list_cmd_result=$g_zxfer_shell_command_result
+			list -Hr -o name,guid -s creation -t snapshot "$g_initial_source" || {
+			set -- "$?"
+			g_zxfer_shell_command_result=""
+			return "$1"
+		}
 		return 0
 	fi
 
 	zxfer_ensure_parallel_available_for_source_jobs || {
 		l_list_status=$?
-		g_zxfer_source_snapshot_list_cmd_result=${g_zxfer_parallel_source_job_check_result:-Failed to prepare parallel source discovery.}
+		g_zxfer_shell_command_result=${g_zxfer_parallel_source_job_check_result:-Failed to prepare parallel source discovery.}
 		return "$l_list_status"
 	}
-	g_source_snapshot_list_uses_parallel=1
 	if [ -n "$g_option_O_origin_host" ]; then
 		l_list_zfs=${g_origin_cmd_zfs:-$g_cmd_zfs}
 		l_list_parallel=$g_origin_parallel_cmd
@@ -429,7 +442,7 @@ zxfer_build_source_snapshot_list_cmd() {
 		return
 	fi
 	zxfer_render_discovery_sentinel_filter_cmd
-	g_zxfer_source_snapshot_list_cmd_result="$l_list_pipeline | $g_zxfer_shell_command_result"
+	g_zxfer_shell_command_result="$l_list_pipeline | $g_zxfer_shell_command_result"
 }
 
 # Purpose: Run the full source listing command in the background, keeping its
@@ -438,33 +451,7 @@ zxfer_build_source_snapshot_list_cmd() {
 # OUTPUT_FILE ERROR_FILE SORTED_FILE
 # Side effects: Publishes the registered producer PID in g_last_background_pid.
 zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
-	l_source_background_command=$1
-	l_source_background_output_file=$2
-	l_source_background_error_file=${3:-}
-	l_sorted_output_file=$4
-
-	zxfer_create_temp_file_group 2 || return "$?"
-	{
-		IFS= read -r l_source_status_file
-		IFS= read -r l_tee_status_file
-	} <<-EOF
-		$g_zxfer_temp_file_group_result
-	EOF
-	zxfer_quote_path_into_result "$l_source_status_file"
-	l_source_status_file_q=$g_zxfer_quoted_path_result
-	zxfer_quote_path_into_result "$l_tee_status_file"
-	l_tee_status_file_q=$g_zxfer_quoted_path_result
-	zxfer_render_pipeline_status_check "$l_source_status_file_q $l_tee_status_file_q"
-	zxfer_quote_path_into_result "$l_source_background_output_file"
-	l_managed_cmd="{ ( $l_source_background_command ); printf '%s\n' \"\$?\" > $l_source_status_file_q; } | { tee $g_zxfer_quoted_path_result; printf '%s\n' \"\$?\" > $l_tee_status_file_q; }"
-	zxfer_quote_path_into_result "$l_sorted_output_file"
-	l_managed_cmd="$l_managed_cmd | LC_ALL=C sort > $g_zxfer_quoted_path_result; $g_zxfer_pipeline_status_check_result"
-
-	zxfer_echoV "Executing command in the background: $l_managed_cmd"
-	zxfer_record_last_command_string "$l_managed_cmd"
-	zxfer_spawn_background_shell "$l_managed_cmd" /dev/null \
-		"$l_source_background_error_file" || return "$?"
-	zxfer_register_background_producer "background source snapshot discovery helper"
+	zxfer_start_source_snapshot_producer full "$1" "$4" "${3:-}" "$2"
 }
 
 # Purpose: Start the creation-ordered source snapshot listing in the background.
@@ -483,14 +470,15 @@ zxfer_write_source_snapshot_list_to_file() {
 	# Don't use -S creation for this command, instead, reverse the results below
 	#
 	zxfer_build_source_snapshot_list_cmd ||
-		zxfer_throw_error "${g_zxfer_source_snapshot_list_cmd_result:-Failed to build source snapshot discovery command.}" "$?"
-	l_source_snapshot_command=$g_zxfer_source_snapshot_list_cmd_result
+		zxfer_throw_error "${g_zxfer_shell_command_result:-Failed to build source snapshot discovery command.}" "$?"
+	l_source_snapshot_command=$g_zxfer_shell_command_result
 	g_source_snapshot_list_cmd=$l_source_snapshot_command
 	if [ "$g_option_O_origin_host" != "" ]; then
 		g_zxfer_profile_source_ssh_shell_invocations=$((g_zxfer_profile_source_ssh_shell_invocations + 1))
 	fi
 
-	if [ "${g_source_snapshot_list_uses_parallel:-0}" -eq 1 ]; then
+	# A successful full listing uses parallel exactly when -j exceeds one.
+	if [ "$g_option_j_jobs" -gt 1 ]; then
 		g_zxfer_profile_source_snapshot_list_parallel_commands=$((g_zxfer_profile_source_snapshot_list_parallel_commands + 1))
 	fi
 	zxfer_echoV "Running command in the background: $l_source_snapshot_command"
@@ -553,21 +541,21 @@ zxfer_publish_destination_dataset_inventory_from_stage() {
 	l_destination_inventory_status=$3
 
 	if [ "$l_destination_inventory_status" -eq 0 ]; then
-		zxfer_read_snapshot_discovery_capture_file \
+		zxfer_read_runtime_artifact_file \
 			"$l_destination_inventory_tmp_file" ||
 			zxfer_throw_error "Failed to read staged destination dataset inventory." "$?"
-		[ -n "$g_zxfer_snapshot_discovery_file_read_result" ] || {
+		[ -n "$g_zxfer_runtime_artifact_read_result" ] || {
 			zxfer_throw_error "Staged destination dataset inventory was empty."
 		}
 		zxfer_seed_destination_existence_cache_from_recursive_list "$g_destination" \
-			"$g_zxfer_snapshot_discovery_file_read_result"
+			"$g_zxfer_runtime_artifact_read_result"
 		return
 	fi
 
-	zxfer_read_snapshot_discovery_capture_file \
+	zxfer_read_runtime_artifact_file \
 		"$l_destination_inventory_err_file" ||
 		zxfer_throw_error "Failed to read staged destination dataset inventory stderr." "$?"
-	l_destination_inventory_error=$g_zxfer_snapshot_discovery_file_read_result
+	l_destination_inventory_error=$g_zxfer_runtime_artifact_read_result
 	if zxfer_destination_probe_reports_missing \
 		"$l_destination_inventory_error"; then
 		# The root is missing; the run can bootstrap it only when its pool
@@ -610,10 +598,10 @@ zxfer_write_destination_snapshot_list_to_files() {
 
 	zxfer_map_destination_dataset
 	l_dest_list_dataset=$g_zxfer_destination_dataset_result
-	zxfer_ensure_snapshot_scratch_file "${g_zxfer_destination_listing_error_file:-}" \
+	zxfer_ensure_runtime_artifact_file "${g_zxfer_destination_listing_error_file:-}" \
 		zxfer-destination-listing-err ||
 		zxfer_throw_error "Failed to allocate the destination snapshot listing error file." "$?"
-	g_zxfer_destination_listing_error_file=$g_zxfer_snapshot_scratch_file_result
+	g_zxfer_destination_listing_error_file=$g_zxfer_runtime_artifact_path_result
 	if zxfer_command_trace_enabled; then
 		zxfer_trace_rendered_command "Running command" \
 			"$(zxfer_render_destination_zfs_command list -Hr -o name,guid -t snapshot "$l_dest_list_dataset")"
@@ -643,9 +631,9 @@ zxfer_write_destination_snapshot_list_to_files() {
 			l_dest_list_exists=$g_zxfer_destination_exists_result
 		fi
 		if [ "$l_dest_list_exists" -ne 0 ]; then
-			if zxfer_read_snapshot_discovery_capture_file "$g_zxfer_destination_listing_error_file" &&
-				[ -n "$g_zxfer_snapshot_discovery_file_read_result" ]; then
-				zxfer_warn_stderr "$g_zxfer_snapshot_discovery_file_read_result"
+			if zxfer_read_runtime_artifact_file "$g_zxfer_destination_listing_error_file" &&
+				[ -n "$g_zxfer_runtime_artifact_read_result" ]; then
+				zxfer_warn_stderr "$g_zxfer_runtime_artifact_read_result"
 			fi
 			zxfer_throw_error "Failed to retrieve snapshot list from the destination." "$l_dest_list_status"
 		fi
@@ -734,12 +722,8 @@ zxfer_abort_fast_noop_background_pid() {
 # Usage: zxfer_cleanup_snapshot_record_cache_files, before a discovery pass and
 # on its failure paths.
 zxfer_cleanup_snapshot_record_cache_files() {
-	if [ -n "${g_zxfer_source_snapshot_record_cache_file:-}" ]; then
-		zxfer_cleanup_runtime_artifact_path "$g_zxfer_source_snapshot_record_cache_file"
-	fi
-	if [ -n "${g_zxfer_destination_snapshot_record_cache_file:-}" ]; then
-		zxfer_cleanup_runtime_artifact_path "$g_zxfer_destination_snapshot_record_cache_file"
-	fi
+	zxfer_cleanup_runtime_artifact_path_list "${g_zxfer_source_snapshot_record_cache_file:-}
+${g_zxfer_destination_snapshot_record_cache_file:-}"
 
 	g_zxfer_source_snapshot_record_cache_file=""
 	g_zxfer_destination_snapshot_record_cache_file=""
@@ -776,14 +760,9 @@ zxfer_publish_dry_run_snapshot_discovery() {
 # Usage: zxfer_collect_destination_dataset_inventory; called after the
 # snapshot diff when later work reads the destination existence cache.
 zxfer_collect_destination_dataset_inventory() {
-	zxfer_create_temp_file_group 2 || return "$?"
+	zxfer_create_runtime_artifact_workspace discovery-inventory error || return "$?"
+	l_destination_inventory_workspace=$g_zxfer_runtime_artifact_path_result
 	l_destination_inventory_stage_files=$g_zxfer_temp_file_group_result
-	{
-		IFS= read -r l_dest_list_tmp_file
-		IFS= read -r l_dest_list_err_file
-	} <<-EOF
-		$l_destination_inventory_stage_files
-	EOF
 
 	if zxfer_command_trace_enabled; then
 		zxfer_trace_rendered_command "Running command" \
@@ -792,17 +771,15 @@ zxfer_collect_destination_dataset_inventory() {
 		zxfer_record_last_command_opaque
 	fi
 	l_dest_inventory_status=0
-	zxfer_run_destination_zfs_cmd list -t filesystem,volume -Hr -o name "$g_destination" >"$l_dest_list_tmp_file" 2>"$l_dest_list_err_file" ||
+	zxfer_run_destination_zfs_cmd list -t filesystem,volume -Hr -o name "$g_destination" \
+		>"$l_destination_inventory_workspace" 2>"$l_destination_inventory_workspace.error" ||
 		l_dest_inventory_status=$?
 
-	l_status=0
 	zxfer_publish_destination_dataset_inventory_from_stage \
-		"$l_dest_list_tmp_file" \
-		"$l_dest_list_err_file" \
-		"$l_dest_inventory_status" ||
-		l_status=$?
+		"$l_destination_inventory_workspace" "$l_destination_inventory_workspace.error" \
+		"$l_dest_inventory_status" && l_dest_inventory_status=0 || l_dest_inventory_status=$?
 	zxfer_cleanup_runtime_artifact_path_list "$l_destination_inventory_stage_files"
-	return "$l_status"
+	return "$l_dest_inventory_status"
 }
 
 # Purpose: Copy a snapshot record file without the records whose dataset
@@ -832,7 +809,7 @@ zxfer_reverse_file_lines() {
 	[ "$l_reverse_status" -eq 3 ] || return "$l_reverse_status"
 
 	zxfer_get_temp_file || return "$?"
-	l_reverse_numbered_file=$g_zxfer_temp_file_result
+	l_reverse_numbered_file=$g_zxfer_runtime_artifact_path_result
 	l_reverse_status=0
 	cat -n "$1" >"$l_reverse_numbered_file" || l_reverse_status=$?
 	if [ "$l_reverse_status" -eq 0 ]; then
@@ -843,16 +820,35 @@ zxfer_reverse_file_lines() {
 	return "$l_reverse_status"
 }
 
-# Purpose: Publish the sorted, unique dataset names of a snapshot record file.
-# Usage: zxfer_capture_recursive_dataset_list_from_snapshot_file FILE SCRATCH;
-# sets g_zxfer_recursive_dataset_list_result and overwrites SCRATCH.
-zxfer_capture_recursive_dataset_list_from_snapshot_file() {
-	g_zxfer_recursive_dataset_list_result=""
-	# A record's dataset is everything before its first @.
-	# shellcheck disable=SC2016  # awk program should see literal $1.
-	"${g_cmd_awk:-awk}" -F@ '$1 != "" { print $1 }' "$1" >"$2" || return "$?"
-	l_capture_dataset_list=$(LC_ALL=C sort -u "$2") || return "$?"
-	g_zxfer_recursive_dataset_list_result=$l_capture_dataset_list
+# Purpose: Derive all snapshot dataset lists in one extraction and keyed sort.
+# Usage: zxfer_capture_snapshot_dataset_lists MISSING EXTRA SCRATCH [SOURCE];
+# publishes the transfer, extra and optional source-inventory lists. Tags keep
+# each list sorted and deduplicated independently. Values stay in files/stdin.
+# Returns: The original awk/sort failure with every output empty.
+zxfer_capture_snapshot_dataset_lists() {
+	g_recursive_source_list=""
+	g_recursive_destination_extra_dataset_list=""
+	g_recursive_source_dataset_list=""
+	[ -s "$1" ] || [ -s "$2" ] || [ -n "${4:-}" ] || return 0
+	l_dataset_lists_scratch=$3
+	l_dataset_lists_source=${4:-}
+	set -- role=missing "$1" role=extra "$2"
+	[ -z "$l_dataset_lists_source" ] || set -- "$@" role=inventory "$l_dataset_lists_source"
+	# A record's dataset is everything before its first @. Tag ordering is
+	# irrelevant to execution; the queue separately places parents first.
+	# shellcheck disable=SC2016 # awk reads literal fields; role is a fixed tag.
+	"${g_cmd_awk:-awk}" -F@ '$1 != "" { print role "\t" $1 }' \
+		"$@" >"$l_dataset_lists_scratch" || return "$?"
+	l_dataset_lists_rows=$(LC_ALL=C sort -u "$l_dataset_lists_scratch") || return "$?"
+	while IFS="$ZXFER_TAB" read -r l_dataset_lists_kind l_dataset_lists_name; do
+		case $l_dataset_lists_kind in
+		missing) g_recursive_source_list=${g_recursive_source_list:+$g_recursive_source_list$ZXFER_LF}$l_dataset_lists_name ;;
+		extra) g_recursive_destination_extra_dataset_list=${g_recursive_destination_extra_dataset_list:+$g_recursive_destination_extra_dataset_list$ZXFER_LF}$l_dataset_lists_name ;;
+		inventory) g_recursive_source_dataset_list=${g_recursive_source_dataset_list:+$g_recursive_source_dataset_list$ZXFER_LF}$l_dataset_lists_name ;;
+		esac
+	done <<EOF
+$l_dataset_lists_rows
+EOF
 }
 
 # Purpose: Drop the datasets that match the -x pattern from a dataset list.
@@ -874,39 +870,19 @@ zxfer_filter_recursive_dataset_list_with_excludes() {
 	g_zxfer_recursive_dataset_list_result=$l_filter_dataset_list
 }
 
-# Purpose: Publish the -x filtered dataset names of one delta record file.
-# Usage: zxfer_capture_delta_dataset_list FILE SCRATCH LABEL; sets
-# g_zxfer_recursive_dataset_list_result, empty for an empty FILE. Failures
-# throw "Failed to derive LABEL." or "Failed to filter LABEL against exclude
-# patterns.".
-zxfer_capture_delta_dataset_list() {
-	g_zxfer_recursive_dataset_list_result=""
-	[ -s "$1" ] || return 0
-	zxfer_capture_recursive_dataset_list_from_snapshot_file "$1" "$2" ||
-		zxfer_throw_error "Failed to derive $3." "$?"
-	zxfer_filter_recursive_dataset_list_with_excludes "$g_zxfer_recursive_dataset_list_result" ||
-		zxfer_throw_error "Failed to filter $3 against exclude patterns." "$?"
-}
-
 # Purpose: Decide whether recursive source dataset inventory must be derived
 # from the full source snapshot list.
-# Usage: zxfer_snapshot_discovery_needs_source_dataset_inventory; returns 1
+# Usage: zxfer_snapshot_discovery_needs_source_dataset_inventory [SOURCE_WORK];
+# SOURCE_WORK previews whether a missing-record file has work before extraction.
+# Without it, reads the published transfer list. Returns 1
 # for a recursive run with no property work (-P, -o, or -U with source
 # datasets to scan), which never reads the inventory.
 zxfer_snapshot_discovery_needs_source_dataset_inventory() {
-	if [ "${g_option_R_recursive:-}" = "" ]; then
-		return 0
-	fi
-	if [ "${g_option_P_transfer_property:-0}" -eq 1 ] ||
-		[ -n "${g_option_o_override_property:-}" ]; then
-		return 0
-	fi
-	if [ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ] &&
-		[ -n "${g_recursive_source_list:-}" ]; then
-		return 0
-	fi
-
-	return 1
+	[ -z "${g_option_R_recursive:-}" ] ||
+		[ "${g_option_P_transfer_property:-0}" -eq 1 ] ||
+		[ -n "${g_option_o_override_property:-}" ] ||
+		{ [ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ] &&
+			[ -n "${1-${g_recursive_source_list:-}}" ]; }
 }
 
 # Purpose: Split two sorted record files into the records only the source has
@@ -926,8 +902,8 @@ zxfer_write_snapshot_delta_files() {
 		{ print }' "$5" >"$3"
 }
 
-# Purpose: Print the recursive delta summary under -v, and the delta records
-# as well under -V.
+# Purpose: Print the recursive delta summary and snapshot identities under
+# -v, and the raw normalized delta records as well under -V.
 # Usage: zxfer_report_recursive_snapshot_delta MISSING EXTRA; call once the
 # recursive dataset lists are final.
 zxfer_report_recursive_snapshot_delta() {
@@ -961,7 +937,7 @@ zxfer_report_recursive_snapshot_delta() {
 		EOF
 
 	if [ "${l_report_delta_missing_count:-0}" -gt 0 ] || [ "${l_report_delta_extra_count:-0}" -gt 0 ]; then
-		zxfer_echov "Recursive snapshot delta summary: source_missing_snapshots=$l_report_delta_missing_count destination_extra_snapshots=$l_report_delta_extra_count source_datasets=$l_report_delta_source_dataset_count destination_extra_datasets=$l_report_delta_extra_dataset_count"
+		zxfer_echov "Recursive snapshot delta summary: snapshots_missing_on_destination=$l_report_delta_missing_count snapshots_missing_on_source=$l_report_delta_extra_count source_datasets=$l_report_delta_source_dataset_count destination_extra_datasets=$l_report_delta_extra_dataset_count"
 		if [ -n "$g_recursive_source_list" ]; then
 			zxfer_echov "Recursive source datasets queued for transfer:"
 			printf '%s\n' "$g_recursive_source_list" | while IFS= read -r l_report_delta_source_dataset; do
@@ -976,6 +952,48 @@ zxfer_report_recursive_snapshot_delta() {
 				zxfer_echov "  $l_report_delta_destination_dataset"
 			done
 		fi
+		# Compare full name/GUID identities: a name collision with a different
+		# GUID appears on both sides. Destination delta rows use source paths;
+		# map them back for the operator without another ZFS listing.
+		for l_report_delta_side in source destination; do
+			case $l_report_delta_side in
+			source)
+				l_report_delta_records_file=$l_report_delta_missing_file
+				l_report_delta_record_count=$l_report_delta_missing_count
+				l_report_delta_other_side=destination
+				;;
+			destination)
+				l_report_delta_records_file=$l_report_delta_extra_file
+				l_report_delta_record_count=$l_report_delta_extra_count
+				l_report_delta_other_side=source
+				;;
+			esac
+			[ "$l_report_delta_record_count" -gt 0 ] || continue
+			l_report_delta_read_error="Failed to read the recursive $l_report_delta_side snapshot delta."
+			[ -r "$l_report_delta_records_file" ] || zxfer_throw_error "$l_report_delta_read_error"
+			zxfer_echov "Recursive $l_report_delta_side snapshots absent from $l_report_delta_other_side (name/GUID):"
+			while IFS="$ZXFER_TAB" read -r l_report_delta_snapshot l_report_delta_guid; do
+				if [ "$l_report_delta_side" = destination ]; then
+					zxfer_map_destination_dataset "${l_report_delta_snapshot%@*}"
+					l_report_delta_snapshot=$g_zxfer_destination_dataset_result@${l_report_delta_snapshot#*@}
+				fi
+				zxfer_echov "  $l_report_delta_snapshot (GUID: ${l_report_delta_guid:-missing})"
+				if [ "$l_report_delta_side" = source ] && [ -z "${g_option_R_recursive:-}" ] &&
+					[ "${l_report_delta_snapshot%@*}" != "$g_initial_source" ]; then
+					# -d also queues destination-extra datasets, even under -N.
+					# Do not label a descendant skipped when cleanup will visit it.
+					l_report_delta_selected=0
+					if [ "${g_option_d_delete_destination_snapshots:-0}" -eq 1 ]; then
+						case "$ZXFER_LF$g_recursive_destination_extra_dataset_list$ZXFER_LF" in
+						*"$ZXFER_LF${l_report_delta_snapshot%@*}$ZXFER_LF"*) l_report_delta_selected=1 ;;
+						esac
+					fi
+					[ "$l_report_delta_selected" -eq 1 ] ||
+						zxfer_echov "    Not scheduled: nonrecursive mode (-N) selects only [$g_initial_source]; this descendant is outside the dataset queue."
+				fi
+			done <"$l_report_delta_records_file" ||
+				zxfer_throw_error "$l_report_delta_read_error" "$?"
+		done
 	fi
 
 	[ "${g_option_V_very_verbose:-0}" -eq 1 ] || return 0
@@ -1010,21 +1028,13 @@ zxfer_set_g_recursive_source_list() {
 	l_delta_destination_file=$2
 	l_delta_source_file=${3:-}
 
-	zxfer_create_temp_file_group 6 || return "$?"
+	zxfer_create_runtime_artifact_workspace discovery-delta \
+		missing extra filtered-source filtered-destination scratch || return "$?"
+	l_delta_workspace=$g_zxfer_runtime_artifact_path_result
 	l_delta_stage_files=$g_zxfer_temp_file_group_result
-	{
-		IFS= read -r l_delta_sorted_source_file
-		IFS= read -r l_delta_missing_file
-		IFS= read -r l_delta_extra_file
-		IFS= read -r l_delta_filtered_source_file
-		IFS= read -r l_delta_filtered_destination_file
-		IFS= read -r l_delta_scratch_file
-	} <<-EOF
-		$l_delta_stage_files
-	EOF
 
 	if [ -z "$l_delta_source_file" ]; then
-		l_delta_source_file=$l_delta_sorted_source_file
+		l_delta_source_file=$l_delta_workspace
 		if zxfer_command_trace_enabled; then
 			zxfer_trace_rendered_command "Running command" \
 				"$(zxfer_render_command_for_report "LC_ALL=C" sort "$l_delta_raw_source_file") > $(zxfer_quote_token_for_report "$l_delta_source_file")"
@@ -1040,12 +1050,12 @@ zxfer_set_g_recursive_source_list() {
 	# -x first drops excluded records, so differences confined to excluded
 	# datasets cannot keep a run from comparing as a no-op.
 	if [ -n "${g_option_x_exclude_datasets:-}" ]; then
-		zxfer_filter_snapshot_file_with_excludes "$l_delta_source_file" "$l_delta_filtered_source_file" ||
+		zxfer_filter_snapshot_file_with_excludes "$l_delta_source_file" "$l_delta_workspace.filtered-source" ||
 			zxfer_throw_error "Failed to filter source snapshots against exclude patterns for recursive delta planning." "$?"
-		zxfer_filter_snapshot_file_with_excludes "$l_delta_destination_file" "$l_delta_filtered_destination_file" ||
+		zxfer_filter_snapshot_file_with_excludes "$l_delta_destination_file" "$l_delta_workspace.filtered-destination" ||
 			zxfer_throw_error "Failed to filter destination snapshots against exclude patterns for recursive delta planning." "$?"
-		l_delta_source_file=$l_delta_filtered_source_file
-		l_delta_destination_file=$l_delta_filtered_destination_file
+		l_delta_source_file=$l_delta_workspace.filtered-source
+		l_delta_destination_file=$l_delta_workspace.filtered-destination
 	fi
 
 	# Equal listings leave both freshly allocated delta files empty.
@@ -1055,7 +1065,7 @@ zxfer_set_g_recursive_source_list() {
 	0) ;;
 	1)
 		zxfer_write_snapshot_delta_files "$l_delta_source_file" "$l_delta_destination_file" \
-			"$l_delta_missing_file" "$l_delta_extra_file" "$l_delta_scratch_file" ||
+			"$l_delta_workspace.missing" "$l_delta_workspace.extra" "$l_delta_workspace.scratch" ||
 			zxfer_throw_error "Failed to diff source and destination snapshots for recursive delta planning." "$?"
 		;;
 	*)
@@ -1063,11 +1073,25 @@ zxfer_set_g_recursive_source_list() {
 		;;
 	esac
 
-	zxfer_capture_delta_dataset_list "$l_delta_missing_file" "$l_delta_scratch_file" \
-		"recursive source dataset transfer list"
+	l_delta_source_work=""
+	[ ! -s "$l_delta_workspace.missing" ] || l_delta_source_work=1
+	set -- "$l_delta_workspace.missing" "$l_delta_workspace.extra" "$l_delta_workspace.scratch"
+	if zxfer_snapshot_discovery_needs_source_dataset_inventory "$l_delta_source_work"; then
+		set -- "$@" "$l_delta_source_file"
+	fi
+	l_delta_dataset_label="recursive source dataset inventory"
+	if [ -s "$l_delta_workspace.missing" ]; then
+		l_delta_dataset_label="recursive source dataset transfer list"
+	elif [ -s "$l_delta_workspace.extra" ]; then
+		l_delta_dataset_label="recursive destination dataset delete list"
+	fi
+	zxfer_capture_snapshot_dataset_lists "$@" ||
+		zxfer_throw_error "Failed to derive $l_delta_dataset_label." "$?"
+	zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_list" ||
+		zxfer_throw_error "Failed to filter recursive source dataset transfer list against exclude patterns." "$?"
 	g_recursive_source_list=$g_zxfer_recursive_dataset_list_result
-	zxfer_capture_delta_dataset_list "$l_delta_extra_file" "$l_delta_scratch_file" \
-		"recursive destination dataset delete list"
+	zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_destination_extra_dataset_list" ||
+		zxfer_throw_error "Failed to filter recursive destination dataset delete list against exclude patterns." "$?"
 	g_recursive_destination_extra_dataset_list=$g_zxfer_recursive_dataset_list_result
 	if [ -n "${g_option_R_recursive:-}" ] &&
 		[ "$g_option_d_delete_destination_snapshots" -eq 1 ] &&
@@ -1075,7 +1099,7 @@ zxfer_set_g_recursive_source_list() {
 		# Snapshot rows cannot distinguish an absent dataset from an existing
 		# dataset with no snapshots. List datasets before admitting -d work.
 		zxfer_run_source_zfs_cmd list -Hr -t filesystem,volume -o name "$g_initial_source" \
-			>"$l_delta_scratch_file" ||
+			>"$l_delta_workspace.scratch" ||
 			zxfer_throw_error "Failed to retrieve source dataset inventory for recursive destination snapshot cleanup." "$?"
 		# Validate the root before trusting any absence, then label each extra
 		# dataset for retention or a notice through the reporting helper.
@@ -1091,7 +1115,7 @@ zxfer_set_g_recursive_source_list() {
 				}
 				NF { print ($0 in source ? "keep" : "skip") "\t" $0 }
 				END { if (!root_seen) exit 1 }
-			' side=source "$l_delta_scratch_file" side=extra - <<EOF
+			' side=source "$l_delta_workspace.scratch" side=extra - <<EOF
 $g_recursive_destination_extra_dataset_list
 EOF
 		) || zxfer_throw_error "Failed to filter recursive destination snapshot cleanup against a complete source dataset inventory." "$?"
@@ -1107,42 +1131,19 @@ EOF
 $l_delta_delete_dataset_rows
 EOF
 	fi
-	g_recursive_source_dataset_list=""
 	if zxfer_snapshot_discovery_needs_source_dataset_inventory; then
-		zxfer_capture_delta_dataset_list "$l_delta_source_file" "$l_delta_scratch_file" \
-			"recursive source dataset inventory"
+		zxfer_filter_recursive_dataset_list_with_excludes "$g_recursive_source_dataset_list" ||
+			zxfer_throw_error "Failed to filter recursive source dataset inventory against exclude patterns." "$?"
 		g_recursive_source_dataset_list=$g_zxfer_recursive_dataset_list_result
+	else
+		g_recursive_source_dataset_list=""
 	fi
 
-	zxfer_report_recursive_snapshot_delta "$l_delta_missing_file" "$l_delta_extra_file"
+	zxfer_report_recursive_snapshot_delta "$l_delta_workspace.missing" "$l_delta_workspace.extra"
 	if [ "$g_recursive_source_list" = "" ]; then
-		zxfer_echov "No new snapshots to transfer."
+		zxfer_echov "No new snapshots to transfer during discovery for [$g_initial_source]."
 	fi
 	zxfer_cleanup_runtime_artifact_path_list "$l_delta_stage_files"
-}
-
-# Purpose: Decide whether snapshot discovery must keep per-dataset record
-# caches for later replication work.
-# Usage: Called after recursive snapshot diffing has populated the dataset
-# work lists, before discovery decides whether to carry large snapshot
-# inventories forward.
-zxfer_snapshot_discovery_needs_record_caches() {
-	if [ "${g_option_R_recursive:-}" = "" ]; then
-		return 0
-	fi
-	if [ -n "${g_recursive_source_list:-}" ]; then
-		return 0
-	fi
-	if [ "${g_option_d_delete_destination_snapshots:-0}" -eq 1 ] &&
-		[ -n "${g_recursive_destination_extra_dataset_list:-}" ]; then
-		return 0
-	fi
-	if [ "${g_option_P_transfer_property:-0}" -eq 1 ] ||
-		[ -n "${g_option_o_override_property:-}" ]; then
-		return 0
-	fi
-
-	return 1
 }
 
 # Purpose: Decide whether the recursive destination dataset inventory should
@@ -1151,19 +1152,11 @@ zxfer_snapshot_discovery_needs_record_caches() {
 # building a destination existence cache that no later stage can consume; the
 # conditions mirror the work zxfer_copy_filesystems skips.
 zxfer_snapshot_discovery_needs_destination_dataset_inventory() {
-	if [ -n "${g_recursive_source_list:-}" ]; then
-		return 0
-	fi
-	if [ "${g_option_d_delete_destination_snapshots:-0}" -eq 1 ] &&
-		[ -n "${g_recursive_destination_extra_dataset_list:-}" ]; then
-		return 0
-	fi
-	if [ "${g_option_P_transfer_property:-0}" -eq 1 ] ||
-		[ -n "${g_option_o_override_property:-}" ]; then
-		return 0
-	fi
-
-	return 1
+	[ -n "${g_recursive_source_list:-}" ] ||
+		{ [ "${g_option_d_delete_destination_snapshots:-0}" -eq 1 ] &&
+			[ -n "${g_recursive_destination_extra_dataset_list:-}" ]; } ||
+		[ "${g_option_P_transfer_property:-0}" -eq 1 ] ||
+		[ -n "${g_option_o_override_property:-}" ]
 }
 
 # Purpose: Start the source producer for a fast recursive no-op proof attempt.
@@ -1172,17 +1165,11 @@ zxfer_snapshot_discovery_needs_destination_dataset_inventory() {
 # rendered command in g_source_snapshot_list_cmd for failure reports.
 zxfer_start_fast_recursive_noop_source_discovery() {
 	zxfer_build_source_snapshot_name_list_cmd || return "$?"
-	l_fast_noop_source_start_command=$g_zxfer_source_snapshot_list_cmd_result
+	l_fast_noop_source_start_command=$g_zxfer_shell_command_result
 
-	l_fast_noop_source_start_uses_parallel=0
-	if [ "${g_source_snapshot_list_uses_parallel:-0}" -eq 1 ]; then
-		l_fast_noop_source_start_uses_parallel=1
-	fi
 	g_source_snapshot_list_cmd=$l_fast_noop_source_start_command
 	g_zxfer_profile_source_snapshot_list_commands=$((g_zxfer_profile_source_snapshot_list_commands + 1))
-	if [ "$l_fast_noop_source_start_uses_parallel" -eq 1 ]; then
-		g_zxfer_profile_source_snapshot_list_parallel_commands=$((g_zxfer_profile_source_snapshot_list_parallel_commands + 1))
-	fi
+	# The proof always uses one recursive listing, regardless of -j.
 	if [ "$g_option_O_origin_host" != "" ]; then
 		g_zxfer_profile_source_ssh_shell_invocations=$((g_zxfer_profile_source_ssh_shell_invocations + 1))
 	fi
@@ -1304,13 +1291,13 @@ zxfer_validate_fast_recursive_noop_destination_discovery() {
 
 	l_fast_noop_destination_list_status=$2
 	if [ "$l_fast_noop_destination_list_status" -ne 0 ]; then
-		zxfer_read_snapshot_discovery_capture_file \
+		zxfer_read_runtime_artifact_file \
 			"$6" || {
 			l_fast_noop_destination_error_read_status=$?
 			g_zxfer_snapshot_discovery_failure_result="Failed to read staged destination snapshot stderr."
 			return "$l_fast_noop_destination_error_read_status"
 		}
-		l_fast_noop_destination_error=$g_zxfer_snapshot_discovery_file_read_result
+		l_fast_noop_destination_error=$g_zxfer_runtime_artifact_read_result
 		if zxfer_destination_probe_reports_missing "$l_fast_noop_destination_error"; then
 			: # A failed listing with this diagnostic is a valid missing dataset.
 		else
@@ -1330,29 +1317,35 @@ zxfer_validate_fast_recursive_noop_destination_discovery() {
 	return 0
 }
 
+# Purpose: Preserve a failed source producer's command, stderr and wait status.
+# Usage: zxfer_validate_source_snapshot_wait_status STATUS ERROR_FILE, from
+# fast or full discovery after wait. Zero needs no stderr read; a failed read
+# takes precedence over the producer status. The operation owner reports the
+# diagnostic in g_zxfer_snapshot_discovery_failure_result after releasing scratch.
+zxfer_validate_source_snapshot_wait_status() {
+	[ "$1" -ne 0 ] || return 0
+	if [ -n "${g_source_snapshot_list_cmd:-}" ]; then
+		zxfer_record_last_command_string "$g_source_snapshot_list_cmd"
+	fi
+	zxfer_read_runtime_artifact_file "$2" || {
+		l_source_snapshot_failure_read_status=$?
+		g_zxfer_snapshot_discovery_failure_result="Failed to read staged source snapshot stderr."
+		return "$l_source_snapshot_failure_read_status"
+	}
+	l_source_snapshot_failure_error=$g_zxfer_runtime_artifact_read_result
+	l_source_snapshot_failure_error=$(zxfer_limit_snapshot_discovery_capture_lines \
+		"$l_source_snapshot_failure_error" 10)
+	g_zxfer_snapshot_discovery_failure_result="Failed to retrieve snapshots from the source${l_source_snapshot_failure_error:+: $l_source_snapshot_failure_error}"
+	return "$1"
+}
+
 # Purpose: Validate source stderr, wait status, and count sidecar for a fast proof.
 # Usage: zxfer_validate_fast_recursive_noop_source_discovery WAIT_STATUS ERROR
 # COUNT; called after destination validation. Preserves exact source diagnostics
 # and the exclusion-specific empty-source fallback. Failures return the status
 # with their diagnostic in g_zxfer_snapshot_discovery_failure_result.
 zxfer_validate_fast_recursive_noop_source_discovery() {
-	if [ "$1" -ne 0 ]; then
-		if [ -n "${g_source_snapshot_list_cmd:-}" ]; then
-			zxfer_record_last_command_string "$g_source_snapshot_list_cmd"
-		fi
-		zxfer_read_snapshot_discovery_capture_file \
-			"$2" || {
-			l_fast_noop_source_error_read_status=$?
-			g_zxfer_snapshot_discovery_failure_result="Failed to read staged source snapshot stderr."
-			return "$l_fast_noop_source_error_read_status"
-		}
-		l_fast_noop_source_error=$g_zxfer_snapshot_discovery_file_read_result
-		l_fast_noop_source_error=$(zxfer_limit_snapshot_discovery_capture_lines \
-			"$l_fast_noop_source_error" 10)
-		l_fast_noop_source_wait_status=$1
-		g_zxfer_snapshot_discovery_failure_result="Failed to retrieve snapshots from the source${l_fast_noop_source_error:+: $l_fast_noop_source_error}"
-		return "$l_fast_noop_source_wait_status"
-	fi
+	zxfer_validate_source_snapshot_wait_status "$1" "$2" || return "$?"
 
 	l_fast_noop_source_count_status=0
 	zxfer_read_snapshot_discovery_status_file \
@@ -1371,248 +1364,93 @@ zxfer_validate_fast_recursive_noop_source_discovery() {
 	return 0
 }
 
-# Purpose: Validate the two completed producers and reuse a successful raw listing.
-# Usage: zxfer_validate_fast_recursive_noop_discovery SOURCE DEST SOURCE_ERROR
-# COMPARE COUNT DEST_ERROR STATUS RAW SOURCE_WAIT DEST_WAIT. Files belong to
-# the calling operation; only the validated RAW handoff is shared with full
-# discovery. Read the status record once before comparison, preserving the
-# delta-first fallback even when a producer failed.
-zxfer_validate_fast_recursive_noop_discovery() {
-	l_fast_noop_status_read_status=1
-	l_fast_noop_list_status=""
-	l_fast_noop_normalize_status=""
-	l_fast_noop_sort_status=""
-	if [ -f "$7" ]; then
-		read -r l_fast_noop_list_status l_fast_noop_normalize_status \
-			l_fast_noop_sort_status <"$7" || :
-		if zxfer_is_uint "$l_fast_noop_list_status" &&
-			zxfer_is_uint "$l_fast_noop_normalize_status" &&
-			zxfer_is_uint "$l_fast_noop_sort_status"; then
-			l_fast_noop_status_read_status=0
-			if [ "$l_fast_noop_list_status" -eq 0 ]; then
-				g_zxfer_snapshot_discovery_destination_listing_file=$8
-			fi
-		fi
-	fi
-	zxfer_compare_fast_recursive_noop_discovery_streams "$1" "$2" "$4" || return "$?"
-	zxfer_validate_fast_recursive_noop_destination_discovery \
-		"$l_fast_noop_status_read_status" "$l_fast_noop_list_status" \
-		"$l_fast_noop_normalize_status" "$l_fast_noop_sort_status" "${10}" "$6" || return "$?"
-	zxfer_validate_fast_recursive_noop_source_discovery "$9" "$3" "$5" || return "$?"
-
-	if [ "$l_fast_noop_list_status" -ne 0 ]; then
-		zxfer_map_destination_dataset
-		zxfer_echoV "Destination dataset does not exist: $g_zxfer_destination_dataset_result"
-		zxfer_reset_destination_existence_cache
-		return 1
-	fi
-	return 0
-}
-
-# Purpose: Overlap and reap the fast proof's producers with explicit ownership.
-# Usage: zxfer_run_fast_recursive_noop_discovery SOURCE DEST SOURCE_ERROR
-# COMPARE COUNT DEST_ERROR STATUS RAW. The eight owned paths stay in positional
-# parameters; append each timer and PID immediately before another stage can
-# overwrite the shared profiling clock or background-PID result channel.
-zxfer_run_fast_recursive_noop_discovery() {
-	zxfer_profile_start_timer
-	set -- "$@" "$g_zxfer_profile_clock_ms"
-	zxfer_start_fast_recursive_noop_source_discovery "$1" "$3" "$5" || return "$?"
-	set -- "$@" "$g_last_background_pid"
-	zxfer_profile_start_timer
-	set -- "$@" "$g_zxfer_profile_clock_ms"
-	zxfer_start_fast_recursive_noop_destination_discovery \
-		"$2" "$6" "$7" "$8" "${10}" || return "$?"
-	set -- "$@" "$g_last_background_pid"
-
-	l_fast_noop_source_status=0
-	zxfer_wait_for_snapshot_discovery_producer "${10}" "$9" source || l_fast_noop_source_status=$?
-	l_fast_noop_destination_status=0
-	zxfer_wait_for_snapshot_discovery_producer "${12}" "${11}" destination || l_fast_noop_destination_status=$?
-	g_last_background_pid=""
-	zxfer_validate_fast_recursive_noop_discovery \
-		"$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" \
-		"$l_fast_noop_source_status" "$l_fast_noop_destination_status" &&
-		zxfer_publish_fast_recursive_noop_discovery
-}
-
-# Purpose: Publish a proven fast recursive no-op result.
-# Usage: zxfer_publish_fast_recursive_noop_discovery; called only after all
-# validation succeeds.
-zxfer_publish_fast_recursive_noop_discovery() {
-	g_recursive_source_list=""
-	g_recursive_source_dataset_list=""
-	g_recursive_destination_extra_dataset_list=""
-	g_zxfer_snapshot_discovery_destination_listing_file=""
-	zxfer_echov "No new snapshots to transfer."
-	return 0
-}
-
-# Purpose: Try to prove a clean recursive no-op (local or remote-origin source)
-# with identity-aware discovery before the full creation-order source listing.
-# Usage: zxfer_try_fast_recursive_noop_discovery; returns 0 when the no-op is
-# proven, 1 when full discovery should run, other statuses on failure.
+# Purpose: Own a fast recursive no-op proof from allocation through publication
+# or fallback, before the full creation-order source discovery path.
+# Usage: zxfer_try_fast_recursive_noop_discovery; returns 0 when proven,
+# 1 for full discovery, other statuses on failure. Only this function uses
+# l_fast_noop_owner_* scratch; one named file workspace survives helper calls.
+# Registered producers remain trap-owned.
 zxfer_try_fast_recursive_noop_discovery() {
 	zxfer_fast_recursive_noop_options_are_eligible || return 1
 	g_zxfer_snapshot_discovery_failure_result=""
-	zxfer_get_temp_file || return "$?"
-	# Keep the raw handoff separate from the seven proof-only files. Function
-	# arguments, unlike l_* assignments in POSIX sh, survive child helper calls.
-	set -- "$g_zxfer_temp_file_result"
-	l_fast_noop_operation_status=0
-	zxfer_create_temp_file_group 7 || l_fast_noop_operation_status=$?
-	if [ "$l_fast_noop_operation_status" -ne 0 ]; then
-		zxfer_cleanup_runtime_artifact_path "$1"
-		return "$l_fast_noop_operation_status"
+	zxfer_create_runtime_artifact_workspace discovery-fast-source \
+		destination error compare count destination-error status raw || return "$?"
+	l_fast_noop_workspace=$g_zxfer_runtime_artifact_path_result
+	l_fast_noop_paths=$g_zxfer_temp_file_group_result
+	l_fast_noop_owner_status=0
+
+	# Capture each producer result before another helper can replace it.
+	zxfer_profile_start_timer
+	l_fast_noop_owner_source_start_ms=$g_zxfer_profile_clock_ms
+	if zxfer_start_fast_recursive_noop_source_discovery "$l_fast_noop_workspace" "$l_fast_noop_workspace.error" "$l_fast_noop_workspace.count"; then
+		l_fast_noop_owner_source_pid=$g_last_background_pid
+		zxfer_profile_start_timer
+		l_fast_noop_owner_destination_start_ms=$g_zxfer_profile_clock_ms
+		zxfer_start_fast_recursive_noop_destination_discovery \
+			"$l_fast_noop_workspace.destination" "$l_fast_noop_workspace.destination-error" "$l_fast_noop_workspace.status" "$l_fast_noop_workspace.raw" "$l_fast_noop_owner_source_pid" || l_fast_noop_owner_status=$?
+	else
+		l_fast_noop_owner_status=$?
 	fi
-	{
-		IFS= read -r l_fast_noop_source_file
-		IFS= read -r l_fast_noop_destination_file
-		IFS= read -r l_fast_noop_source_error_file
-		IFS= read -r l_fast_noop_compare_file
-		IFS= read -r l_fast_noop_count_file
-		IFS= read -r l_fast_noop_destination_error_file
-		IFS= read -r l_fast_noop_status_file
-	} <<-EOF
-		$g_zxfer_temp_file_group_result
-	EOF
-	set -- "$l_fast_noop_source_file" "$l_fast_noop_destination_file" \
-		"$l_fast_noop_source_error_file" "$l_fast_noop_compare_file" \
-		"$l_fast_noop_count_file" "$l_fast_noop_destination_error_file" \
-		"$l_fast_noop_status_file" "$1"
-	unset l_fast_noop_source_file l_fast_noop_destination_file l_fast_noop_source_error_file \
-		l_fast_noop_compare_file l_fast_noop_count_file l_fast_noop_destination_error_file l_fast_noop_status_file
-	zxfer_run_fast_recursive_noop_discovery "$@" || l_fast_noop_operation_status=$?
-	if [ "$l_fast_noop_operation_status" -ne 0 ]; then
+	if [ "$l_fast_noop_owner_status" -eq 0 ]; then
+		l_fast_noop_owner_destination_pid=$g_last_background_pid
+		l_fast_noop_owner_source_status=0
+		zxfer_wait_for_snapshot_discovery_producer "$l_fast_noop_owner_source_pid" \
+			"$l_fast_noop_owner_source_start_ms" source || l_fast_noop_owner_source_status=$?
+		l_fast_noop_owner_destination_status=0
+		zxfer_wait_for_snapshot_discovery_producer "$l_fast_noop_owner_destination_pid" \
+			"$l_fast_noop_owner_destination_start_ms" destination || l_fast_noop_owner_destination_status=$?
+		g_last_background_pid=""
+
+		# Parse once before comparison so even a declined proof can reuse RAW.
+		l_fast_noop_owner_status_read_status=1
+		l_fast_noop_owner_list_status=""
+		l_fast_noop_owner_normalize_status=""
+		l_fast_noop_owner_sort_status=""
+		if [ -f "$l_fast_noop_workspace.status" ]; then
+			read -r l_fast_noop_owner_list_status l_fast_noop_owner_normalize_status \
+				l_fast_noop_owner_sort_status <"$l_fast_noop_workspace.status" || :
+			if zxfer_is_uint "$l_fast_noop_owner_list_status" &&
+				zxfer_is_uint "$l_fast_noop_owner_normalize_status" &&
+				zxfer_is_uint "$l_fast_noop_owner_sort_status"; then
+				l_fast_noop_owner_status_read_status=0
+				if [ "$l_fast_noop_owner_list_status" -eq 0 ]; then
+					g_zxfer_snapshot_discovery_destination_listing_file=$l_fast_noop_workspace.raw
+				fi
+			fi
+		fi
+		# A real delta declines the proof before endpoint validation, even if
+		# a producer failed. Full discovery then checks the complete state.
+		zxfer_compare_fast_recursive_noop_discovery_streams "$l_fast_noop_workspace" "$l_fast_noop_workspace.destination" "$l_fast_noop_workspace.compare" &&
+			zxfer_validate_fast_recursive_noop_destination_discovery \
+				"$l_fast_noop_owner_status_read_status" "$l_fast_noop_owner_list_status" \
+				"$l_fast_noop_owner_normalize_status" "$l_fast_noop_owner_sort_status" \
+				"$l_fast_noop_owner_destination_status" "$l_fast_noop_workspace.destination-error" &&
+			zxfer_validate_fast_recursive_noop_source_discovery \
+				"$l_fast_noop_owner_source_status" "$l_fast_noop_workspace.error" "$l_fast_noop_workspace.count" || l_fast_noop_owner_status=$?
+		if [ "$l_fast_noop_owner_status" -eq 0 ]; then
+			if [ "$l_fast_noop_owner_list_status" -ne 0 ]; then
+				zxfer_map_destination_dataset
+				zxfer_echoV "Destination dataset does not exist: $g_zxfer_destination_dataset_result"
+				zxfer_reset_destination_existence_cache
+				l_fast_noop_owner_status=1
+			else
+				g_recursive_source_list=""
+				g_recursive_source_dataset_list=""
+				g_recursive_destination_extra_dataset_list=""
+				g_zxfer_snapshot_discovery_destination_listing_file=""
+				zxfer_echov "No new snapshots to transfer during discovery for [$g_initial_source]."
+			fi
+		fi
+	fi
+	if [ "$l_fast_noop_owner_status" -ne 0 ]; then
 		# Success ends the pass: EXIT removes its private root. On fallback or
 		# failure, release all scratch except the validated raw listing handoff.
-		l_fast_noop_cleanup_files=$1$ZXFER_LF$2$ZXFER_LF$3$ZXFER_LF$4$ZXFER_LF$5$ZXFER_LF$6$ZXFER_LF$7
-		[ "$8" = "${g_zxfer_snapshot_discovery_destination_listing_file:-}" ] ||
-			l_fast_noop_cleanup_files=$l_fast_noop_cleanup_files$ZXFER_LF$8
-		zxfer_cleanup_runtime_artifact_path_list "$l_fast_noop_cleanup_files"
+		zxfer_cleanup_runtime_artifact_path_list "$l_fast_noop_paths" \
+			"$g_zxfer_snapshot_discovery_destination_listing_file"
 	fi
 	[ -z "$g_zxfer_snapshot_discovery_failure_result" ] ||
-		zxfer_throw_error "$g_zxfer_snapshot_discovery_failure_result" "$l_fast_noop_operation_status"
-	return "$l_fast_noop_operation_status"
-}
-
-# Purpose: Collect and normalize the destination side of full discovery.
-# Usage: zxfer_collect_full_destination_snapshot_discovery RAW SORTED REUSE;
-# runs while the source listing is in flight. REUSE=1 normalizes the validated
-# listing handed over by a declined fast proof instead of listing again.
-# Returns: Zero after normalization, otherwise the original helper status.
-zxfer_collect_full_destination_snapshot_discovery() {
-	zxfer_profile_start_timer
-	l_full_destination_stage_start_ms=$g_zxfer_profile_clock_ms
-	zxfer_map_destination_dataset
-	l_full_destination_dataset=$g_zxfer_destination_dataset_result
-	l_full_destination_status=0
-	if [ "$3" -eq 1 ]; then
-		# The fast proof's listing succeeded, so the root exists.
-		zxfer_set_destination_existence_cache_entry "$l_full_destination_dataset" 1
-		zxfer_normalize_destination_snapshot_list "$l_full_destination_dataset" \
-			"$1" "$2" ||
-			l_full_destination_status=$?
-	else
-		zxfer_write_destination_snapshot_list_to_files \
-			"$1" "$2" ||
-			l_full_destination_status=$?
-	fi
-	[ "$l_full_destination_status" -eq 0 ] || return "$l_full_destination_status"
-
-	zxfer_profile_stop_timer "$l_full_destination_stage_start_ms"
-	g_zxfer_profile_destination_snapshot_listing_ms=$((g_zxfer_profile_destination_snapshot_listing_ms + g_zxfer_profile_elapsed_ms))
-	return 0
-}
-
-# Purpose: Wait for and validate the full source snapshot producer.
-# Usage: zxfer_wait_for_full_source_snapshot_discovery SOURCE ERROR START_MS;
-# called after the destination side is collected, so both sides overlap.
-# Returns: Zero when source staging is complete, otherwise the original status
-# with its diagnostic in g_zxfer_snapshot_discovery_failure_result.
-zxfer_wait_for_full_source_snapshot_discovery() {
-	zxfer_echoV "Waiting for background processes to finish."
-	l_full_source_wait_status=0
-	zxfer_wait_for_snapshot_discovery_producer "${g_source_snapshot_list_pid:-}" \
-		"$3" source || l_full_source_wait_status=$?
-	g_source_snapshot_list_pid=""
-
-	if [ "$l_full_source_wait_status" -ne 0 ]; then
-		if [ -n "${g_source_snapshot_list_cmd:-}" ]; then
-			zxfer_record_last_command_string "$g_source_snapshot_list_cmd"
-		fi
-		zxfer_read_snapshot_discovery_capture_file \
-			"$2" || {
-			l_full_source_stderr_read_status=$?
-			g_zxfer_snapshot_discovery_failure_result="Failed to read staged source snapshot stderr."
-			return "$l_full_source_stderr_read_status"
-		}
-		l_full_source_snapshot_error=$g_zxfer_snapshot_discovery_file_read_result
-		l_full_source_snapshot_error=$(zxfer_limit_snapshot_discovery_capture_lines \
-			"$l_full_source_snapshot_error" 10)
-		g_zxfer_snapshot_discovery_failure_result="Failed to retrieve snapshots from the source${l_full_source_snapshot_error:+: $l_full_source_snapshot_error}"
-		return "$l_full_source_wait_status"
-	fi
-	zxfer_echoV "Background processes finished."
-
-	if [ ! -s "$1" ]; then
-		g_zxfer_snapshot_discovery_failure_result="Failed to retrieve snapshots from the source"
-		return 1
-	fi
-	return 0
-}
-
-# Purpose: Publish the full discovery deltas, the destination dataset
-# inventory and the record caches that later planning needs.
-# Usage: zxfer_publish_full_snapshot_discovery_results SOURCE SOURCE_SORTED
-# DEST DEST_SORTED; the last stage, after both producers finish. The owner
-# releases transient listings; the record caches stay for planning.
-# Returns: Zero after publication, otherwise the original helper status.
-zxfer_publish_full_snapshot_discovery_results() {
-	l_full_publish_inventory_attempted=0
-	zxfer_profile_start_timer
-	l_full_publish_diff_start_ms=$g_zxfer_profile_clock_ms
-	l_full_publish_status=0
-	zxfer_set_g_recursive_source_list \
-		"$1" "$4" "$2" ||
-		l_full_publish_status=$?
-	zxfer_profile_stop_timer "$l_full_publish_diff_start_ms"
-	g_zxfer_profile_snapshot_diff_sort_ms=$((g_zxfer_profile_snapshot_diff_sort_ms + g_zxfer_profile_elapsed_ms))
-
-	if [ "$l_full_publish_status" -eq 0 ] &&
-		zxfer_snapshot_discovery_needs_destination_dataset_inventory; then
-		zxfer_collect_destination_dataset_inventory || l_full_publish_status=$?
-		l_full_publish_inventory_attempted=1
-	fi
-
-	if [ "$l_full_publish_status" -eq 0 ] && zxfer_snapshot_discovery_needs_record_caches; then
-		zxfer_publish_full_snapshot_record_caches "$1" "$3" || l_full_publish_status=$?
-	fi
-	[ "$l_full_publish_status" -eq 0 ] || return "$l_full_publish_status"
-
-	if [ "$l_full_publish_inventory_attempted" -eq 1 ] &&
-		[ "$g_recursive_dest_list" = "" ]; then
-		zxfer_echoV "Destination dataset list is empty; assuming no existing datasets under \"$g_destination\""
-	fi
-	return 0
-}
-
-# Purpose: Release full discovery's transient files after publication or failure.
-# Usage: zxfer_cleanup_full_snapshot_discovery_operation_state STATUS SOURCE
-# ERROR SOURCE_SORTED DEST DEST_SORTED; retains
-# published record caches only on success. An unreaped source producer keeps
-# its files until the owner's immediate failure throw: the EXIT trap stops
-# registered producers before removing the run root. Lower-level throws use
-# that same teardown order.
-zxfer_cleanup_full_snapshot_discovery_operation_state() {
-	[ -z "${g_source_snapshot_list_pid:-}" ] || return 0
-	l_full_cleanup_files=$2$ZXFER_LF$3$ZXFER_LF$4$ZXFER_LF$6
-	if [ "$1" -ne 0 ] ||
-		[ "$5" != "${g_zxfer_destination_snapshot_record_cache_file:-}" ]; then
-		l_full_cleanup_files=$l_full_cleanup_files$ZXFER_LF$5
-	fi
-	zxfer_cleanup_runtime_artifact_path_list "$l_full_cleanup_files"
-	[ "$1" -eq 0 ] || zxfer_cleanup_snapshot_record_cache_files
+		zxfer_throw_error "$g_zxfer_snapshot_discovery_failure_result" "$l_fast_noop_owner_status"
+	return "$l_fast_noop_owner_status"
 }
 
 # Purpose: Keep the full listings as the record caches that per-dataset
@@ -1624,7 +1462,7 @@ zxfer_cleanup_full_snapshot_discovery_operation_state() {
 zxfer_publish_full_snapshot_record_caches() {
 	g_zxfer_destination_snapshot_record_cache_file=$2
 	zxfer_get_temp_file || return "$?"
-	g_zxfer_source_snapshot_record_cache_file=$g_zxfer_temp_file_result
+	g_zxfer_source_snapshot_record_cache_file=$g_zxfer_runtime_artifact_path_result
 	if zxfer_command_trace_enabled; then
 		zxfer_trace_rendered_command "Running command" \
 			"$(zxfer_render_command_for_report "" zxfer_reverse_file_lines "$1") > $(zxfer_quote_token_for_report "$g_zxfer_source_snapshot_record_cache_file")"
@@ -1636,56 +1474,107 @@ zxfer_publish_full_snapshot_record_caches() {
 		zxfer_throw_error "Failed to stage source snapshot record cache." "$?"
 }
 
-# Purpose: Own full discovery's files from allocation through final release.
-# Usage: zxfer_run_full_snapshot_discovery; source and destination stages
-# overlap, then validation precedes publication. Positional parameters retain
-# the five file paths and source timer across calls; only validated record
-# caches and the registered source PID are shared beyond this operation.
+# Purpose: Own full discovery's allocation, overlapping producers, validation,
+# publication and release.
+# Usage: zxfer_run_full_snapshot_discovery; one named workspace retains the
+# source, error, sorted, mapped and raw paths across calls. A declined proof
+# may supply the raw destination instead. Timers/statuses use l_full_owner_*.
+# Only validated record caches and the registered source PID survive this
+# operation. An unreaped producer keeps its files for the immediate failure
+# throw's EXIT trap, which stops producers before removing the run root.
 zxfer_run_full_snapshot_discovery() {
-	zxfer_create_temp_file_group 3 || return "$?"
-	{
-		IFS= read -r l_full_operation_source_file
-		IFS= read -r l_full_operation_error_file
-		IFS= read -r l_full_operation_sorted_file
-	} <<-EOF
-		$g_zxfer_temp_file_group_result
-	EOF
-	set -- "$l_full_operation_source_file" "$l_full_operation_error_file" \
-		"$l_full_operation_sorted_file" "" ""
-	unset l_full_operation_source_file l_full_operation_error_file l_full_operation_sorted_file
+	set -- error sorted mapped
+	[ -n "${g_zxfer_snapshot_discovery_destination_listing_file:-}" ] || set -- "$@" raw
+	zxfer_create_runtime_artifact_workspace discovery-source "$@" || return "$?"
+	l_full_workspace=$g_zxfer_runtime_artifact_path_result
+	l_full_workspace_paths=$g_zxfer_temp_file_group_result
+	l_full_workspace_destination=$l_full_workspace.raw
 	g_source_snapshot_list_pid=""
 	zxfer_profile_start_timer
-	set -- "$@" "$g_zxfer_profile_clock_ms"
-	l_full_operation_status=0
-	zxfer_write_source_snapshot_list_to_file "$1" "$2" "$3" || l_full_operation_status=$?
-	if [ "$l_full_operation_status" -eq 0 ]; then
-		l_full_operation_reuse=0
+	l_full_owner_source_start_ms=$g_zxfer_profile_clock_ms
+	l_full_owner_status=0
+	zxfer_write_source_snapshot_list_to_file "$l_full_workspace" "$l_full_workspace.error" "$l_full_workspace.sorted" || l_full_owner_status=$?
+
+	# The destination is collected while the source producer runs. A declined
+	# fast proof can hand over its successful raw listing without another call.
+	if [ "$l_full_owner_status" -eq 0 ]; then
+		l_full_owner_reuse=0
 		if [ -n "${g_zxfer_snapshot_discovery_destination_listing_file:-}" ]; then
-			set -- "$1" "$2" "$3" "$g_zxfer_snapshot_discovery_destination_listing_file" "$5" "$6"
+			l_full_workspace_destination=$g_zxfer_snapshot_discovery_destination_listing_file
 			g_zxfer_snapshot_discovery_destination_listing_file=""
-			l_full_operation_reuse=1
-		elif zxfer_get_temp_file; then
-			set -- "$1" "$2" "$3" "$g_zxfer_temp_file_result" "$5" "$6"
+			l_full_owner_reuse=1
+		fi
+		zxfer_profile_start_timer
+		l_full_owner_destination_start_ms=$g_zxfer_profile_clock_ms
+		zxfer_map_destination_dataset
+		l_full_owner_destination=$g_zxfer_destination_dataset_result
+		if [ "$l_full_owner_reuse" -eq 1 ]; then
+			zxfer_set_destination_existence_cache_entry "$l_full_owner_destination" 1
+			zxfer_normalize_destination_snapshot_list "$l_full_owner_destination" \
+				"$l_full_workspace_destination" "$l_full_workspace.mapped" || l_full_owner_status=$?
 		else
-			l_full_operation_status=$?
+			zxfer_write_destination_snapshot_list_to_files "$l_full_workspace_destination" "$l_full_workspace.mapped" || l_full_owner_status=$?
 		fi
-		if [ "$l_full_operation_status" -eq 0 ]; then
-			if zxfer_get_temp_file; then
-				set -- "$1" "$2" "$3" "$4" "$g_zxfer_temp_file_result" "$6"
-			else
-				l_full_operation_status=$?
-			fi
-		fi
-		if [ "$l_full_operation_status" -eq 0 ]; then
-			zxfer_collect_full_destination_snapshot_discovery "$4" "$5" "$l_full_operation_reuse" &&
-				zxfer_wait_for_full_source_snapshot_discovery "$1" "$2" "$6" &&
-				zxfer_publish_full_snapshot_discovery_results "$1" "$3" "$4" "$5" ||
-				l_full_operation_status=$?
+		if [ "$l_full_owner_status" -eq 0 ]; then
+			zxfer_profile_stop_timer "$l_full_owner_destination_start_ms"
+			g_zxfer_profile_destination_snapshot_listing_ms=$((g_zxfer_profile_destination_snapshot_listing_ms + g_zxfer_profile_elapsed_ms))
 		fi
 	fi
-	zxfer_cleanup_full_snapshot_discovery_operation_state "$l_full_operation_status" \
-		"$1" "$2" "$3" "$4" "$5"
-	return "$l_full_operation_status"
+
+	# Validate the completed source before any deltas or caches are published.
+	if [ "$l_full_owner_status" -eq 0 ]; then
+		zxfer_echoV "Waiting for background processes to finish."
+		l_full_owner_source_wait_status=0
+		zxfer_wait_for_snapshot_discovery_producer "${g_source_snapshot_list_pid:-}" \
+			"$l_full_owner_source_start_ms" source || l_full_owner_source_wait_status=$?
+		g_source_snapshot_list_pid=""
+		zxfer_validate_source_snapshot_wait_status "$l_full_owner_source_wait_status" "$l_full_workspace.error" || l_full_owner_status=$?
+		if [ "$l_full_owner_status" -eq 0 ]; then
+			zxfer_echoV "Background processes finished."
+			if [ ! -s "$l_full_workspace" ]; then
+				g_zxfer_snapshot_discovery_failure_result="Failed to retrieve snapshots from the source"
+				l_full_owner_status=1
+			fi
+		fi
+	fi
+	if [ "$l_full_owner_status" -eq 0 ]; then
+		l_full_owner_inventory_attempted=0
+		zxfer_profile_start_timer
+		l_full_owner_diff_start_ms=$g_zxfer_profile_clock_ms
+		zxfer_set_g_recursive_source_list "$l_full_workspace" "$l_full_workspace.mapped" "$l_full_workspace.sorted" || l_full_owner_status=$?
+		zxfer_profile_stop_timer "$l_full_owner_diff_start_ms"
+		g_zxfer_profile_snapshot_diff_sort_ms=$((g_zxfer_profile_snapshot_diff_sort_ms + g_zxfer_profile_elapsed_ms))
+
+		if [ "$l_full_owner_status" -eq 0 ] && zxfer_snapshot_discovery_needs_destination_dataset_inventory; then
+			zxfer_collect_destination_dataset_inventory || l_full_owner_status=$?
+			l_full_owner_inventory_attempted=1
+		fi
+		# The same work needs both inventories and snapshot records. Nonrecursive
+		# runs always retain records, even when the recursive diff found no work.
+		if [ "$l_full_owner_status" -eq 0 ] &&
+			{ [ "$l_full_owner_inventory_attempted" -eq 1 ] || [ -z "${g_option_R_recursive:-}" ]; }; then
+			zxfer_publish_full_snapshot_record_caches "$l_full_workspace" "$l_full_workspace_destination" || l_full_owner_status=$?
+		fi
+		if [ "$l_full_owner_status" -eq 0 ] && [ "$l_full_owner_inventory_attempted" -eq 1 ] &&
+			[ "$g_recursive_dest_list" = "" ]; then
+			zxfer_echoV "Destination dataset list is empty; assuming no existing datasets under \"$g_destination\""
+		fi
+	fi
+
+	# Release only after the producer is reaped. On success, the destination's
+	# raw listing may now be a planning cache; failures discard both caches.
+	# Cleanup cannot replace the first meaningful operation status.
+	if [ -z "${g_source_snapshot_list_pid:-}" ]; then
+		# A reused raw listing belongs to the preceding proof's workspace.
+		[ "$l_full_workspace_destination" = "$l_full_workspace.raw" ] ||
+			l_full_workspace_paths=$l_full_workspace_paths$ZXFER_LF$l_full_workspace_destination
+		l_full_workspace_retained=""
+		[ "$l_full_owner_status" -ne 0 ] ||
+			l_full_workspace_retained=$g_zxfer_destination_snapshot_record_cache_file
+		zxfer_cleanup_runtime_artifact_path_list "$l_full_workspace_paths" "$l_full_workspace_retained"
+		[ "$l_full_owner_status" -eq 0 ] || zxfer_cleanup_snapshot_record_cache_files
+	fi
+	return "$l_full_owner_status"
 }
 
 # Purpose: Build the source and destination snapshot inventories that the rest

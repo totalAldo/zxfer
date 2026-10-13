@@ -131,8 +131,8 @@ create_fake_ssh_join_csh_exec_bin() {
 zxfer_test_print_source_listing() {
 	"$1"
 	l_test_listing_status=$?
-	[ -z "${g_zxfer_source_snapshot_list_cmd_result:-}" ] ||
-		printf '%s\n' "$g_zxfer_source_snapshot_list_cmd_result"
+	[ -z "${g_zxfer_shell_command_result:-}" ] ||
+		printf '%s\n' "$g_zxfer_shell_command_result"
 	return "$l_test_listing_status"
 }
 

@@ -317,7 +317,7 @@ whether you still need it.
 - better remote capability probing and diagnostics
 - per-run ssh control sockets, in-memory remote capability state, and
   lock-free validated `ZXFER_ERROR_LOG` appends
-- faster large runs: each dataset is planned from its own slice of the
+- faster large runs: snapshot plans are prepared in one grouped pass over the
   snapshot listings, a `-P` lookup reads only that dataset's stored
   property list (total work still grows with the square of the dataset
   count, but with a much smaller constant), and `-e` checks its backup file

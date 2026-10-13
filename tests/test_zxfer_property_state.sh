@@ -157,6 +157,63 @@ user:k,zz:tail" "$result"
 p/b	type=filesystem=-" "$result"
 }
 
+test_property_read_workspace_is_private_reused_and_forgotten_on_reset() {
+	l_workspace_created_before=$g_zxfer_profile_runtime_artifact_files_created
+	zxfer_prepare_property_read_files
+	assertEquals "Property read allocation succeeds." 0 "$?"
+	l_read_workspace=$g_zxfer_property_read_workspace
+	assertEquals "The stem and four named siblings use five file allocations." \
+		5 "$((g_zxfer_profile_runtime_artifact_files_created - l_workspace_created_before))"
+	case $l_read_workspace in
+	"$g_zxfer_run_tmp_root"/property-read.*) ;;
+	*) fail "Property scratch must belong to the private run root." ;;
+	esac
+	for l_read_artifact in "$l_read_workspace" "$l_read_workspace.machine" \
+		"$l_read_workspace.human" "$l_read_workspace.error" "$l_read_workspace.wanted"; do
+		assertEquals "Each property capture file is 0600." 600 "$(zxfer_get_path_mode_octal "$l_read_artifact")"
+		printf capture >"$l_read_artifact"
+	done
+	l_read_row_dir=$g_zxfer_property_row_dir
+	zxfer_prepare_property_read_files
+	assertEquals "Repeated reads reuse the workspace." "$l_read_workspace" "$g_zxfer_property_read_workspace"
+	assertEquals "Repeated reads reuse the row directory." "$l_read_row_dir" "$g_zxfer_property_row_dir"
+	assertEquals "Reuse allocates no files." \
+		5 "$((g_zxfer_profile_runtime_artifact_files_created - l_workspace_created_before))"
+	assertEquals "Preparing scratch does not overwrite a previous capture." capture "$(cat "$l_read_workspace.machine")"
+	zxfer_reset_property_read_state
+	assertEquals "Reset forgets the workspace." "" "$g_zxfer_property_read_workspace"
+	assertEquals "Reset forgets the row directory." "" "$g_zxfer_property_row_dir"
+	assertTrue "The run-root owner retains cleanup responsibility." "[ -f '$l_read_workspace.machine' ]"
+	zxfer_prepare_property_read_files
+	assertNotEquals "A new session view cannot reuse inherited scratch." "$l_read_workspace" "$g_zxfer_property_read_workspace"
+}
+
+test_property_read_workspace_failure_preserves_status_and_publishes_nothing() {
+	l_property_workspace_calls=0
+	# shellcheck disable=SC2120 # Called indirectly by the workspace allocator.
+	zxfer_get_temp_file() {
+		l_property_workspace_calls=$((l_property_workspace_calls + 1))
+		[ "$l_property_workspace_calls" -ne 3 ] || return 73
+		zxfer_create_runtime_artifact_file "$@"
+	}
+	l_property_workspace_status=0
+	zxfer_prepare_property_read_files || l_property_workspace_status=$?
+	l_property_workspace_result=$g_zxfer_property_read_workspace
+	l_property_workspace_rows=$g_zxfer_property_row_dir
+	l_property_workspace_paths=$g_zxfer_temp_file_group_result
+	l_property_workspace_leaked=0
+	for l_property_workspace_path in "$g_zxfer_run_tmp_root"/property-read.*; do
+		[ ! -e "$l_property_workspace_path" ] || l_property_workspace_leaked=$((l_property_workspace_leaked + 1))
+	done
+	unset -f zxfer_get_temp_file
+	zxfer_source_runtime_modules_through "zxfer_property_state.sh"
+	assertEquals "The allocator status is preserved." 73 "$l_property_workspace_status"
+	assertEquals "No incomplete read workspace is published." "" "$l_property_workspace_result"
+	assertEquals "Row allocation cannot follow a workspace failure." "" "$l_property_workspace_rows"
+	assertEquals "The workspace publishes no partial path list." "" "$l_property_workspace_paths"
+	assertEquals "Partial captures are released." 0 "$l_property_workspace_leaked"
+}
+
 test_encode_property_value_matches_the_awk_encoder_and_round_trips() {
 	l_awk_encoder="$ZXFER_PROPERTY_AWK_LIB"'
 BEGIN { printf "%s", encode_value(ENVIRON["ZXFER_TEST_VALUE"]) }'
@@ -249,12 +306,20 @@ test_property_tables_match_whole_literal_dataset_names_only() {
 		zxfer_property_table_find_dataset source "$l_dataset" || l_lookup_status=$?
 		assertEquals "[$l_dataset] is found at any position" 0 "$l_lookup_status"
 		assertEquals "[$l_dataset] keeps its payload byte for byte" \
-			"$l_payload" "$g_zxfer_property_table_lookup_result"
+			"$l_payload" "$g_zxfer_property_row_payload_result"
 	done
 	for l_key in tank 'a b' 'tank/a b/c' 'tank/sr' '[literal]' '*' ''; do
-		assertFalse "[$l_key] names no row." "zxfer_property_table_find_dataset source \"\$l_key\""
+		g_zxfer_property_row_payload_result=stale
+		l_lookup_status=0
+		zxfer_property_table_find_dataset source "$l_key" || l_lookup_status=$?
+		assertEquals "[$l_key] names no row." 1 "$l_lookup_status"
+		assertEquals "A missing key clears the shared row payload." "" "$g_zxfer_property_row_payload_result"
 	done
-	assertFalse "An unknown side must miss." "zxfer_property_table_find_dataset other tank/a"
+	g_zxfer_property_row_payload_result=stale
+	l_lookup_status=0
+	zxfer_property_table_find_dataset other tank/a || l_lookup_status=$?
+	assertEquals "An unknown side must miss." 1 "$l_lookup_status"
+	assertEquals "An invalid side clears the shared row payload." "" "$g_zxfer_property_row_payload_result"
 	assertFalse "The destination table must not answer source lookups." \
 		"zxfer_property_table_find_dataset destination tank/a"
 
@@ -281,12 +346,12 @@ test_property_table_lookup_reads_the_newest_row_alone_and_misses_a_bad_one() {
 	zxfer_property_test_table_add source tank/src "stale=1=local"
 	zxfer_property_test_table_add source tank/src "fresh=1=local"
 	zxfer_property_table_find_dataset source tank/src
-	assertEquals "The newest row wins." "fresh=1=local" "$g_zxfer_property_table_lookup_result"
+	assertEquals "The newest row wins." "fresh=1=local" "$g_zxfer_property_row_payload_result"
 	zxfer_property_test_table_add source tank/src ""
 	l_lookup_status=0
 	zxfer_property_table_find_dataset source tank/src || l_lookup_status=$?
 	assertEquals "An empty newest row must not expose an older duplicate." 1 "$l_lookup_status"
-	assertEquals "A miss must clear the previous lookup." "" "$g_zxfer_property_table_lookup_result"
+	assertEquals "A miss must clear the previous lookup." "" "$g_zxfer_property_row_payload_result"
 
 	zxfer_property_test_table_add source pool/x "compression=lz4=local"
 	l_x_row=$g_zxfer_property_row_result
@@ -298,7 +363,7 @@ test_property_table_lookup_reads_the_newest_row_alone_and_misses_a_bad_one() {
 	rm -f "${g_zxfer_property_row_dir:?}/${l_x_row:?}"
 	mkdir "$g_zxfer_property_row_dir/$l_x_row"
 	zxfer_property_table_find_dataset source pool/x/a
-	assertEquals "compression=lz4=inherited from pool/x" "$g_zxfer_property_table_lookup_result"
+	assertEquals "compression=lz4=inherited from pool/x" "$g_zxfer_property_row_payload_result"
 	printf 'atime=of' >"$g_zxfer_property_row_dir/$l_b_row"
 	l_lookup_status=0
 	l_stderr=$(zxfer_property_table_find_dataset source pool/x/b 2>&1) || l_lookup_status=$?
@@ -354,7 +419,7 @@ test_invalidate_destination_property_mutation_cache_drops_what_a_change_may_have
 		# The live read after the tombstone is the newest row again.
 		zxfer_property_test_table_add destination "backup/dst" "compression=gzip=local"
 		zxfer_property_table_find_dataset destination backup/dst
-		printf 'after=%s\n' "$g_zxfer_property_table_lookup_result"
+		printf 'after=%s\n' "$g_zxfer_property_row_payload_result"
 		# A strip that cannot run empties the table.
 		zxfer_invalidate_destination_property_mutation_cache "backup/dst" 2>/dev/null
 		printf 'failed strip=<%s>\n' "${g_zxfer_destination_property_table:-}"
@@ -544,7 +609,7 @@ tank/src/my child"
 		zxfer_run_zfs_cmd_for_role() { zxfer_property_test_model_zfs "$@"; }
 		zxfer_prefetch_recursive_normalized_properties source
 		zxfer_property_table_find_dataset source "tank/src/my child"
-		printf 'status=%s list=%s\n' "$?" "$g_zxfer_property_table_lookup_result"
+		printf 'status=%s list=%s\n' "$?" "$g_zxfer_property_row_payload_result"
 	) >"$TEST_TMPDIR/prefetch_spaces.out"
 	assertEquals "The wanted-dataset filter holds one dataset per line." \
 		"status=0 list=compression=gzip=local" "$(cat "$TEST_TMPDIR/prefetch_spaces.out")"
@@ -806,7 +871,7 @@ test_prefetch_recursive_normalized_properties_prepends_fresh_rows_ahead_of_live_
 		zxfer_run_zfs_cmd_for_role() { zxfer_property_test_model_zfs "$@"; }
 		zxfer_prefetch_recursive_normalized_properties source
 		zxfer_property_table_find_dataset source tank/src
-		printf '%s\n' "$g_zxfer_property_table_lookup_result"
+		printf '%s\n' "$g_zxfer_property_row_payload_result"
 	) >"$TEST_TMPDIR/prefetch_prepend.out"
 	assertEquals "Fresh prefetch rows win over stale live rows." \
 		"compression=lz4=local" "$(cat "$TEST_TMPDIR/prefetch_prepend.out")"

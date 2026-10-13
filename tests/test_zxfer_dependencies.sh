@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # shunit2 tests for src/zxfer_dependencies.sh: the secure PATH, required and
-# optional helper lookup, and compression command resolution.
+# optional helper lookup and resolved-path validation.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -10,27 +10,18 @@ TEST_ORIGINAL_PATH=$PATH
 
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
-# shellcheck source=tests/helpers/remote_host_fixtures.sh
-. "$TESTS_DIR/helpers/remote_host_fixtures.sh"
 
 zxfer_source_runtime_modules_through "zxfer_dependencies.sh"
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_dependencies"
-	zxfer_test_remote_host_fixture_one_time_setup
 }
 
 oneTimeTearDown() {
-	zxfer_test_remote_host_fixture_one_time_teardown
 	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
-	# The tool-resolution cases were written for the remote-host fixture.
-	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_dependencies_tool_resolution_tests.sh"; then
-		zxfer_test_remote_host_fixture_setup
-		return
-	fi
 	PATH=$TEST_ORIGINAL_PATH
 	export PATH
 	unset ZXFER_SECURE_PATH
@@ -381,35 +372,29 @@ test_zxfer_init_dependency_tool_defaults_still_requires_ps_on_secure_path() {
 	assertNotContains "$result" initialized
 }
 
-test_refresh_compression_commands_resolves_each_head_and_quotes_every_token() {
-	# A -Z command is resolved and quoted token by token, so the shell never
-	# runs the raw string; the decompressor resolves the same way.
-	zstd_dir="$TEST_TMPDIR/custom_pipeline_bin"
-	dependencies_test_make_tools "$zstd_dir" zstd
+test_zxfer_find_required_tool_ignores_shell_functions() {
+	empty_path="$TEST_TMPDIR/function_only_path"
+	mkdir -p "$empty_path"
 
+	set +e
 	result=$(
-		g_zxfer_secure_path=$zstd_dir
-		g_option_z_compress=1
-		g_cmd_compress="zstd -3;touch /tmp/pwn"
-		g_cmd_decompress="zstd -d"
-		zxfer_refresh_compression_commands
-		printf 'compress=%s\n' "$g_cmd_compress_safe"
-		printf 'decompress=%s\n' "$g_cmd_decompress_safe"
+		(
+			mocktool() {
+				:
+			}
+			g_zxfer_secure_path="$empty_path"
+			zxfer_find_required_tool mocktool "mocktool"
+			l_status=$?
+			printf '%s\n' "$g_zxfer_required_tool_result"
+			exit "$l_status"
+		)
 	)
+	status=$?
 
-	assertEquals "Both heads should resolve on the secure PATH, and every token should be quoted." \
-		"compress='$zstd_dir/zstd' '-3;' 'touch' '/tmp/pwn'
-decompress='$zstd_dir/zstd' '-d'" "$result"
-}
-
-# zxfer-test-fragment: suites/zxfer_dependencies_tool_resolution_tests.sh
-# shellcheck source=tests/suites/zxfer_dependencies_tool_resolution_tests.sh
-. "$TESTS_DIR/suites/zxfer_dependencies_tool_resolution_tests.sh"
-
-suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_dependencies.sh" \
-		"$TESTS_DIR/suites/zxfer_dependencies_tool_resolution_tests.sh"
+	assertEquals "A shell function must never satisfy a helper lookup." 1 "$status"
+	assertEquals "A name that is only a shell function should be reported as missing from the secure PATH." \
+		"Required dependency \"mocktool\" not found in secure PATH ($empty_path). Set ZXFER_SECURE_PATH or install the binary." \
+		"$result"
 }
 
 # shellcheck source=tests/shunit2/shunit2

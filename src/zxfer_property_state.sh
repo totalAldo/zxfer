@@ -39,7 +39,7 @@
 # Module contract:
 # owns globals: ZXFER_PROPERTY_AWK_LIB and ZXFER_PROPERTY_NORMALIZE_AWK, the
 #   per-iteration property tables and recursive prefetch state, the per-run
-#   read scratch files (g_zxfer_property_*_file), the row store
+#   read workspace (g_zxfer_property_read_workspace), the row store
 #   (g_zxfer_property_row_dir and g_zxfer_property_row_count), and the result
 #   globals g_zxfer_normalized_dataset_properties(_cache_hit),
 #   g_zxfer_required_properties_result, g_zxfer_property_record_value/source,
@@ -53,8 +53,8 @@
 # reads globals: the -R/-P/-o options, g_initial_source, g_destination, the
 #   recursive dataset lists, and g_cmd_awk.
 # mutates caches: the property tables, through prefetch, live reads, and
-#   destination invalidation; the row files of the row store, which the -e
-#   restore rows of the backup metadata module share (prefix r).
+#   destination invalidation and the property store's row files. The shared
+#   row reader also accepts backup metadata's private view directories.
 # returns via stdout: zxfer_parse_property_views prints the parser output;
 #   every other helper publishes result globals.
 #
@@ -84,11 +84,7 @@
 # Usage: Called once at session initialization.
 zxfer_reset_property_read_state() {
 	g_zxfer_property_error_result=""
-	g_zxfer_property_skeleton_file=""
-	g_zxfer_property_machine_file=""
-	g_zxfer_property_human_file=""
-	g_zxfer_property_error_file=""
-	g_zxfer_property_wanted_file=""
+	g_zxfer_property_read_workspace=""
 	g_zxfer_property_row_dir=""
 }
 
@@ -103,7 +99,6 @@ zxfer_reset_property_iteration_caches() {
 	g_zxfer_normalized_dataset_properties_cache_hit=0
 	g_zxfer_required_properties_result=""
 	g_zxfer_required_property_probe_result=""
-	g_zxfer_property_table_lookup_result=""
 	g_zxfer_property_row_result=""
 	g_zxfer_property_row_payload_result=""
 	g_zxfer_property_row_count=0
@@ -558,7 +553,9 @@ zxfer_find_property_row() {
 }
 
 # Purpose: Read one row file of the row store.
-# Usage: zxfer_read_property_row ROW; publishes the payload in
+# Usage: zxfer_read_property_row ROW [DIRECTORY]; the default is the
+# property row store; backup metadata views supply their own directory.
+# Publishes the payload in
 # g_zxfer_property_row_payload_result, or returns 1 for a tombstone, a name
 # the store never makes, and a row file that is missing, unreadable, empty or
 # cut short: every row file ends in a LF, which a failed write never leaves.
@@ -568,9 +565,9 @@ zxfer_read_property_row() {
 	case $1 in
 	'' | ? | [!a-z]* | ?*[!0-9]*) return 1 ;;
 	esac
-	[ -n "${g_zxfer_property_row_dir:-}" ] || return 1
+	[ -n "${2:-${g_zxfer_property_row_dir:-}}" ] || return 1
 	# dash's read takes the file one byte at a time, but only this row.
-	{ IFS= read -r g_zxfer_property_row_payload_result <"$g_zxfer_property_row_dir/$1"; } 2>/dev/null || {
+	{ IFS= read -r g_zxfer_property_row_payload_result <"${2:-$g_zxfer_property_row_dir}/$1"; } 2>/dev/null || {
 		g_zxfer_property_row_payload_result=""
 		return 1
 	}
@@ -593,11 +590,11 @@ zxfer_store_property_row() {
 
 # Purpose: Find one dataset's list in one side's table.
 # Usage: zxfer_property_table_find_dataset source|destination DATASET;
-# publishes the list in g_zxfer_property_table_lookup_result and returns
+# publishes the list in g_zxfer_property_row_payload_result and returns
 # non-zero on a miss. The newest line for the dataset wins, and a tombstone
 # or an empty or unreadable row is a miss that hides every older line.
 zxfer_property_table_find_dataset() {
-	g_zxfer_property_table_lookup_result=""
+	g_zxfer_property_row_payload_result=""
 	case $1 in
 	source) l_find_index=${g_zxfer_source_property_table:-} ;;
 	destination) l_find_index=${g_zxfer_destination_property_table:-} ;;
@@ -605,7 +602,6 @@ zxfer_property_table_find_dataset() {
 	esac
 	zxfer_find_property_row "$l_find_index" "$2" || return 1
 	zxfer_read_property_row "$g_zxfer_property_row_result" || return 1
-	g_zxfer_property_table_lookup_result=$g_zxfer_property_row_payload_result
 }
 
 # Purpose: Reset the destination table and re-arm its prefetch so freshly
@@ -675,24 +671,16 @@ EOF
 # LIVE READS / RECURSIVE PREFETCH / NORMALIZED LOOKUP
 ################################################################################
 
-# Purpose: Allocate the scratch files property reads reuse (the skeleton, the
-# machine and human views, zfs stderr, and the prefetch dataset filter) and
-# the private directory of the row store.
+# Purpose: Allocate the reusable property-read workspace and row directory.
+# The stem holds the skeleton; .machine, .human, .error and .wanted hold
+# the value views, zfs stderr and recursive dataset filter.
 # Usage: zxfer_prepare_property_read_files; allocates them once per run (every
 # read overwrites the files) and throws when one cannot be created. The
 # run-root removal deletes them.
 zxfer_prepare_property_read_files() {
-	if [ -z "${g_zxfer_property_skeleton_file:-}" ]; then
-		zxfer_create_temp_file_group 5 || return "$?"
-		{
-			IFS= read -r g_zxfer_property_skeleton_file
-			IFS= read -r g_zxfer_property_machine_file
-			IFS= read -r g_zxfer_property_human_file
-			IFS= read -r g_zxfer_property_error_file
-			IFS= read -r g_zxfer_property_wanted_file
-		} <<EOF
-$g_zxfer_temp_file_group_result
-EOF
+	if [ -z "${g_zxfer_property_read_workspace:-}" ]; then
+		zxfer_create_runtime_artifact_workspace property-read machine human error wanted || return "$?"
+		g_zxfer_property_read_workspace=$g_zxfer_runtime_artifact_path_result
 	fi
 	[ -z "${g_zxfer_property_row_dir:-}" ] || return 0
 	zxfer_create_private_temp_dir zxfer-property-rows ||
@@ -714,9 +702,9 @@ zxfer_read_one_property() {
 	# A user property name may start with "-" (for example -x:y), which zfs
 	# would parse as an option, so -- ends the options first.
 	l_one_output=$(zxfer_run_zfs_cmd_for_role "$1" get "$4" property,value,source -- "$3" "$2" \
-		2>"$g_zxfer_property_error_file" </dev/null) || l_one_status=$?
+		2>"$g_zxfer_property_read_workspace.error" </dev/null) || l_one_status=$?
 	if [ "$l_one_status" -ne 0 ]; then
-		zxfer_read_runtime_artifact_file_trimmed "$g_zxfer_property_error_file" || :
+		zxfer_read_runtime_artifact_file_trimmed "$g_zxfer_property_read_workspace.error" || :
 		g_zxfer_property_error_result=$g_zxfer_runtime_artifact_read_result
 		return "$l_one_status"
 	fi
@@ -770,7 +758,7 @@ zxfer_prefetch_recursive_normalized_properties() {
 
 	zxfer_prepare_property_read_files || return "$?"
 	# The dataset lists hold one dataset per line.
-	printf '%s\n' "$l_prefetch_datasets" >"$g_zxfer_property_wanted_file" || return 1
+	printf '%s\n' "$l_prefetch_datasets" >"$g_zxfer_property_read_workspace.wanted" || return 1
 
 	case $l_prefetch_side in
 	source) g_zxfer_profile_normalized_property_reads_source=$((g_zxfer_profile_normalized_property_reads_source + 1)) ;;
@@ -782,16 +770,16 @@ zxfer_prefetch_recursive_normalized_properties() {
 	l_prefetch_status=0
 	zxfer_run_zfs_cmd_for_role "$l_prefetch_side" get -r -t filesystem,volume \
 		-Hpo name,property,value,source all "$l_prefetch_root" \
-		>"$g_zxfer_property_machine_file" 2>/dev/null </dev/null &&
+		>"$g_zxfer_property_read_workspace.machine" 2>/dev/null </dev/null &&
 		zxfer_run_zfs_cmd_for_role "$l_prefetch_side" get -r -t filesystem,volume \
 			-Ho name,property,value,source all "$l_prefetch_root" \
-			>"$g_zxfer_property_human_file" 2>/dev/null </dev/null &&
+			>"$g_zxfer_property_read_workspace.human" 2>/dev/null </dev/null &&
 		zxfer_run_zfs_cmd_for_role "$l_prefetch_side" get -r -t filesystem,volume \
 			-Ho name,property all "$l_prefetch_root" \
-			>"$g_zxfer_property_skeleton_file" 2>/dev/null </dev/null &&
-		l_prefetch_index=$(zxfer_parse_property_views store "$g_zxfer_property_wanted_file" \
-			"$g_zxfer_property_skeleton_file" "$g_zxfer_property_machine_file" \
-			"$g_zxfer_property_human_file") ||
+			>"$g_zxfer_property_read_workspace" 2>/dev/null </dev/null &&
+		l_prefetch_index=$(zxfer_parse_property_views store "$g_zxfer_property_read_workspace.wanted" \
+			"$g_zxfer_property_read_workspace" "$g_zxfer_property_read_workspace.machine" \
+			"$g_zxfer_property_read_workspace.human") ||
 		l_prefetch_status=$?
 	[ "$l_prefetch_status" -eq 0 ] || return "$l_prefetch_status"
 
@@ -834,19 +822,19 @@ zxfer_read_live_dataset_properties() {
 	zxfer_prepare_property_read_files || return "$?"
 	l_live_status=0
 	zxfer_run_zfs_cmd_for_role "$l_live_side" get -Hpo property,value,source all "$l_live_dataset" \
-		>"$g_zxfer_property_machine_file" 2>"$g_zxfer_property_error_file" </dev/null &&
+		>"$g_zxfer_property_read_workspace.machine" 2>"$g_zxfer_property_read_workspace.error" </dev/null &&
 		zxfer_run_zfs_cmd_for_role "$l_live_side" get -Ho property,value,source all "$l_live_dataset" \
-			>"$g_zxfer_property_human_file" 2>"$g_zxfer_property_error_file" </dev/null &&
+			>"$g_zxfer_property_read_workspace.human" 2>"$g_zxfer_property_read_workspace.error" </dev/null &&
 		zxfer_run_zfs_cmd_for_role "$l_live_side" get -Ho property all "$l_live_dataset" \
-			>"$g_zxfer_property_skeleton_file" 2>"$g_zxfer_property_error_file" </dev/null ||
+			>"$g_zxfer_property_read_workspace" 2>"$g_zxfer_property_read_workspace.error" </dev/null ||
 		l_live_status=$?
 	if [ "$l_live_status" -ne 0 ]; then
-		zxfer_read_runtime_artifact_file_trimmed "$g_zxfer_property_error_file" || :
+		zxfer_read_runtime_artifact_file_trimmed "$g_zxfer_property_read_workspace.error" || :
 		g_zxfer_property_error_result=$g_zxfer_runtime_artifact_read_result
 		return "$l_live_status"
 	fi
-	l_live_parsed=$(zxfer_parse_property_views merge "$g_zxfer_property_skeleton_file" \
-		"$g_zxfer_property_machine_file" "$g_zxfer_property_human_file") || {
+	l_live_parsed=$(zxfer_parse_property_views merge "$g_zxfer_property_read_workspace" \
+		"$g_zxfer_property_read_workspace.machine" "$g_zxfer_property_read_workspace.human") || {
 		g_zxfer_property_error_result="Failed to parse the properties of dataset [$l_live_dataset]: the zfs get property list is malformed, repeats a name, or does not match the values."
 		return 1
 	}
@@ -922,7 +910,7 @@ zxfer_load_normalized_dataset_properties() {
 	if zxfer_property_table_find_dataset "$l_load_side" "$l_load_dataset" ||
 		{ zxfer_prefetch_recursive_normalized_properties "$l_load_side" &&
 			zxfer_property_table_find_dataset "$l_load_side" "$l_load_dataset"; }; then
-		g_zxfer_normalized_dataset_properties=$g_zxfer_property_table_lookup_result
+		g_zxfer_normalized_dataset_properties=$g_zxfer_property_row_payload_result
 		g_zxfer_normalized_dataset_properties_cache_hit=1
 		return 0
 	fi

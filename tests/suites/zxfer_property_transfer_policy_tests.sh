@@ -332,14 +332,14 @@ test_append_unsupported_property_appends_without_duplicates_per_type() {
 test_filter_child_creation_overrides_for_parent_drops_only_inheritable_overrides_the_parent_supplies() {
 	assertEquals "A matching inheritable override goes; a noninheritable one (quota), a non-override and a differing one stay." \
 		"quota=1G=override,compression=lz4=local,atime=on=override" \
-		"$(zxfer_filter_child_creation_overrides_for_parent \
+		"$(zxfer_property_test_filter_child_creation \
 			"checksum=sha256=override,quota=1G=override,compression=lz4=local,atime=on=override" \
 			"checksum=sha256=local,quota=1G=local,atime=off=local" "")"
 	assertEquals "A parent value on the readonly or -I list does not supply an override." \
 		"checksum=sha256=override,copies=2=override" \
 		"$(
 			g_option_I_ignore_properties="copies"
-			zxfer_filter_child_creation_overrides_for_parent \
+			zxfer_property_test_filter_child_creation \
 				"checksum=sha256=override,copies=2=override,atime=off=override" \
 				"checksum=sha256=local,copies=2=local,atime=off=local" "checksum"
 		)"

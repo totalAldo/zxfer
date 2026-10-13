@@ -118,6 +118,7 @@ test_source_listing_builders_fail_closed_when_rendering_fails() {
 	output=$(
 		(
 			zxfer_render_zfs_command_for_role() {
+				g_zxfer_shell_command_result="partial serial command"
 				return 67
 			}
 			zxfer_test_print_source_listing zxfer_build_source_snapshot_list_cmd
@@ -132,6 +133,7 @@ test_source_listing_builders_fail_closed_when_rendering_fails() {
 			zxfer_build_source_snapshot_list_cmd; do
 			(
 				zxfer_ssh_shell_command_for_host() {
+					g_zxfer_shell_command_result="partial SSH command"
 					return 34
 				}
 				zxfer_test_print_source_listing "$l_builder"
@@ -156,6 +158,86 @@ The origin host compression command is not resolved.
 zxfer_build_source_snapshot_list_cmd compressor=1" "$output"
 }
 
+# The origin renderer must retain an input supplied through its own output
+# channel before clearing it or rendering the remote wrapper.
+test_origin_listing_renderer_retains_input_from_the_canonical_result() {
+	output=$(
+		g_option_O_origin_host="origin.example"
+		g_zxfer_shell_command_result="printf '%s\\n' 'input retained'"
+		zxfer_ssh_shell_command_for_host() {
+			zxfer_execute_rendered_shell_command "$3" || return
+			g_zxfer_shell_command_result="wrapped command"
+		}
+		zxfer_render_origin_listing_command "$g_zxfer_shell_command_result" 0
+		printf 'result=%s\n' "$g_zxfer_shell_command_result"
+	)
+	assertEquals "Remote preparation must receive the original pipeline before replacing the shared result." \
+		"input retained
+result=wrapped command" "$output"
+}
+
+# Both launchers keep the launched command for a later producer failure even
+# after producer preparation renders another command through the shared result.
+test_source_listing_launchers_retain_commands_across_producer_rendering() {
+	for listing_mode in fast full; do
+		output=$(
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_zxfer_shell_command_result="printf snapshot"
+			}
+			zxfer_build_source_snapshot_list_cmd() {
+				g_zxfer_shell_command_result="printf snapshot"
+			}
+			zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
+				zxfer_render_shell_command_from_argv ignored scratch
+				zxfer_execute_rendered_shell_command "$1"
+			}
+			zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
+				zxfer_render_shell_command_from_argv ignored scratch
+				zxfer_execute_rendered_shell_command "$1"
+			}
+			if [ "$listing_mode" = fast ]; then
+				zxfer_start_fast_recursive_noop_source_discovery out err count
+			else
+				zxfer_write_source_snapshot_list_to_file out err sorted
+			fi
+			printf '\nretained=%s\n' "$g_source_snapshot_list_cmd"
+		)
+		assertEquals "$listing_mode keeps its original command across later rendering." \
+			"snapshot
+retained=printf snapshot" "$output"
+	done
+}
+
+# A -j no-op proof is still one recursive listing; only the full producer
+# fans out. Pin both counters with and without -V through the real builders.
+test_source_listing_launchers_account_parallel_by_listing_mode() {
+	for listing_mode in fast full; do
+		for listing_jobs in 1 4; do
+			for listing_verbose in 0 1; do
+				output=$(
+					g_option_j_jobs=$listing_jobs
+					g_option_V_very_verbose=$listing_verbose
+					zxfer_execute_source_snapshot_name_list_background_sort_cmd() { return 0; }
+					zxfer_execute_source_snapshot_list_background_cmd_with_sort() { return 0; }
+					if [ "$listing_mode" = fast ]; then
+						zxfer_start_fast_recursive_noop_source_discovery out err count
+					else
+						zxfer_write_source_snapshot_list_to_file out err sorted
+					fi >/dev/null
+					printf '%s %s\n' "$g_zxfer_profile_source_snapshot_list_commands" \
+						"$g_zxfer_profile_source_snapshot_list_parallel_commands"
+				)
+				parallel_count=0
+				if [ "$listing_mode:$listing_jobs" = full:4 ]; then
+					parallel_count=1
+				fi
+				assertEquals "$listing_mode -j $listing_jobs -V $listing_verbose accounts only its selected producer." \
+					"1 $parallel_count" "$output"
+			done
+		done
+	done
+}
+
 # A failed build throws the builder's message, or a generic one with the
 # build's status when the builder published none.
 test_write_source_snapshot_list_to_file_throws_the_builder_message_or_a_generic_one() {
@@ -166,7 +248,7 @@ test_write_source_snapshot_list_to_file_throws_the_builder_message_or_a_generic_
 				BUILD_MESSAGE=${l_build_case%|*}
 				BUILD_STATUS=${l_build_case#*|}
 				zxfer_build_source_snapshot_list_cmd() {
-					g_zxfer_source_snapshot_list_cmd_result=$BUILD_MESSAGE
+					g_zxfer_shell_command_result=$BUILD_MESSAGE
 					return "$BUILD_STATUS"
 				}
 				zxfer_throw_error() {
@@ -192,7 +274,7 @@ test_write_source_snapshot_list_to_file_keeps_the_status_of_a_failed_launch() {
 	output=$(
 		(
 			zxfer_build_source_snapshot_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' snap"
+				g_zxfer_shell_command_result="printf '%s\n' snap"
 			}
 			zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
 				return 32
@@ -205,11 +287,11 @@ test_write_source_snapshot_list_to_file_keeps_the_status_of_a_failed_launch() {
 			zxfer_get_temp_file() {
 				temp_calls=$((temp_calls + 1))
 				[ "$temp_calls" -eq 1 ] || return 33
-				g_zxfer_temp_file_result="$TEST_TMPDIR/source_launch_failure.sorted"
-				: >"$g_zxfer_temp_file_result"
+				g_zxfer_runtime_artifact_path_result="$TEST_TMPDIR/source_launch_failure.sorted"
+				: >"$g_zxfer_runtime_artifact_path_result"
 			}
 			zxfer_build_source_snapshot_list_cmd() {
-				g_zxfer_source_snapshot_list_cmd_result="printf '%s\n' snap"
+				g_zxfer_shell_command_result="printf '%s\n' snap"
 			}
 			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile" "$outfile.sorted"
 			printf 'status file=%s calls=%s\n' "$?" "$temp_calls"
@@ -229,7 +311,7 @@ test_source_snapshot_producers_keep_the_status_of_a_failed_setup() {
 
 	output=$(
 		(
-			zxfer_create_temp_file_group() {
+			zxfer_create_runtime_artifact_workspace() {
 				return 14
 			}
 			zxfer_execute_source_snapshot_list_background_cmd_with_sort "printf x" \
@@ -244,8 +326,8 @@ test_source_snapshot_producers_keep_the_status_of_a_failed_setup() {
 				zxfer_get_temp_file() {
 					temp_calls=$((temp_calls + 1))
 					[ "$temp_calls" -ne "$FAIL_AT" ] || return "$FAIL_STATUS"
-					g_zxfer_temp_file_result="$TEST_TMPDIR/producer_setup.$temp_calls"
-					: >"$g_zxfer_temp_file_result"
+					g_zxfer_runtime_artifact_path_result="$TEST_TMPDIR/producer_setup.$temp_calls"
+					: >"$g_zxfer_runtime_artifact_path_result"
 				}
 				zxfer_execute_source_snapshot_name_list_background_sort_cmd "printf x" \
 					"$sorted_file" "" "$TEST_TMPDIR/producer_setup.count"
@@ -281,6 +363,88 @@ test_source_snapshot_producers_preserve_spawn_failure_without_registering_stale_
 		assertEquals "$producer discovery must not register a previous helper PID after a failed spawn." \
 			"" "$output"
 	done
+}
+
+# Exercise the rendered pipelines themselves: full discovery keeps creation
+# order, the proof filters before counting, and the first failed stage wins
+# even if sort also fails. Paths containing shell syntax stay literal.
+test_source_snapshot_producers_preserve_stage_order_and_failure_precedence() {
+	producer_path="$TEST_TMPDIR/producer ' \$(touch forbidden)"
+	filter_wrapper="$TEST_TMPDIR/producer-filter"
+	real_awk=$(command -v awk)
+	# shellcheck disable=SC2016 # The fixture script expands its own arguments.
+	printf '#!/bin/sh\n"%s" "$@" || exit $?\nexit "$FILTER_STATUS"\n' \
+		"$real_awk" >"$filter_wrapper"
+	chmod +x "$filter_wrapper"
+	# Install overrides before entering a subshell: ksh93 retains the original
+	# binding when a subshell alone replaces an already defined function.
+	zxfer_spawn_background_shell() { RENDERED_PRODUCER=$1; }
+	zxfer_register_background_producer() { return 0; }
+	tee() {
+		command tee "$@"
+		return "$FILTER_STATUS"
+	}
+	sort() {
+		command sort "$@"
+		return "$SORT_STATUS"
+	}
+	cat() {
+		command cat "$@"
+		return "$CAT_STATUS"
+	}
+	for producer_case in full:0:0:0:0:0 full:37:38:0:39:37 \
+		full:0:38:0:39:38 full:0:0:0:39:39 \
+		fast:0:0:0:0:0 fast:37:38:40:39:37 \
+		fast:0:38:40:39:38 fast:0:0:40:39:40 \
+		fast:0:0:0:39:39 empty:0:0:40:0:0; do
+		(
+			IFS=: read -r MODE LIST_STATUS FILTER_STATUS CAT_STATUS SORT_STATUS EXPECTED <<EOF
+$producer_case
+EOF
+			export FILTER_STATUS
+			g_cmd_awk=$filter_wrapper
+			g_option_x_exclude_datasets=skip
+			producer_cmd="printf '%s\n' 'tank/src@z${ZXFER_TAB}2' 'tank/skip@a${ZXFER_TAB}1' 'tank/src@a${ZXFER_TAB}0'; exit $LIST_STATUS"
+			[ "$MODE" != empty ] || producer_cmd=:
+			if [ "$MODE" = full ]; then
+				zxfer_execute_source_snapshot_list_background_cmd_with_sort \
+					"$producer_cmd" "$producer_path.raw" "" "$producer_path.sorted"
+			else
+				zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+					"$producer_cmd" "$producer_path.sorted" "" "$producer_path.count"
+			fi
+			(eval "$RENDERED_PRODUCER")
+			printf 'status=%s\n' "$?"
+			command cat "$producer_path.sorted"
+			if [ "$MODE" = full ]; then
+				printf 'raw:\n'
+				command cat "$producer_path.raw"
+			else
+				printf 'count=%s\n' "$(command cat "$producer_path.count")"
+			fi
+		) >"$TEST_TMPDIR/producer-result"
+		output=$(command cat "$TEST_TMPDIR/producer-result")
+		assertEquals "The first failing stage wins [$producer_case]." \
+			"status=${producer_case##*:}" "${output%%"$ZXFER_LF"*}"
+		case $producer_case in
+		full:*)
+			assertContains "Full discovery keeps the excluded dataset and raw creation order." \
+				"$output" "raw:
+tank/src@z	2
+tank/skip@a	1
+tank/src@a	0"
+			;;
+		fast:*)
+			assertContains "The proof counts the filtered records." "$output" count=1
+			assertContains "The proof byte-sorts the retained records." "$output" "tank/src@a	0
+tank/src@z	2"
+			assertNotContains "The proof filters before sort." "$output" tank/skip
+			;;
+		empty:*) assertContains "An empty stream bypasses cat and publishes absence." "$output" count=0 ;;
+		esac
+	done
+	unset -f cat sort tee
+	zxfer_source_runtime_modules_through zxfer_snapshot_discovery.sh
 }
 
 # A producer whose cleanup registration fails is stopped at once: TERM, then
@@ -370,23 +534,23 @@ test_source_snapshot_producers_stop_an_unregistered_producer_and_its_descendants
 	done
 }
 
-test_zxfer_read_snapshot_discovery_capture_file_reads_or_fails_closed() {
+test_zxfer_read_runtime_artifact_file_reads_or_fails_closed() {
 	capture_file="$TEST_TMPDIR/snapshot_discovery_capture.txt"
 	capture_dir="$TEST_TMPDIR/snapshot_discovery_capture_dir"
 	printf '%s\n' "first line" "second line" >"$capture_file"
 	mkdir -p "$capture_dir"
 
-	zxfer_read_snapshot_discovery_capture_file "$capture_file"
+	zxfer_read_runtime_artifact_file "$capture_file"
 	assertEquals "A staged capture should be read whole, trailing newline included." \
 		"first line
 second line
-" "$g_zxfer_snapshot_discovery_file_read_result"
+" "$g_zxfer_runtime_artifact_read_result"
 
-	g_zxfer_snapshot_discovery_file_read_result="stale-capture"
-	zxfer_read_snapshot_discovery_capture_file "$capture_dir" 2>/dev/null
+	g_zxfer_runtime_artifact_read_result="stale-capture"
+	zxfer_read_runtime_artifact_file "$capture_dir" 2>/dev/null
 	assertNotEquals "A capture that cannot be opened for reading should fail." 0 "$?"
 	assertEquals "A failed read should publish no stale or partial capture." \
-		"" "$g_zxfer_snapshot_discovery_file_read_result"
+		"" "$g_zxfer_runtime_artifact_read_result"
 }
 
 test_read_snapshot_discovery_status_file_defaults_and_validates() {

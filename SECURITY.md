@@ -45,10 +45,12 @@ Key protections already present in the project include:
   property value printed before it and take its value and source from that
   text. A user property removed before its lone re-read, which zfs reports
   with source `-`, is left out, as if the read had begun after the removal);
-  property lists reach `awk` only through `ENVIRON`, never `awk -v`, so
-  backslash escapes are never reinterpreted, and each property `awk` call sets
-  every `ZXFER_AWK_*` variable it reads, so the operator's environment cannot
-  change filtering
+  property planners read encoded lists from one run-private file and reject
+  incomplete input before publishing a plan; values cross the environment
+  only as that path. Name-only policies and other property helpers set every
+  context variable they read,
+  and property values never pass through `awk -v`, so backslash escapes are
+  not reinterpreted and the operator's environment cannot change filtering
 - the property lists a run caches, still percent-encoded, live in row files
   in a private 0700 directory under the run root, found through an index kept
   in memory: a lookup opens only a row name the store itself makes, and a row

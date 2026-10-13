@@ -14,7 +14,7 @@ test_get_temp_file_uses_physical_tmpdir_for_symlinked_tmpdir_paths() {
 	g_zxfer_effective_tmpdir=""
 	g_zxfer_effective_tmpdir_requested=""
 
-	file=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_temp_file_result")
+	file=$(zxfer_get_temp_file && printf '%s' "$g_zxfer_runtime_artifact_path_result")
 
 	case "$file" in
 	"$real_tmp"/*) inside_real=0 ;;

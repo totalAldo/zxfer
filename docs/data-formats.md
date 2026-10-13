@@ -28,8 +28,8 @@ The replication iteration list uses `POSITION<TAB>SOURCE` rows:
 2<TAB>tank/src/child
 ```
 
-The position connects a row to its prepared snapshot slice. Dataset ordering
-puts parents before children; the parallel ready queue additionally gates
+The position connects a row to its prepared snapshot plan and source slice.
+Dataset ordering puts parents before children; the parallel ready queue additionally gates
 conflicting destination ancestry. Do not replace these rows with shell words
 or assume that a row's position alone makes it safe to start a receive.
 
@@ -49,17 +49,53 @@ helper's contract, not a property of the record syntax. A common snapshot must
 match both name and GUID on the mapped datasets. Same name with a different
 GUID is divergence; a missing GUID is an invalid identity.
 
-[Snapshot planning](../src/zxfer_snapshot_plan.sh) writes a tagged plan file.
-Its record types are:
+Discovery's temporary dataset rows are `ROLE<TAB>DATASET`, where `ROLE` is
+`missing`, `extra`, or `inventory`. One C-locale unique sort orders and
+deduplicates each role independently; the same dataset may belong to several
+roles. The published globals remain newline-separated dataset lists. These
+rows schedule inspection; they do not validate GUIDs or authorize deletion.
+
+[Snapshot planning](../src/zxfer_snapshot_plan.sh) writes exact identity and
+deletion rows, followed by a fixed-order summary. Its tagged rows are:
 
 | Tag | Remaining fields | Meaning |
 | --- | --- | --- |
 | `common` | Snapshot record | Newest shared source snapshot |
 | `diverged` | Name, source GUID, destination GUID | Conflicting identity |
-| `send` | Snapshot record | Pending source snapshot, oldest first |
-| `delete` | Destination snapshot path | Candidate requiring deletion guards |
-| `destination_present` | `0` or `1` | Validated destination snapshot presence |
-| `sources` | Count | Final record proving the plan completed |
+| `send` | Snapshot record | Pending source snapshot, newest first |
+| `skip` | `before_common`, snapshot record | Under `-v`/`-V`, missing identity before the common snapshot in source creation order; diagnostic only |
+| `delete` | Destination snapshot path | Candidate requiring deletion guards, in destination order |
+| `error` | `3` | Invalid identity, refused at this dataset’s inspection boundary |
+
+The summary starts with `__ZXFER_SNAPSHOT_SUMMARY__`, then has six whole-line
+values: first pending record (oldest), final pending record (newest), the single
+reverse-order destroy argument, destination presence (`0` or `1`), source
+count, and divergence count. Empty endpoints or destroy targets occupy empty
+lines; tabs inside snapshot records remain literal. The block ends with
+`__ZXFER_SNAPSHOT_PLAN__` and a newline, with no following data. For example:
+
+```text
+send<TAB>tank/src@two<TAB>102
+common<TAB>tank/src@one<TAB>101
+__ZXFER_SNAPSHOT_SUMMARY__
+tank/src@two<TAB>102
+tank/src@two<TAB>102
+
+1
+2
+0
+__ZXFER_SNAPSHOT_PLAN__
+```
+
+Prepared plans live in `BASE.POSITION.p`; `BASE.POSITION.s` retains source
+records for live rechecks. The shell loads summaries without another AWK
+process, rejecting missing values, invalid counts or presence, wrong completion
+markers, and trailing data. An identity failure ends with `error` instead of a
+summary. Preflight and execution read the same plans. No plan is published when
+the grouped preparation fails, and loading a draft never changes the active
+transfer plan. Verbose-only `skip` rows are reported after divergence
+enforcement during dataset execution, so `-g` preflight does not duplicate
+them. They never authorize sends, deletes or adoption of an older live anchor.
 
 Fields are tab-separated, including the name and GUID inside a snapshot
 record. A delete candidate is not authorization to delete: option checks,
@@ -109,21 +145,60 @@ the same storage with an `r` prefix.
 
 ## Batched Property Plan
 
+The internal entry point is
+`zxfer_plan_property_changes IS_INITIAL HAS_DESTINATION TYPE SOURCE_PVS DEST_PVS UNSUPPORTED_CSV`.
+It requires six arguments and two explicit 0/1 flags. `HAS_DESTINATION=1`
+means diff against the supplied destination view, including an empty one;
+0 means plan creation. Session startup prepares the run-wide `-P`, `-o`,
+readonly and `-I` policies that this function reads. The dataset-specific
+unsupported list remains a parameter because filesystem and volume policies
+differ. This replaces the former nine-argument internal signature; operator
+flags, outputs, action records and backup format v2 are unchanged.
+
 [Property transfer](../src/zxfer_property_transfer.sh) computes one batch for
-a dataset. Its successful output contains six property-list lines, in order:
+a dataset. Its inputs are encoded lists in one reusable run-private file,
+with `KEY<TAB>LIST` rows and a final `__ZXFER_PROPERTY_INPUT__` line. Keys
+name the views (`source`, `override`, `destination`); late parent resolution
+uses `parent`. Name-only filter policies and
+scalar flags remain explicit command context. Empty values remain rows. The reader rejects malformed or repeated
+keys, a missing completion marker, and trailing data. Values cross no shell
+or AWK escape parser, and the file is fully consumed before it can be reused.
+The capture parser and cached row format are unchanged.
 
-1. Apply list, including effective overrides.
-2. Creation list.
-3. Filtered destination list.
-4. Initial set list.
-5. Child set list.
-6. Inherit list.
+The output is a private action file, not a batch of shell property lists:
 
-The next line is `__ZXFER_PROPERTY_PLAN__`, followed by any warning lines.
-Empty list lines are meaningful; do not drop them or split the batch on shell
-whitespace. The planner validates completion before publishing its result
-channel, and the dataset operation consumes the lists before applying them.
-A creation-time mismatch takes a separate error path, not a partial success.
+```text
+<create|set|inherit><TAB><property>=<encoded value>=<source>=<override desired value>
+__ZXFER_PROPERTY_ACTIONS__
+```
+
+The fourth field is empty unless the source is `override`. It retains the
+first desired value for late parent reconciliation. Ordered encoded records
+retain repeated properties and their distinct values; the first record supplies
+their provenance. The planner checks every creation-time constraint before
+emitting actions. Separate root and child decisions select only the current
+dataset's actions. With `-V`, additional `view<TAB>name=LIST` rows retain the
+diagnostic views of both decisions; ordinary runs omit those rows.
+
+For `compression=lz4=local` on the source and `compression=gzip=local` on the
+destination, the plan is:
+
+```text
+set<TAB>compression=lz4=local=
+__ZXFER_PROPERTY_ACTIONS__
+```
+
+Application includes `compression=lz4` in the dataset's single `zfs set` call.
+A child's `inherit` action is resolved against its current destination parent
+before application; a parent that does not provide the required value can
+turn that action into a `set`. Sets run as one command, followed by individual
+inherits in their planned order. Values are decoded only when constructing argv.
+
+The planner prints `__ZXFER_PROPERTY_PLAN__` and any warnings on stdout after
+closing the file successfully. The shell validates the complete action file
+before publishing action/override counts or applying it, rejecting missing
+markers, malformed records and trailing data. A valid empty plan contains only
+the final marker. A creation-time mismatch retains its separate error path.
 
 ## Property Backup Metadata
 
@@ -143,6 +218,9 @@ The writer also records zxfer version, recursive options, and backup date.
 Rows use a relative dataset key and the same encoded property-list syntax.
 `.` means the root; `child` means the same relative child under both roots.
 Restore checks the root mapping and required headers before using a row.
+The private read view contains a compact key-to-row index and individual
+payload files; duplicate keys use a tombstone and fail when selected. Both
+restore and forwarding consume this view without changing the on-disk format.
 Metadata preserves source properties, including provenance, rather than only
 the effective values applied through `-o`. The forwarded copy adjusts the
 source root for the next replication hop.

@@ -25,7 +25,7 @@ test_zxfer_reset_session_state_clears_each_owners_inherited_state() {
 			g_zxfer_profile_source_zfs_calls=9
 			g_zxfer_new_snapshot_name=stale
 			g_zxfer_new_snapshot_taken=1
-			g_zxfer_wrapped_command_result=stale
+			g_zxfer_progress_bar_command_result=stale
 			g_destination_existence_cache=stale
 			g_zxfer_live_destination_listing_file=stale
 			g_origin_parallel_cmd=stale
@@ -53,7 +53,7 @@ test_zxfer_reset_session_state_clears_each_owners_inherited_state() {
 				"migration: restart=<$g_zxfer_services_to_restart>" \
 				"profile: source zfs calls=$g_zxfer_profile_source_zfs_calls" \
 				"replication: snapshot name=<$g_zxfer_new_snapshot_name> taken=<$g_zxfer_new_snapshot_taken>" \
-				"send/receive: wrapped=<$g_zxfer_wrapped_command_result>" \
+				"send/receive: progress=<$g_zxfer_progress_bar_command_result>" \
 				"destination existence: <$g_destination_existence_cache>" \
 				"destination listing: <$g_zxfer_live_destination_listing_file>" \
 				"snapshot producer: origin parallel=<$g_origin_parallel_cmd>" \
@@ -81,7 +81,7 @@ ssh transport: origin socket=<>
 migration: restart=<>
 profile: source zfs calls=0
 replication: snapshot name=<> taken=<0>
-send/receive: wrapped=<>
+send/receive: progress=<>
 destination existence: <>
 destination listing: <>
 snapshot producer: origin parallel=<>
@@ -124,7 +124,7 @@ test_zxfer_trap_exit_restores_shell_modes_before_mirroring_the_report() {
 		g_zxfer_failure_class="runtime"
 		g_zxfer_failure_stage="unit"
 		g_zxfer_failure_message="interrupted mid-allocation"
-		g_services_need_relaunch=0
+		g_zxfer_services_to_restart=""
 		g_zxfer_run_umask=0027
 		umask 077
 		set -C -f

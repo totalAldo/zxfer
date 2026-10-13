@@ -41,13 +41,16 @@
 #   buffered -k rows in g_backup_file_contents ("<source-relative path>TAB
 #   <properties>" lines), the -e roots and row index
 #   (g_zxfer_backup_restore_*), the forwarded
-#   provenance memo g_zxfer_backup_forwarded_*, and the read, candidate,
-#   restore and dry-run result channels.
+#   provenance memo g_zxfer_backup_forwarded_*, reusable read staging
+#   g_zxfer_backup_read_file, and the checked g_zxfer_backup_view_result.
+#   Row lookups publish g_zxfer_property_row_payload_result;
+#   dry-run previews publish quoting's g_zxfer_shell_command_result directly.
 # reads globals: backup options, source and destination roots, -O/-T host
 #   specs, g_zxfer_secure_path, path-security helpers, the ssh transport, and
-#   the property state module's row store (the -e rows are its r files).
-# returns via stdout: metadata filenames, validated rows, extracted
-#   properties, file contents, and rendered remote sh programs.
+#   the property state module's row writer and reader. Each metadata view
+#   owns a private directory, independent of per-pass property tables.
+# returns via stdout: metadata filenames, validated write-buffer rows, and
+#   rendered remote sh programs. Read payloads stay in private row files.
 #
 # Layout: ZXFER_BACKUP_DIR/<source>/.zxfer_backup_info.v2/h/<chunks>/
 # .zxfer_backup_info.v2, <chunks> being the hex of "<source>\n<destination>"
@@ -76,7 +79,7 @@ ZXFER_BACKUP_METADATA_HEADER_LINE="#zxfer property backup file"
 ZXFER_BACKUP_METADATA_FORMAT_VERSION="2"
 # Lookup statuses, one vocabulary for the file check, the candidate lookup,
 # the forwarded rows and the -e row lookup (the messages are in
-# zxfer_throw_backup_candidate_failure and zxfer_collect_source_props):
+# zxfer_throw_backup_candidate_failure and zxfer_transfer_properties):
 #   0  one row for the dataset pair      6  header missing or not first
 #   1  no metadata file                  7  unsupported #format_version
 #   3  the pair does not resolve         8  valid file, no row for the pair
@@ -124,16 +127,15 @@ zxfer_reset_backup_metadata_state() {
 	g_zxfer_backup_restore_index=""
 	g_zxfer_backup_restore_source_root=""
 	g_zxfer_backup_restore_destination_root=""
-	g_zxfer_backup_restore_properties_result=""
-	g_zxfer_backup_file_read_result=""
+	g_zxfer_backup_restore_row_dir=""
+	g_zxfer_backup_read_file=""
 	g_zxfer_backup_restore_candidate_path_result=""
-	g_zxfer_backup_restore_candidate_contents_result=""
+	g_zxfer_backup_view_result=""
 	g_zxfer_backup_forwarded_roots=""
 	g_zxfer_backup_forwarded_rows=""
 	g_zxfer_backup_forwarded_properties=""
 	g_zxfer_backup_forwarded_listed=0
 	g_zxfer_backup_forwarded_listing=""
-	g_zxfer_remote_backup_dry_run_shell_command_result=""
 }
 
 # Purpose: Print the metadata filename for a source/destination pair.
@@ -283,22 +285,42 @@ zxfer_resolve_forwarded_backup_metadata() {
 		esac
 	done
 
-	# shellcheck disable=SC2016  # awk program should see literal field references.
-	if g_zxfer_backup_forwarded_properties=$(printf '%s\n' "$g_zxfer_backup_forwarded_rows" |
-		ZXFER_AWK_FORWARDED_KEY=$l_forwarded_key "${g_cmd_awk:-awk}" '
-index($0, ENVIRON["ZXFER_AWK_FORWARDED_KEY"]) == 1 {
-	print substr($0, length(ENVIRON["ZXFER_AWK_FORWARDED_KEY"]) + 1)
-	exit
-}'); then
-		[ -z "$g_zxfer_backup_forwarded_properties" ] || return 0
-		l_forwarded_status=9
-	else
+	# Split each compact memo once, as the property index reader does.
+	# Trimming a whole index at a key costs bash the square of its length.
+	# Keep DATASET as the first argument for diagnostics after either split.
+	zxfer_split_begin "$ZXFER_LF"
+	# shellcheck disable=SC2086  # Intentional line splitting, globbing disabled.
+	set -- "$1" $g_zxfer_backup_forwarded_rows
+	zxfer_split_end
+	for l_forwarded_row; do
+		case $l_forwarded_row in
+		"$l_forwarded_key"*)
+			l_forwarded_row=${l_forwarded_row#"$l_forwarded_key"}
+			break
+			;;
+		esac
+	done
+	zxfer_split_begin "$ZXFER_LF"
+	# shellcheck disable=SC2086  # Intentional line splitting, globbing disabled.
+	set -- "$1" $g_zxfer_backup_forwarded_roots
+	zxfer_split_end
+	for l_forwarded_path; do
+		case $l_forwarded_path in
+		"$l_forwarded_root$ZXFER_TAB"*)
+			l_forwarded_path=${l_forwarded_path#"$l_forwarded_root$ZXFER_TAB"}
+			break
+			;;
+		esac
+	done
+	l_forwarded_status=9
+	if [ "$l_forwarded_row" != - ]; then
+		if zxfer_read_property_row "$l_forwarded_row" "${l_forwarded_path#*"$ZXFER_TAB"}"; then
+			g_zxfer_backup_forwarded_properties=$g_zxfer_property_row_payload_result
+			return 0
+		fi
 		l_forwarded_status=5
 	fi
-	# Status 9: an empty row marks a dataset with more than one row.
-	l_forwarded_path=$ZXFER_LF$g_zxfer_backup_forwarded_roots
-	l_forwarded_path=${l_forwarded_path#*"$ZXFER_LF$l_forwarded_root$ZXFER_TAB"}
-	zxfer_throw_backup_candidate_failure "$l_forwarded_status" "${l_forwarded_path%%"$ZXFER_LF"*}" \
+	zxfer_throw_backup_candidate_failure "$l_forwarded_status" "${l_forwarded_path%%"$ZXFER_TAB"*}" \
 		"$1" "Forwarded backup property file"
 }
 
@@ -306,10 +328,10 @@ index($0, ENVIRON["ZXFER_AWK_FORWARDED_KEY"]) == 1 {
 # source side, -O host or local) into the run's memo, once per run.
 # Usage: zxfer_load_forwarded_backup_alias ROOT; returns 0 when ROOT has an
 # alias, 1 when it has none. Every root looked up is remembered in
-# g_zxfer_backup_forwarded_roots ("ROOT<TAB>ALIAS_PATH" lines, ALIAS_PATH
-# empty without an alias), and every alias's rows in
-# g_zxfer_backup_forwarded_rows ("ROOT<TAB>DATASET<TAB>PROPERTIES" lines,
-# PROPERTIES empty for a dataset with more than one row), so each root is
+# g_zxfer_backup_forwarded_roots ("ROOT<TAB>ALIAS_PATH<TAB>ROW_DIRECTORY"
+# lines, or "ROOT<TAB>" without an alias), and every alias's row references
+# in g_zxfer_backup_forwarded_rows ("ROOT<TAB>DATASET<TAB>ROW" lines,
+# ROW is "-" for a dataset with more than one row), so each root is
 # read at most once. A root without a storage directory is ruled out without
 # a read; an unreadable or invalid alias fails closed.
 zxfer_load_forwarded_backup_alias() {
@@ -332,7 +354,7 @@ zxfer_load_forwarded_backup_alias() {
 	fi
 	if [ "$l_alias_status" -eq 0 ]; then
 		zxfer_try_backup_restore_candidate "$l_alias_dir" "$1" "$1" "$1" "$1" \
-			"$g_option_O_origin_host" source
+			"$g_option_O_origin_host" source "$1"
 		l_alias_status=$?
 	fi
 	l_alias_path=$g_zxfer_backup_restore_candidate_path_result
@@ -347,34 +369,14 @@ zxfer_load_forwarded_backup_alias() {
 	*) zxfer_throw_backup_candidate_failure "$l_alias_status" "$l_alias_path" "$1" "Forwarded backup property file" ;;
 	esac
 
-	# The lookup has validated the whole alias. Name each row's dataset
-	# from the alias's #source_root and mark duplicated rows empty.
-	# shellcheck disable=SC2016  # awk program should see literal field references.
-	l_alias_rows=$(printf '%s\n' "$g_zxfer_backup_restore_candidate_contents_result" |
-		ZXFER_AWK_ALIAS_ROOT=$1 "${g_cmd_awk:-awk}" '
-index($0, "#source_root:") == 1 {
-	source_root = substr($0, length("#source_root:") + 1)
-	next
-}
-$0 == "" || substr($0, 1, 1) == "#" { next }
-{
-	tab = index($0, "\t")
-	key = substr($0, 1, tab - 1)
-	if (key in properties) {
-		properties[key] = ""
-		next
-	}
-	keys[++key_count] = key
-	properties[key] = substr($0, tab + 1)
-}
-END {
-	for (i = 1; i <= key_count; i++) {
-		dataset = (keys[i] == ".") ? source_root : (source_root "/" keys[i])
-		print ENVIRON["ZXFER_AWK_ALIAS_ROOT"] "\t" dataset "\t" properties[keys[i]]
-	}
-}') || zxfer_throw_backup_candidate_failure 5 "$l_alias_path" "$1" "Forwarded backup property file"
+	# The same validated view serves -e and forwarding. Its private directory
+	# survives property-pass resets; the memo holds row names, not payloads.
+	l_alias_dir=${g_zxfer_backup_view_result%%"$ZXFER_LF"*}
+	l_alias_rows=${g_zxfer_backup_view_result#*"$ZXFER_LF"}
+	l_alias_rows=${l_alias_rows#*"$ZXFER_LF"}
+	l_alias_rows=${l_alias_rows#*"$ZXFER_LF"}
 	g_zxfer_backup_forwarded_rows=${g_zxfer_backup_forwarded_rows:+$g_zxfer_backup_forwarded_rows$ZXFER_LF}$l_alias_rows
-	g_zxfer_backup_forwarded_roots=${g_zxfer_backup_forwarded_roots:+$g_zxfer_backup_forwarded_roots$ZXFER_LF}$1$ZXFER_TAB$l_alias_path
+	g_zxfer_backup_forwarded_roots=${g_zxfer_backup_forwarded_roots:+$g_zxfer_backup_forwarded_roots$ZXFER_LF}$1$ZXFER_TAB$l_alias_path$ZXFER_TAB$l_alias_dir
 	zxfer_echoV "Forwarding backup provenance from $l_alias_path"
 	return 0
 }
@@ -405,36 +407,34 @@ zxfer_list_remote_backup_storage_dirs() {
 # source/destination pair and validate what is found.
 # Usage: zxfer_try_backup_restore_candidate DIR FILENAME_SOURCE
 # FILENAME_DESTINATION EXPECTED_SOURCE EXPECTED_DESTINATION [HOST]
-# [PROFILE_SIDE]. Returns a lookup status: 0, or 8 for a valid file without
-# a row for the pair, with the contents in
-# g_zxfer_backup_restore_candidate_contents_result; 1 when neither file
-# exists; the file check's 3, 4, 6, 7 or 9; 5 for a read failure or any
+# [PROFILE_SIDE] [ALIAS_ROOT]. Returns 0 with a checked view, or 8 when the
+# pair has no row (aliases still publish a view on 8). The view is in
+# g_zxfer_backup_view_result. Returns 1 when neither file exists; the file check's 3, 4, 6, 7 or 9; 5 for a read failure or any
 # other check status; 11 when no filename can be derived. The path examined
 # last is published in g_zxfer_backup_restore_candidate_path_result for error
 # messages.
 zxfer_try_backup_restore_candidate() {
-	l_candidate_dir=$1
-	l_candidate_filename_source=$2
-	l_candidate_filename_destination=$3
-	l_candidate_expected_source=$4
-	l_candidate_expected_destination=$5
-	l_candidate_host=${6:-}
-	l_candidate_profile_side=${7:-}
 	g_zxfer_backup_restore_candidate_path_result=""
-	g_zxfer_backup_restore_candidate_contents_result=""
+	g_zxfer_backup_view_result=""
 
 	for l_candidate_kind in current legacy; do
 		if ! l_candidate_name=$(zxfer_get_backup_metadata_filename \
-			"$l_candidate_filename_source" "$l_candidate_filename_destination" "$l_candidate_kind"); then
+			"$2" "$3" "$l_candidate_kind"); then
 			[ "$l_candidate_kind" = legacy ] || return 11
 			break
 		fi
-		l_candidate_path=$l_candidate_dir/$l_candidate_name
-		if [ "$l_candidate_host" = "" ]; then
-			zxfer_read_local_backup_file "$l_candidate_path" >/dev/null
+		l_candidate_path=$1/$l_candidate_name
+		if [ "$l_candidate_kind" = current ]; then
+			g_zxfer_backup_restore_candidate_path_result=$l_candidate_path
+			zxfer_ensure_runtime_artifact_file "$g_zxfer_backup_read_file" backup-read || return 5
+			g_zxfer_backup_read_file=$g_zxfer_runtime_artifact_path_result
+			l_candidate_file=$g_zxfer_backup_read_file
+		fi
+		if [ "${6:-}" = "" ]; then
+			zxfer_read_local_backup_file "$l_candidate_path" "$l_candidate_file"
 		else
-			zxfer_read_remote_backup_file "$l_candidate_host" "$l_candidate_path" \
-				"$l_candidate_profile_side" >/dev/null
+			zxfer_read_remote_backup_file "${6:-}" "$l_candidate_path" \
+				"${7:-}" "$l_candidate_file"
 		fi
 		l_candidate_read_status=$?
 		if [ "$l_candidate_kind" = current ] || [ "$l_candidate_read_status" -ne 4 ]; then
@@ -445,17 +445,11 @@ zxfer_try_backup_restore_candidate() {
 		4) continue ;;
 		*) return 5 ;;
 		esac
-		l_candidate_contents=$g_zxfer_backup_file_read_result
-
-		zxfer_backup_metadata_extract_properties_for_dataset_pair "$l_candidate_contents" \
-			"$l_candidate_expected_source" "$l_candidate_expected_destination" >/dev/null
+		zxfer_load_backup_metadata_view "$l_candidate_file" \
+			"$4" "$5" "${8:-}"
 		l_candidate_match_status=$?
 		case $l_candidate_match_status in
-		0 | 8)
-			g_zxfer_backup_restore_candidate_contents_result=$l_candidate_contents
-			return "$l_candidate_match_status"
-			;;
-		3 | 4 | 6 | 7 | 9) return "$l_candidate_match_status" ;;
+		0 | 3 | 4 | 6 | 7 | 8 | 9) return "$l_candidate_match_status" ;;
 		*) return 5 ;;
 		esac
 	done
@@ -508,8 +502,17 @@ zxfer_get_backup_properties() {
 		"$g_initial_source" "$l_restore_destination_root" "$g_option_O_origin_host" source ||
 		l_restore_status=$?
 	if [ "$l_restore_status" -eq 0 ]; then
-		zxfer_load_backup_restore_rows "$g_zxfer_backup_restore_candidate_contents_result" ||
-			l_restore_status=5
+		# Retire only the previous restore view; forwarded aliases have session
+		# lifetimes and use separate directories. Keep repeated -Y passes bounded.
+		zxfer_cleanup_runtime_artifact_path "$g_zxfer_backup_restore_row_dir" ||
+			zxfer_throw_backup_candidate_failure 5 "$g_zxfer_backup_restore_candidate_path_result" \
+				"$g_initial_source" "Backup property file" usage
+		g_zxfer_backup_restore_row_dir=${g_zxfer_backup_view_result%%"$ZXFER_LF"*}
+		l_restore_view=${g_zxfer_backup_view_result#*"$ZXFER_LF"}
+		g_zxfer_backup_restore_source_root=${l_restore_view%%"$ZXFER_LF"*}
+		l_restore_view=${l_restore_view#*"$ZXFER_LF"}
+		g_zxfer_backup_restore_destination_root=${l_restore_view%%"$ZXFER_LF"*}
+		g_zxfer_backup_restore_index=$ZXFER_LF${l_restore_view#*"$ZXFER_LF"}$ZXFER_LF
 	fi
 	[ "$l_restore_status" -eq 0 ] ||
 		zxfer_throw_backup_candidate_failure "$l_restore_status" \
@@ -517,76 +520,15 @@ zxfer_get_backup_properties() {
 			"Backup property file" usage
 }
 
-# Purpose: Store the rows of the validated -e file in the row store, as r
-# files, with one index line per relative key; a key with more than one row
-# gets the tombstone "-" instead.
-# Usage: zxfer_load_backup_restore_rows CONTENTS, right after the candidate
-# lookup validated the whole file. Publishes
-# g_zxfer_backup_restore_source_root, g_zxfer_backup_restore_destination_root
-# and g_zxfer_backup_restore_index, or clears them and returns non-zero.
-zxfer_load_backup_restore_rows() {
-	g_zxfer_backup_restore_index=""
-	g_zxfer_backup_restore_source_root=""
-	g_zxfer_backup_restore_destination_root=""
-	zxfer_prepare_property_read_files || return "$?"
-
-	# Prints the two roots, then the index lines. The rows restart at r1:
-	# the index they replace is the only one that names r files.
-	# shellcheck disable=SC2016  # awk program should see literal field references.
-	l_load_output=$(printf '%s\n' "$1" |
-		ZXFER_AWK_ROW_DIR=$g_zxfer_property_row_dir ZXFER_AWK_ROW_PREFIX=r \
-			ZXFER_AWK_ROW_BASE=0 "${g_cmd_awk:-awk}" "$ZXFER_PROPERTY_AWK_LIB"'
-index($0, "#source_root:") == 1 {
-	source_root = substr($0, length("#source_root:") + 1)
-	next
-}
-index($0, "#destination_root:") == 1 {
-	destination_root = substr($0, length("#destination_root:") + 1)
-	next
-}
-$0 == "" || substr($0, 1, 1) == "#" { next }
-{
-	tab = index($0, "\t")
-	key = substr($0, 1, tab - 1)
-	if (key in row_payload) {
-		row_payload[key] = ""
-		next
-	}
-	keys[++key_count] = key
-	row_payload[key] = substr($0, tab + 1)
-}
-END {
-	if (source_root == "" || destination_root == "" || key_count == 0)
-		exit 1
-	print source_root
-	print destination_root
-	for (i = 1; i <= key_count; i++) {
-		row = (row_payload[keys[i]] == "") ? "-" : store_row(row_payload[keys[i]])
-		print row "\t" keys[i]
-	}
-}') || return "$?"
-
-	l_load_source_root=${l_load_output%%"$ZXFER_LF"*}
-	l_load_output=${l_load_output#*"$ZXFER_LF"}
-	l_load_destination_root=${l_load_output%%"$ZXFER_LF"*}
-	case $l_load_output in
-	*"$ZXFER_LF"*) l_load_output=${l_load_output#*"$ZXFER_LF"} ;;
-	*) return 1 ;;
-	esac
-	g_zxfer_backup_restore_source_root=$l_load_source_root
-	g_zxfer_backup_restore_destination_root=$l_load_destination_root
-	g_zxfer_backup_restore_index=$ZXFER_LF$l_load_output$ZXFER_LF
-}
-
 # Purpose: Find the -e row of one source/destination pair; both datasets
 # must map to the same path relative to the file's #source_root and
 # #destination_root.
 # Usage: zxfer_find_restored_backup_properties SOURCE DESTINATION; publishes
-# the properties in g_zxfer_backup_restore_properties_result and returns 0,
+# the properties in g_zxfer_property_row_payload_result and returns 0,
 # or the lookup status 3 (the pair does not resolve, or no file was loaded),
 # 8 (no row), 9 (more than one row) or 5 (the row cannot be read).
 zxfer_find_restored_backup_properties() {
-	g_zxfer_backup_restore_properties_result=""
+	g_zxfer_property_row_payload_result=""
 	[ -n "$g_zxfer_backup_restore_source_root" ] &&
 		[ -n "$g_zxfer_backup_restore_destination_root" ] || return 3
 	case $1 in
@@ -607,27 +549,30 @@ zxfer_find_restored_backup_properties() {
 
 	zxfer_find_property_row "$g_zxfer_backup_restore_index" "$l_restore_key" || return 8
 	[ "$g_zxfer_property_row_result" != - ] || return 9
-	zxfer_read_property_row "$g_zxfer_property_row_result" || return 5
-	g_zxfer_backup_restore_properties_result=$g_zxfer_property_row_payload_result
+	zxfer_read_property_row "$g_zxfer_property_row_result" "$g_zxfer_backup_restore_row_dir" || return 5
 }
 
-# Purpose: Check one metadata file's contents and print the properties it
-# records for a source/destination pair.
-# Usage: zxfer_backup_metadata_extract_properties_for_dataset_pair CONTENTS
-# SOURCE DESTINATION; both datasets must map to the same path relative to
-# #source_root and #destination_root. Returns a lookup status: 0 with the
-# properties, 3 when the pair does not resolve, 8 when it resolves but has
-# no row, 9 for duplicate rows, 4 when a root marker is missing or any row is
-# malformed, 6 unless the header is the first line and appears once, 7
-# unless #format_version:2 appears once before any row.
-zxfer_backup_metadata_extract_properties_for_dataset_pair() {
+# Purpose: Validate a staged metadata file, then materialize a private row
+# view shared by -e and forwarded aliases. The first pass retains only keys
+# and counts; the second writes one payload at a time after validation.
+# Usage: zxfer_load_backup_metadata_view FILE SOURCE DESTINATION [ALIAS_ROOT].
+# Publishes g_zxfer_backup_view_result: directory, source root, destination
+# root, then index lines, terminated by LF. Restore lines are ROW<TAB>KEY;
+# alias lines are ALIAS_ROOT<TAB>DATASET<TAB>ROW. Duplicates use "-".
+# Returns the lookup
+# status; publishes on 0, or on 8 for an alias without its requested row.
+# A read/write/allocation failure is 5.
+zxfer_load_backup_metadata_view() {
+	g_zxfer_backup_view_result=""
+	[ -r "$1" ] || return 5
 	# shellcheck disable=SC2016
-	printf '%s\n' "$1" | "${g_cmd_awk:-awk}" \
+	l_view_index=$(ZXFER_AWK_ALIAS_ROOT=${4:-} "${g_cmd_awk:-awk}" \
 		-v expected_header="$ZXFER_BACKUP_METADATA_HEADER_LINE" \
 		-v expected_format_version="$ZXFER_BACKUP_METADATA_FORMAT_VERSION" \
 		-v expected_source="$2" \
 		-v expected_destination="$3" \
 		"$ZXFER_BACKUP_METADATA_PROPERTIES_AWK"'
+BEGIN { alias_root = ENVIRON["ZXFER_AWK_ALIAS_ROOT"] }
 function relative_path(root, dataset, prefix) {
 	if (root == "" || dataset == "")
 		return ""
@@ -688,11 +633,13 @@ index($0, "#format_version:") == 1 {
 		malformed_count++
 		next
 	}
-	body_count++
-	row_properties[row_key] = props
+	if (!(row_key in row_count))
+		keys[++key_count] = row_key
 	row_count[row_key]++
 }
 END {
+	if (NR == 0)
+		exit 6
 	if (format_status)
 		exit format_status
 	if (!format_seen)
@@ -708,14 +655,56 @@ END {
 		exit 3
 	if (malformed_count > 0)
 		exit 4
-	if (row_count[expected_source_key] == 1) {
-		print row_properties[expected_source_key]
-		exit 0
+	if (row_count[expected_source_key] > 1)
+		exit 9
+	print source_root
+	print destination_root
+	for (i = 1; i <= key_count; i++) {
+		row = (row_count[keys[i]] > 1) ? "-" : ("r" i)
+		if (alias_root == "")
+			print row "\t" keys[i]
+		else {
+			dataset = (keys[i] == ".") ? source_root : (source_root "/" keys[i])
+			print alias_root "\t" dataset "\t" row
+		}
 	}
-	if (row_count[expected_source_key] == 0)
-		exit 8
-	exit 9
-}'
+	exit (row_count[expected_source_key] == 0) ? 8 : 0
+}' "$1")
+	l_view_status=$?
+	case $l_view_status in
+	0 | 8) ;;
+	3 | 4 | 6 | 7 | 9) return "$l_view_status" ;;
+	*) return 5 ;;
+	esac
+	# -e rejects a missing requested row before any row-store work. Aliases
+	# may omit their root row and still forward children, so materialize those.
+	[ "$l_view_status" -ne 8 ] || [ -n "${4:-}" ] || return 8
+	# Restore used to prepare property scratch here, before discovery and -d.
+	# Keep that allocation failure boundary even though its rows are separate.
+	if [ -z "${4:-}" ]; then
+		zxfer_prepare_property_read_files || return 5
+	fi
+	zxfer_create_private_temp_dir backup-rows || return 5
+	l_view_dir=$g_zxfer_runtime_artifact_path_result
+	# Files stay private even when the caller's run umask is permissive. The
+	# shared row writer checks close(), including delayed disk-full failures.
+	# shellcheck disable=SC2016
+	(
+		umask 077
+		ZXFER_AWK_ROW_DIR=$l_view_dir ZXFER_AWK_ROW_PREFIX=r \
+			ZXFER_AWK_ROW_BASE=0 "${g_cmd_awk:-awk}" "$ZXFER_PROPERTY_AWK_LIB"'
+$0 == "" || substr($0, 1, 1) == "#" { next }
+{
+	tab = index($0, "\t")
+	key = substr($0, 1, tab - 1)
+	if (!(key in seen)) {
+		seen[key] = 1
+		store_row(substr($0, tab + 1))
+	}
+}' "$1"
+	) || return 5
+	g_zxfer_backup_view_result=$l_view_dir$ZXFER_LF$l_view_index$ZXFER_LF
+	return "$l_view_status"
 }
 
 # Purpose: Validate or create the -k backup root before any replication work,
@@ -742,7 +731,7 @@ zxfer_check_backup_storage_dir_if_needed() {
 	if [ "$g_option_n_dryrun" -eq 1 ]; then
 		zxfer_render_remote_backup_dry_run_shell_command "$g_option_T_target_host" \
 			"$l_check_script" || return "$?"
-		zxfer_echov "Dry run: $g_zxfer_remote_backup_dry_run_shell_command_result"
+		zxfer_echov "Dry run: $g_zxfer_shell_command_result"
 		return 0
 	fi
 	if ! zxfer_run_remote_backup_script "$g_option_T_target_host" "$l_check_script" \
@@ -866,7 +855,8 @@ zxfer_ensure_local_backup_dir() {
 }
 
 # Purpose: Read one local metadata file after the security checks.
-# Usage: Prints the contents and publishes g_zxfer_backup_file_read_result.
+# Usage: zxfer_read_local_backup_file PATH STAGING_FILE; copies to the
+# already allocated private file, publishing no result on stdout.
 # Returns 1 (symlink component, message on stderr), 4 (missing), the cat
 # status on read failure, and throws when the file is not a 0600 regular
 # file owned by root or the effective uid, or when its directory could be
@@ -874,7 +864,6 @@ zxfer_ensure_local_backup_dir() {
 # check and the read).
 zxfer_read_local_backup_file() {
 	l_read_local_path=$1
-	g_zxfer_backup_file_read_result=""
 
 	zxfer_require_backup_metadata_path_without_symlinks "$l_read_local_path" || return 1
 	if [ ! -f "$l_read_local_path" ]; then
@@ -889,32 +878,28 @@ zxfer_read_local_backup_file() {
 	esac
 	zxfer_validate_temp_root_candidate "$l_read_local_parent" >/dev/null ||
 		zxfer_throw_error "Refusing to use backup metadata $l_read_local_path because its directory $l_read_local_parent is not a private directory owned by root or the current user."
-	g_zxfer_backup_file_read_result=$(cat "$l_read_local_path") || return "$?"
-	printf '%s' "$g_zxfer_backup_file_read_result"
+	cat "$l_read_local_path" >|"$2"
 }
 
 # Purpose: Read one metadata file on a remote host through the rendered read
 # program.
-# Usage: zxfer_read_remote_backup_file <host> <path> [profile-side]. Same
-# result contract as the local reader: 0 with contents, 1 after a symlink
+# Usage: zxfer_read_remote_backup_file HOST PATH PROFILE_SIDE STAGING_FILE.
+# Same contract as the local reader: 0 after capture, 1 after a symlink
 # refusal (remote stderr forwarded), 4 when missing, 5 on other failures;
 # insecure ownership, mode, or directory throws with the documented text.
 zxfer_read_remote_backup_file() {
 	l_read_remote_host=$1
 	l_read_remote_path=$2
 	l_read_remote_profile_side=${3:-}
-	g_zxfer_backup_file_read_result=""
 
 	l_read_remote_script=$(zxfer_build_remote_backup_read_cmd "$l_read_remote_path" \
 		"$l_read_remote_host") || return "$?"
 	zxfer_run_remote_backup_script "$l_read_remote_host" "$l_read_remote_script" \
 		"$l_read_remote_profile_side" "reading backup metadata $l_read_remote_path" \
-		backup-metadata '9[1-8]'
+		backup-metadata '9[1-8]' "$4"
 	l_read_remote_status=$?
 	case $l_read_remote_status in
 	0)
-		g_zxfer_backup_file_read_result=${g_zxfer_remote_probe_stdout:-}
-		printf '%s' "$g_zxfer_backup_file_read_result"
 		return 0
 		;;
 	91) zxfer_throw_error "Refusing to use backup metadata $l_read_remote_path on $l_read_remote_host because its directory is not a private directory owned by root or the ssh user." ;;
@@ -934,7 +919,9 @@ zxfer_read_remote_backup_file() {
 # Purpose: Run one rendered backup program on a host and translate the
 # transport-level outcomes.
 # Usage: zxfer_run_remote_backup_script HOST SCRIPT PROFILE_SIDE ACTION
-# DEPENDENCY_LABEL OWN_STATUS_GLOB. Standard input is inherited (writers feed
+# DEPENDENCY_LABEL OWN_STATUS_GLOB [STDOUT_FILE]. A metadata reader supplies
+# its allocated capture file; other callers retain the string probe result.
+# Standard input is inherited (writers feed
 # the payload through a here-document). Returns 0 or a status matching
 # OWN_STATUS_GLOB for the caller to interpret; a capture failure, a missing
 # remote helper (99), or any other failure with stderr output throws here.
@@ -948,7 +935,7 @@ zxfer_run_remote_backup_script() {
 
 	zxfer_build_remote_sh_c_command "$l_run_remote_script" >/dev/null
 	zxfer_capture_remote_probe_output "$l_run_remote_host" \
-		"$g_zxfer_remote_sh_c_command_result" "$l_run_remote_profile_side"
+		"$g_zxfer_shell_command_result" "$l_run_remote_profile_side" "${7:-}"
 	l_run_remote_status=$?
 	if [ "${g_zxfer_remote_probe_capture_failed:-0}" -eq 1 ]; then
 		zxfer_emit_remote_probe_failure_message >&2
@@ -969,6 +956,15 @@ zxfer_run_remote_backup_script() {
 		zxfer_throw_error "Failed to contact host $l_run_remote_host while $l_run_remote_action. Review prior stderr for the transport or authentication error."
 	fi
 	return "$l_run_remote_status"
+}
+
+# Purpose: Emit a literal backup program body without expanding its shell text.
+# Usage: zxfer_print_backup_script_body, with a quoted here-document on stdin.
+# Caller values belong in the argv-quoted initialization before this body.
+zxfer_print_backup_script_body() {
+	while IFS= read -r l_backup_script_line || [ -n "$l_backup_script_line" ]; do
+		printf '%s\n' "$l_backup_script_line"
+	done
 }
 
 # Purpose: Render the shared prelude of every remote backup program: the
@@ -997,9 +993,7 @@ zxfer_build_remote_backup_script_prelude() {
 	# contains caller values; read/printf emits it without spawning cat.
 	# The walk trusts symlinks directly under /: only root can create them,
 	# and macOS keeps /var and /tmp there.
-	while IFS= read -r l_prelude_line || [ -n "$l_prelude_line" ]; do
-		printf '%s\n' "$l_prelude_line"
-	done <<-'EOF'
+	zxfer_print_backup_script_body <<-'EOF'
 		PATH=$1;
 		export PATH;
 		l_required_host=$2;
@@ -1081,9 +1075,7 @@ zxfer_build_remote_backup_dir_prepare_cmd() {
 
 	zxfer_render_shell_command_from_argv set -- "$l_prepare_dir" "$l_prepare_ls_path"
 	printf '%s;\n' "$g_zxfer_shell_command_result"
-	while IFS= read -r l_prepare_line || [ -n "$l_prepare_line" ]; do
-		printf '%s\n' "$l_prepare_line"
-	done <<-'EOF'
+	zxfer_print_backup_script_body <<-'EOF'
 		l_prepare_dir=$1;
 		l_prepare_ls_path=$2;
 		if [ -e "$l_prepare_dir" ] && [ ! -d "$l_prepare_dir" ]; then
@@ -1123,9 +1115,7 @@ zxfer_build_remote_backup_dir_prepare_cmd() {
 zxfer_build_backup_pair_write_cmd() {
 	zxfer_render_shell_command_from_argv set -- "$1" "$2" "$3"
 	printf '%s;\nl_pair_cat=%s;\n' "$g_zxfer_shell_command_result" "$4"
-	while IFS= read -r l_pair_render_line || [ -n "$l_pair_render_line" ]; do
-		printf '%s\n' "$l_pair_render_line"
-	done <<-'EOF'
+	zxfer_print_backup_script_body <<-'EOF'
 		l_pair_primary=$1;
 		l_pair_forwarded=$2;
 		l_pair_root=$3;
@@ -1224,9 +1214,7 @@ zxfer_build_remote_backup_read_cmd() {
 	zxfer_render_shell_command_from_argv set -- "$l_read_cmd_path" \
 		"$l_read_cmd_ls_path" "$l_read_cmd_parent" "${g_cmd_cat:-cat}"
 	printf '%s;\n' "$g_zxfer_shell_command_result"
-	while IFS= read -r l_read_cmd_line || [ -n "$l_read_cmd_line" ]; do
-		printf '%s\n' "$l_read_cmd_line"
-	done <<-'EOF'
+	zxfer_print_backup_script_body <<-'EOF'
 		l_read_cmd_path=$1;
 		l_read_cmd_ls_path=$2;
 		l_read_cmd_parent=$3;
@@ -1291,9 +1279,7 @@ zxfer_build_remote_backup_storage_listing_cmd() {
 
 	zxfer_render_shell_command_from_argv set -- "$g_backup_storage_root" "$l_listing_root" "$@"
 	printf '%s;\n' "$g_zxfer_shell_command_result"
-	while IFS= read -r l_listing_line || [ -n "$l_listing_line" ]; do
-		printf '%s\n' "$l_listing_line"
-	done <<-'EOF'
+	zxfer_print_backup_script_body <<-'EOF'
 		l_listing_store=$1;
 		l_listing_root=$2;
 		shift 2;
@@ -1317,11 +1303,11 @@ zxfer_build_remote_backup_storage_listing_cmd() {
 # by dry-run output.
 # Usage: Collapses the readable program to one physical line (every rendered
 # line ends a command) and publishes the prepared ssh command in
-# g_zxfer_remote_backup_dry_run_shell_command_result.
+# g_zxfer_shell_command_result; failures leave it empty with their status.
 zxfer_render_remote_backup_dry_run_shell_command() {
 	l_dry_run_host=$1
 	l_dry_run_script=$2
-	g_zxfer_remote_backup_dry_run_shell_command_result=""
+	g_zxfer_shell_command_result=""
 
 	l_dry_run_line=""
 	while IFS= read -r l_dry_run_script_line || [ -n "$l_dry_run_script_line" ]; do
@@ -1333,5 +1319,4 @@ EOF
 	[ -n "$l_dry_run_line" ] || return 1
 	zxfer_publish_prepared_ssh_shell_command_for_host_or_throw "$l_dry_run_host" \
 		"$l_dry_run_line" || return "$?"
-	g_zxfer_remote_backup_dry_run_shell_command_result=$g_zxfer_prepared_ssh_shell_command_result
 }

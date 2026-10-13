@@ -1,5 +1,5 @@
 #!/bin/sh
-# The unit fixture of tests/test_zxfer_send_jobs.sh, shared with the
+# The unit fixture of tests/suites/zxfer_send_receive_jobs_tests.sh, shared with the
 # background-shell fragment of tests/test_zxfer_exec.sh: quiet options, two
 # jobs, a fresh run root, and cleared send-job, spawn-mode and failure state.
 # shellcheck disable=SC2034,SC2317,SC2329
@@ -15,7 +15,7 @@ zxfer_test_send_job_fixture_setup() {
 	g_option_T_target_host=""
 	zxfer_reset_runtime_artifact_state
 	zxfer_ensure_run_tmp_root || fail "Unable to create the send-job test run root."
-	zxfer_reset_send_job_state
+	zxfer_reset_send_receive_state
 	zxfer_reset_background_shell_spawn_mode
 	g_zxfer_send_job_abort_grace_seconds=0
 	zxfer_reset_failure_context "unit"
