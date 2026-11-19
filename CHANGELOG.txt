@@ -2,6 +2,7 @@ CHANGELOG
 =========
 
 2026.11.19
+-Release 2.0.20261119. Refresh the GitHub Actions pins, run hosted integration and unit tests on FreeBSD 15.1 with a ZFS root and OmniOS r151060, and compare performance against the pre-push main commit.
 -Use the completed source listing to check recursive snapshot presence and wait for a free send slot before rescanning a full queue. The small local no-op and incremental fixtures each use one fewer helper and two fewer temporary files. Lower their TOTAL budgets to 22 and 69.
 -Reduce memory use when normalizing recursive properties and finish synchronized property applies as soon as the action plan has been validated.
 -Preserve suite paths with spaces in both coverage collectors, report unreadable inputs, and cache trace path lookups. The performance harness estimates bytes only for the measured transfer, prefers a monotonic clock, and rejects negative sample durations.

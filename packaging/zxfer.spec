@@ -1,7 +1,7 @@
 Name:           zxfer
 # MAJOR.MINOR.YYYYMMDD, the same string as g_zxfer_version and the v<version>
 # tag. RPM rejects a "-" in Version, which the older 2.0.0-YYYYMMDD form used.
-Version:        2.0.20261003
+Version:        2.0.20261119
 Release:        0.1%{?dist}
 Summary:        Optimized ZFS snapshot replication script
 
@@ -79,6 +79,9 @@ install -Dm0644 man/zxfer.8 %{buildroot}%{_mandir}/man8/zxfer.8
 %{_mandir}/man8/zxfer.8*
 
 %changelog
+* Thu Nov 19 2026 Aldo Gonzalez - 2.0.20261119-0.1
+- Simplify replication planning, property handling, and the test harness.
+
 * Sat Oct 03 2026 Aldo Gonzalez - 2.0.20261003-0.1
 - Track zxfer 2.0.20261003 release (see CHANGELOG.txt for upstream details).
 

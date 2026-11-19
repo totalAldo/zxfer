@@ -1,6 +1,6 @@
 # Advisory performance report: wall-clock A/Bs of ./zxfer against
 # upstream-compat-final and against the code this push replaces (the merge
-# base with origin/main on a branch, the previous commit on main), plus the
+# base with origin/main on a branch, the pre-push tip on main), plus the
 # helper spawn counts, all on a canned zfs and a mock ssh, written to the job
 # summary. Hosted-runner timing is noisy, so this never gates: run_perf_ab.sh
 # exits 0 on any slowdown, and each A/B step and the job are
@@ -27,8 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history, so origin/upstream-compat-final, origin/main and
-          # HEAD~1 exist locally.
+          # The A/B needs baseline commits from before this push.
           fetch-depth: 0
       - name: Wall-clock A/B against upstream-compat-final
         continue-on-error: true
@@ -40,15 +39,22 @@ jobs:
         if: ${{ !cancelled() }}
         continue-on-error: true
         shell: bash
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          # On main the previous commit is what this push replaces; on any
-          # other ref it is the merge base with origin/main. props (-P with 68
+          # A main push can contain several commits. On any other ref use
+          # the merge base with origin/main. props (-P with 68
           # matching properties) runs here only: upstream-compat-final reads
           # properties in per-property loops that take minutes at this size.
           if [ "$GITHUB_REF" = refs/heads/main ]; then
-            baseline=$(git rev-parse HEAD~1)
-            baseline_label="the previous commit on main"
+            baseline=$PUSH_BEFORE
+            if [ "$baseline" = 0000000000000000000000000000000000000000 ]; then
+              echo "No pre-push main commit for this comparison." >>"$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            git cat-file -e "$baseline^{commit}" || git fetch --no-tags origin "$baseline"
+            baseline_label="the pre-push tip of main ($baseline)"
           else
             baseline=$(git merge-base HEAD origin/main)
             baseline_label="the merge base with origin/main"

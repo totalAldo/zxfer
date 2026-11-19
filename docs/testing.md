@@ -459,10 +459,10 @@ need root.
 
 | Workflow | Jobs |
 | --- | --- |
-| `tests.yml` | shunit2 on ubuntu-26.04 (`--jobs 4`), macos-26 and xcode-27 (macOS 27 preview, `--jobs 1`); dash, `bash --posix` and busybox ash (`--jobs 4`); FreeBSD 15.1 and OmniOS r151058 `vmactions` guests (`--jobs 2`, OmniOS through `bash --posix`); and the gating `argv-fuzz` job. Only ubuntu-26.04 and macos-26 run the tool self-tests. |
+| `tests.yml` | shunit2 on ubuntu-26.04 (`--jobs 4`), macos-26 and xcode-27 (macOS 27 preview, `--jobs 1`); dash, `bash --posix` and busybox ash (`--jobs 4`); FreeBSD 15.1 (ZFS root) and OmniOS r151060 `vmactions` guests (`--jobs 2`, OmniOS through `bash --posix`); and the gating `argv-fuzz` job. Only ubuntu-26.04 and macos-26 run the tool self-tests. |
 | `lint.yml` | Every `tests/run_lint.sh` target as a matrix; `tests/test_ci_workflow_contracts.sh` keeps the matrix equal to `run_lint.sh --list`. |
 | `coverage.yml` | Report-only bash-xtrace coverage (summary in the job summary, report as an artifact) and a non-blocking kcov pass over the contract and module suites in the digest-pinned `kcov/kcov` image with `procps` and `openssh-client` added (zxfer requires `ps`; the remote backup cases resolve `ssh`). |
-| `perf.yml` | The advisory `perf-advisory` job: `run_perf_ab.sh` against `origin/upstream-compat-final`, then against the code the push replaces (the merge base with `origin/main`, or `HEAD~1` on `main`) with `props`, plus the micro-bench TOTAL and ssh rows; never gates. |
+| `perf.yml` | The advisory `perf-advisory` job: `run_perf_ab.sh` against `origin/upstream-compat-final`, then against the code the push replaces (the merge base with `origin/main`, or the pre-push tip on `main`) with `props`, plus the micro-bench TOTAL and ssh rows; never gates. |
 | `integration.yml` | The direct-host harness on ubuntu-26.04 (`sudo`, preserved workdir), and FreeBSD and OmniOS `vmactions` guests that run the harness in-guest (OmniOS under `/usr/xpg4/bin/sh`), copy failure artifacts back and restore the guest status in a host-side step. |
 | `packaging.yml` | The `rpm` job on ubuntu-26.04: `rpmbuild -bb` of `packaging/zxfer.spec` from a `git archive` tarball named as the spec's `Source0`, a check that the package holds the wrapper, the launcher, every `src/` module and the man page, and a run of the packaged launcher from its libexec tree (`-h`, then a failure report that must name the spec's version). Nothing is installed on the runner. |
 

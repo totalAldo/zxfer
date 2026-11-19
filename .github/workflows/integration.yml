@@ -56,7 +56,7 @@ jobs:
 
       - name: Upload integration artifacts
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zxfer-integration-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/zxfer-integration-tmp
@@ -71,9 +71,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run integration tests on FreeBSD
-        uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3 # v1.5.7
+        uses: vmactions/freebsd-vm@811efaaac0668df8bfb8308c3ec997b5ab50037b # v1.6.0
         with:
-          release: "15.1"
+          release: "15.1-zfs"
           usesh: true
           run: |
             export TMPDIR="$GITHUB_WORKSPACE/ci-artifacts/integration-freebsd"
@@ -89,7 +89,7 @@ jobs:
             FreeBSD
       - name: Upload FreeBSD integration artifacts
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zxfer-integration-freebsd-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ github.workspace }}/ci-artifacts/integration-freebsd
@@ -104,9 +104,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run integration tests on OmniOS
-        uses: vmactions/omnios-vm@317e4f8069dad8a65e1520808f1a68ef3fd20565 # v1.3.6
+        uses: vmactions/omnios-vm@aeee92416495d9685b2997d954f6b063ae5b832d # v1.3.8
         with:
-          release: "r151058"
+          release: "r151060"
           usesh: true
           run: |
             export TMPDIR="$GITHUB_WORKSPACE/ci-artifacts/integration-omnios"
@@ -124,7 +124,7 @@ jobs:
             OmniOS
       - name: Upload OmniOS integration artifacts
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zxfer-integration-omnios-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ github.workspace }}/ci-artifacts/integration-omnios
