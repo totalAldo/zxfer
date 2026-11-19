@@ -2,6 +2,7 @@
 #
 # shunit2 tests for CI helpers that preserve vmactions guest artifacts.
 #
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -14,10 +15,6 @@ oneTimeSetUp() {
 	CI_RUNNER="$ZXFER_ROOT/tests/ci/run_vmactions_integration.sh"
 	CI_STATUS_CHECK="$ZXFER_ROOT/tests/ci/check_vmactions_integration_status.sh"
 	CI_FREEBSD_PREPARE="$ZXFER_ROOT/tests/ci/prepare_freebsd_vmactions_integration.sh"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 # shellcheck disable=SC2329  # Invoked by shunit2 test functions.
@@ -35,52 +32,47 @@ EOF
 		fail "Unable to chmod fake integration harness."
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_vmactions_integration_records_failure_status_but_returns_success() {
 	fake_repo="$TEST_TMPDIR/fake-repo-failure"
 	artifact_dir="$TEST_TMPDIR/freebsd-artifacts"
 	create_fake_ci_repo 7 "$fake_repo"
 
-	zxfer_test_capture_subshell "
-		cd \"$fake_repo\"
-		TMPDIR=\"$artifact_dir\" sh \"$CI_RUNNER\" sh
-		printf 'stored-status=%s\n' \"\$(cat \"$artifact_dir/harness.exit-status\")\"
-	"
+	capture_case() {
+		cd "$fake_repo" || return 1
+		TMPDIR="$artifact_dir" sh "$CI_RUNNER" sh
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "The vmactions runner helper should return success so copyback can run." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "The helper should record the real harness exit status for the host-side check." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "stored-status=7"
+	assertEquals "The helper should record the real harness exit status for the host-side check." \
+		7 "$(cat "$artifact_dir/harness.exit-status")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_vmactions_integration_records_prepare_failure_status_but_returns_success() {
 	fake_repo="$TEST_TMPDIR/fake-repo-prepare-failure"
 	artifact_dir="$TEST_TMPDIR/freebsd-prepare-artifacts"
 	create_fake_ci_repo 0 "$fake_repo"
 
-	zxfer_test_capture_subshell "
-		cd \"$fake_repo\"
-		TMPDIR=\"$artifact_dir\" ZXFER_CI_GUEST_PREPARE='exit 12' sh \"$CI_RUNNER\" sh
-		printf 'stored-status=%s\n' \"\$(cat \"$artifact_dir/harness.exit-status\")\"
-	"
+	capture_case() {
+		cd "$fake_repo" || return 1
+		TMPDIR="$artifact_dir" ZXFER_CI_GUEST_PREPARE='exit 12' sh "$CI_RUNNER" sh
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "The vmactions runner helper should still return success when guest preparation fails so copyback can run." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "The helper should record guest preparation failures for the host-side check." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "stored-status=12"
+	assertEquals "The helper should record guest preparation failures for the host-side check." \
+		12 "$(cat "$artifact_dir/harness.exit-status")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_check_vmactions_integration_status_restores_guest_failure() {
 	artifact_dir="$TEST_TMPDIR/status-check-failure"
 	mkdir -p "$artifact_dir" || fail "Unable to create artifact fixture."
 	printf '%s\n' "7" >"$artifact_dir/harness.exit-status" ||
 		fail "Unable to create status fixture."
 
-	zxfer_test_capture_subshell "
-		sh \"$CI_STATUS_CHECK\" \"$artifact_dir\" FreeBSD
-	"
+	zxfer_test_capture_subshell sh "$CI_STATUS_CHECK" "$artifact_dir" FreeBSD
 
 	assertEquals "The host-side status check should fail with the guest harness status." \
 		7 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -88,14 +80,11 @@ test_check_vmactions_integration_status_restores_guest_failure() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "FreeBSD integration failed inside the VM with exit status 7"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_check_vmactions_integration_status_reports_missing_copyback_status() {
 	artifact_dir="$TEST_TMPDIR/status-check-missing"
 	mkdir -p "$artifact_dir" || fail "Unable to create artifact fixture."
 
-	zxfer_test_capture_subshell "
-		sh \"$CI_STATUS_CHECK\" \"$artifact_dir\" FreeBSD
-	"
+	zxfer_test_capture_subshell sh "$CI_STATUS_CHECK" "$artifact_dir" FreeBSD
 
 	assertEquals "Missing copyback status should fail closed." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -122,7 +111,6 @@ EOF
 	chmod 700 "$l_mock_bin/kldload" || fail "Unable to chmod fake kldload."
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_prepare_freebsd_vmactions_integration_retries_pkg_install_after_clearing_state() {
 	mock_bin="$TEST_TMPDIR/freebsd-prep-retry-bin"
 	repos_dir="$TEST_TMPDIR/freebsd-prep-retry-repos"
@@ -146,23 +134,19 @@ fi
 exit 0
 "
 
-	zxfer_test_capture_subshell "
-		PATH=\"$mock_bin:\$PATH\" \
-		ZXFER_CI_FREEBSD_PKG_REPOS_DIR=\"$repos_dir\" \
-		ZXFER_CI_FREEBSD_PKG_CACHE_DIR=\"$cache_dir\" \
-		sh \"$CI_FREEBSD_PREPARE\"
-		printf 'install-count=%s\n' \"\$(cat \"$pkg_count_file\")\"
-	"
+	zxfer_test_capture_subshell env PATH="$mock_bin:$PATH" \
+		ZXFER_CI_FREEBSD_PKG_REPOS_DIR="$repos_dir" \
+		ZXFER_CI_FREEBSD_PKG_CACHE_DIR="$cache_dir" \
+		sh "$CI_FREEBSD_PREPARE"
 
 	assertEquals "FreeBSD CI preparation should recover after one failed package install." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "The FreeBSD prep helper should retry the failed install once." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "install-count=2"
+	assertEquals "The FreeBSD prep helper should retry the failed install once." \
+		2 "$(cat "$pkg_count_file")"
 	assertContains "The FreeBSD prep helper should announce the retry." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "retrying once"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_prepare_freebsd_vmactions_integration_allows_degraded_package_setup_by_default() {
 	mock_bin="$TEST_TMPDIR/freebsd-prep-degraded-bin"
 	repos_dir="$TEST_TMPDIR/freebsd-prep-degraded-repos"
@@ -176,12 +160,7 @@ fi
 exit 0
 "
 
-	zxfer_test_capture_subshell "
-		PATH=\"$mock_bin:\$PATH\" \
-		ZXFER_CI_FREEBSD_PKG_REPOS_DIR=\"$repos_dir\" \
-		ZXFER_CI_FREEBSD_PKG_CACHE_DIR=\"$cache_dir\" \
-		sh \"$CI_FREEBSD_PREPARE\"
-	"
+	zxfer_test_capture_subshell env PATH="$mock_bin:$PATH" ZXFER_CI_FREEBSD_PKG_REPOS_DIR="$repos_dir" ZXFER_CI_FREEBSD_PKG_CACHE_DIR="$cache_dir" sh "$CI_FREEBSD_PREPARE"
 
 	assertEquals "FreeBSD CI preparation should allow reduced coverage when optional package install remains unavailable." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -189,7 +168,6 @@ exit 0
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "continuing with reduced integration coverage"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_prepare_freebsd_vmactions_integration_can_require_package_setup_success() {
 	mock_bin="$TEST_TMPDIR/freebsd-prep-strict-bin"
 	repos_dir="$TEST_TMPDIR/freebsd-prep-strict-repos"
@@ -203,13 +181,7 @@ fi
 exit 0
 "
 
-	zxfer_test_capture_subshell "
-		PATH=\"$mock_bin:\$PATH\" \
-		ZXFER_CI_FREEBSD_PKG_REPOS_DIR=\"$repos_dir\" \
-		ZXFER_CI_FREEBSD_PKG_CACHE_DIR=\"$cache_dir\" \
-		ZXFER_CI_FREEBSD_ALLOW_DEGRADED_PACKAGES=0 \
-		sh \"$CI_FREEBSD_PREPARE\"
-	"
+	zxfer_test_capture_subshell env PATH="$mock_bin:$PATH" ZXFER_CI_FREEBSD_PKG_REPOS_DIR="$repos_dir" ZXFER_CI_FREEBSD_PKG_CACHE_DIR="$cache_dir" ZXFER_CI_FREEBSD_ALLOW_DEGRADED_PACKAGES=0 sh "$CI_FREEBSD_PREPARE"
 
 	assertEquals "Strict FreeBSD CI preparation should preserve the final package install failure." \
 		6 "$ZXFER_TEST_CAPTURE_STATUS"

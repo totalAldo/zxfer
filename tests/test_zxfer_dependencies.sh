@@ -11,14 +11,8 @@ TEST_ORIGINAL_PATH=$PATH
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-zxfer_source_runtime_modules_through "zxfer_dependencies.sh"
-
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_dependencies"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
@@ -85,7 +79,7 @@ test_zxfer_refresh_secure_path_state_preserves_custom_ifs_and_enabled_globbing()
 	mkdir -p "$secure_fixture_root/secure-one" "$secure_fixture_root/secure-two"
 
 	# shellcheck disable=SC2016  # Expanded inside the isolated helper shell.
-	zxfer_test_capture_subshell '
+	capture_case() {
 		IFS="|"
 		set +f
 		ZXFER_SECURE_PATH="$secure_fixture_root/secure-*:/usr/bin"
@@ -96,7 +90,8 @@ test_zxfer_refresh_secure_path_state_preserves_custom_ifs_and_enabled_globbing()
 		*f*) printf "%s\n" "globbing=disabled" ;;
 		*) printf "%s\n" "globbing=enabled" ;;
 		esac
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Secure PATH parsing should keep wildcard characters literal instead of expanding them against the filesystem." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "path=<$secure_fixture_root/secure-*:/usr/bin>"

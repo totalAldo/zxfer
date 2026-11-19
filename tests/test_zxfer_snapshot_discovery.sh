@@ -8,11 +8,9 @@
 # can reach: helper edge cases, failures the fault injector cannot cause,
 # and producer process edges.
 #
-# Test definitions live in the behavior fragments below. Each fragment has a
-# "zxfer-test-fragment" marker, a source line and a path in suite(); keep the
-# three in the same order so listing and execution agree. The commands
-# fragment keeps the exec fixture it was written for; the others use the
-# snapshot-discovery fixture.
+# Literal fragment source lines define loading, registration and discovery
+# order. The commands fragment keeps the exec fixture it was written for;
+# the others use the snapshot-discovery fixture.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2317,SC2329
 
@@ -56,39 +54,26 @@ tearDown() {
 	fi
 }
 
-# zxfer-test-fragment: suites/zxfer_snapshot_discovery_stream_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_discovery_stream_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_discovery_stream_tests.sh"
 
-# zxfer-test-fragment: suites/zxfer_snapshot_discovery_full_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_discovery_full_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_discovery_full_tests.sh"
 
-# zxfer-test-fragment: suites/zxfer_snapshot_discovery_failure_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_discovery_failure_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_discovery_failure_tests.sh"
 
-# zxfer-test-fragment: suites/zxfer_snapshot_discovery_source_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_discovery_source_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_discovery_source_tests.sh"
 
-# zxfer-test-fragment: suites/zxfer_snapshot_discovery_destination_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_discovery_destination_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_discovery_destination_tests.sh"
 
-# zxfer-test-fragment: suites/zxfer_snapshot_discovery_commands_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_discovery_commands_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_discovery_commands_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_snapshot_discovery.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_discovery_stream_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_discovery_full_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_discovery_failure_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_discovery_source_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_discovery_destination_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_discovery_commands_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

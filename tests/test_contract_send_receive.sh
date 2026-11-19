@@ -112,9 +112,8 @@ sendrecv_assert_every_stream_delivered() {
 test_progress_dialog_with_parallel_jobs_delivers_every_stream() {
 	sendrecv_setup_progress_env progress_j3
 
-	TMPDIR="$JOB_TMP_DIR" planning_run_zxfer "$STATE_DIR" -j 3 \
-		-D "$MOCKBIN_DIR/progress_dialog %%title%% %%size%%" -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	TMPDIR="$JOB_TMP_DIR" planning_run_recursive "$STATE_DIR" -j 3 \
+		-D "$MOCKBIN_DIR/progress_dialog %%title%% %%size%%"
 	sendrecv_assert_every_stream_delivered $? "-j 3 -D"
 	planning_assert_log_has_line \
 		"get -Hpo value written@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT"
@@ -125,9 +124,8 @@ test_progress_dialog_with_parallel_jobs_delivers_every_stream() {
 test_progress_dialog_in_the_foreground_delivers_every_stream() {
 	sendrecv_setup_progress_env progress_j1
 
-	TMPDIR="$JOB_TMP_DIR" planning_run_zxfer "$STATE_DIR" -j 1 \
-		-D "$MOCKBIN_DIR/progress_dialog %%title%% %%size%%" -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	TMPDIR="$JOB_TMP_DIR" planning_run_recursive "$STATE_DIR" -j 1 \
+		-D "$MOCKBIN_DIR/progress_dialog %%title%% %%size%%"
 	sendrecv_assert_every_stream_delivered $? "-j 1 -D"
 	planning_assert_log_has_line \
 		"send -nPv -I $ZXFER_MOCKBIN_SOURCE_ROOT@snap2 $ZXFER_MOCKBIN_SOURCE_ROOT@snap3"
@@ -138,9 +136,8 @@ test_progress_dialog_in_the_foreground_delivers_every_stream() {
 test_dry_run_with_parallel_jobs_and_progress_never_sends() {
 	sendrecv_setup_progress_env progress_dryrun
 
-	TMPDIR="$JOB_TMP_DIR" planning_run_zxfer "$STATE_DIR" -n -j 3 \
-		-D "$MOCKBIN_DIR/progress_dialog %%title%% %%size%%" -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	TMPDIR="$JOB_TMP_DIR" planning_run_recursive "$STATE_DIR" -n -j 3 \
+		-D "$MOCKBIN_DIR/progress_dialog %%title%% %%size%%"
 	dry_run_status=$?
 	assertEquals "-n -j 3 -D should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
 		0 "$dry_run_status"

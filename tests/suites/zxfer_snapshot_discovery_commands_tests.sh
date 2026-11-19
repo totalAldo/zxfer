@@ -43,8 +43,8 @@ test_build_source_snapshot_list_cmd_remote_helper_path_does_not_execute_locally(
 	export FAKE_SSH_LOG FAKE_SSH_SUPPRESS_STDOUT
 
 	l_cmd=$(zxfer_test_print_source_listing zxfer_build_source_snapshot_list_cmd)
-	zxfer_execute_source_snapshot_list_background_cmd_with_sort "$l_cmd" \
-		"$outfile" "$errfile" "$TEST_TMPDIR/remote_helper.sorted"
+	zxfer_start_source_snapshot_producer full "$l_cmd" \
+		"$TEST_TMPDIR/remote_helper.sorted" "$errfile" "$outfile"
 	wait "$g_last_background_pid"
 	zxfer_unregister_cleanup_pid "$g_last_background_pid"
 

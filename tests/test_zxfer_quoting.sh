@@ -9,16 +9,10 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-zxfer_source_runtime_modules_through "zxfer_quoting.sh"
-
 QUOTING_TEST_REJECTION_SUFFIX="must use literal whitespace-delimited tokens only; shell quotes and backslash escapes are not supported."
 
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_quoting"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {

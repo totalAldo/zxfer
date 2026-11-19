@@ -2,6 +2,7 @@
 #
 # shunit2 tests for the manual performance runner control flow.
 #
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -12,10 +13,6 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_run_perf"
 	ZXFER_ROOT=$(cd "$TESTS_DIR/.." && pwd -P)
 	PERF_RUNNER="$ZXFER_ROOT/tests/run_perf_tests.sh"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
@@ -36,7 +33,6 @@ setUp() {
 	ZXFER_PERF_YES=0
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_parse_args_accepts_profile_label_cases_and_counts() {
 	zxfer_perf_parse_args --yes --label candidate --profile standard --case chain_local,chain_remote_mock --samples 5 --warmups 2 --output-dir "$TEST_TMPDIR/out" --baseline "$TEST_TMPDIR/base.tsv"
 
@@ -51,14 +47,15 @@ test_perf_parse_args_accepts_profile_label_cases_and_counts() {
 	assertEquals "The perf runner should preserve baseline paths." "$TEST_TMPDIR/base.tsv" "$ZXFER_PERF_BASELINE"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_parse_args_rejects_empty_case_selector() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		ZXFER_RUN_PERF_SOURCE_ONLY=1
-		ZXFER_PERF_TESTS_DIR=\"$TESTS_DIR\"
-		. \"$PERF_RUNNER\"
+		ZXFER_PERF_TESTS_DIR="$TESTS_DIR"
+		# shellcheck source=tests/run_perf_tests.sh
+		. "$PERF_RUNNER"
 		zxfer_perf_parse_args --case ''
-	"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Empty perf case selectors should not expand to the default all-case list." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -66,7 +63,6 @@ test_perf_parse_args_rejects_empty_case_selector() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "--case requires at least one case name"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_apply_profile_defaults_sets_standard_fixture_sizes() {
 	ZXFER_PERF_PROFILE=standard
 
@@ -79,29 +75,28 @@ test_perf_apply_profile_defaults_sets_standard_fixture_sizes() {
 	assertEquals "The standard profile should include larger fanout fixtures." "48" "$ZXFER_PERF_FANOUT_DATASETS"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_apply_profile_defaults_rejects_unknown_cases() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		ZXFER_RUN_PERF_SOURCE_ONLY=1
-		ZXFER_PERF_TESTS_DIR=\"$TESTS_DIR\"
-		. \"$PERF_RUNNER\"
+		ZXFER_PERF_TESTS_DIR="$TESTS_DIR"
+		# shellcheck source=tests/run_perf_tests.sh
+		. "$PERF_RUNNER"
 		ZXFER_PERF_CASES='nosuch_case'
 		zxfer_perf_apply_profile_defaults
-	"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Unknown perf case selectors should fail closed." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "The validation error should name the unknown perf case." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Unknown performance case requested: nosuch_case"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_case_list_registers_incremental_and_pull_noop_cases() {
 	assertEquals "The case registry should pin the full scenario matrix in stable order." \
 		"chain_local chain_local_noop chain_local_incr fanout_local_j1_props fanout_local_j1_incr fanout_local_j4_props fanout_local_j4_props_noop chain_remote_mock chain_remote_mock_noop chain_remote_mock_pull_noop chain_remote_mock_compressed" \
 		"$ZXFER_PERF_CASE_LIST"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_runner_sources_only_focused_fixture_helpers() {
 	runner_contents=$(cat "$PERF_RUNNER")
 
@@ -122,7 +117,6 @@ test_perf_runner_sources_only_focused_fixture_helpers() {
 	assertNotEquals "Integration test bodies should not leak into the perf runner shell." 0 "$integration_body_status"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_case_descriptions_cover_all_registered_cases() {
 	for l_case_name in $ZXFER_PERF_CASE_LIST; do
 		l_description=$(zxfer_perf_case_description "$l_case_name")
@@ -131,7 +125,6 @@ test_perf_case_descriptions_cover_all_registered_cases() {
 	done
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_estimate_send_bytes_uses_first_full_send_plus_incrementals() {
 	zfs() {
 		case "$*" in
@@ -154,7 +147,6 @@ test_perf_estimate_send_bytes_uses_first_full_send_plus_incrementals() {
 		"1000" "$result"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_estimate_incremental_send_bytes_uses_incremental_range_only() {
 	zfs() {
 		case "$*" in
@@ -174,7 +166,54 @@ test_perf_estimate_incremental_send_bytes_uses_incremental_range_only() {
 		"250" "$result"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_perf_rejects_a_backward_clock_before_recording_the_sample() {
+	status=0
+	output=$(zxfer_perf_record_sample chain_local sample 1 0 -553 100 /dev/null /dev/null 2>&1) || status=$?
+	assertEquals "A negative duration must fail the sample." 1 "$status"
+	assertContains "The diagnostic identifies the affected case." "$output" "Clock moved backward during chain_local (sample 1)"
+}
+
+test_perf_samples_estimate_only_the_measured_send() {
+	output=$(
+		# shellcheck disable=SC2030  # These fixture settings belong to this subshell.
+		SRC_POOL=source DEST_POOL=destination WORKDIR=$TEST_TMPDIR
+		ZXFER_PERF_OUTPUT_DIR=$TEST_TMPDIR
+		ZXFER_PERF_CHAIN_SNAPSHOTS=3 ZXFER_PERF_FANOUT_DATASETS=2 ZXFER_PERF_PAYLOAD_MB=1
+		log_summary() { :; }
+		destroy_test_datasets_if_present() { :; }
+		assert_snapshot_exists() { :; }
+		zxfer_perf_write_payload_mb() { :; }
+		zxfer_perf_invoke_chain_replication() { :; }
+		zxfer_perf_invoke_fanout_replication() { :; }
+		zxfer_perf_now_ms() { printf '0\n'; }
+		zfs() {
+			[ "$1" = send ] || return 0
+			printf '%s\n' "$*" >>"$probe_log"
+			if [ "$3" = -I ]; then
+				printf 'size\t10\n'
+			else
+				printf 'size\t100\n'
+			fi
+		}
+		zxfer_perf_record_sample() {
+			printf '%s %s bytes %d probes\n' "$1" "$6" "$(wc -l <"$probe_log")"
+		}
+		probe_log="$TEST_TMPDIR/size-probes"
+		for sample_case in chain_local chain_local_noop chain_local_incr \
+			fanout_local_j1_props fanout_local_j4_props_noop fanout_local_j1_incr; do
+			: >"$probe_log"
+			zxfer_perf_run_case_sample "$sample_case" sample 1
+		done
+	)
+	assertEquals "Each estimate covers exactly the data sent during the timed sample." \
+		"chain_local 110 bytes 2 probes
+chain_local_noop 0 bytes 0 probes
+chain_local_incr 10 bytes 1 probes
+fanout_local_j1_props 200 bytes 2 probes
+fanout_local_j4_props_noop 0 bytes 0 probes
+fanout_local_j1_incr 20 bytes 2 probes" "$output"
+}
+
 test_perf_build_mock_secure_path_preserves_configured_append_dirs() {
 	ZXFER_SECURE_PATH_APPEND="/usr/local/zfs/bin:/opt/zfs/bin"
 
@@ -186,7 +225,6 @@ test_perf_build_mock_secure_path_preserves_configured_append_dirs() {
 		"$result" ":/usr/local/zfs/bin:/opt/zfs/bin"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_run_cases_uses_isolated_loop_state() {
 	ZXFER_PERF_CASES="chain_local fanout_local_j1_props"
 	ZXFER_PERF_WARMUPS=1
@@ -221,7 +259,6 @@ test_perf_run_cases_uses_isolated_loop_state() {
 		"$(cat "$ZXFER_PERF_TEST_RUN_LOG")" "fanout_local_j1_props:sample:1:2/2"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_run_case_sample_logs_case_description_and_sample_position() {
 	ZXFER_PERF_OUTPUT_DIR="$TEST_TMPDIR/perf-output"
 	ZXFER_PERF_SAMPLES=3
@@ -299,7 +336,6 @@ write_sample_perf_rows() {
 	} >"$l_samples_file"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_render_summary_aggregates_measured_samples_only() {
 	ZXFER_PERF_SAMPLES_FILE="$TEST_TMPDIR/samples.tsv"
 	ZXFER_PERF_SUMMARY_FILE="$TEST_TMPDIR/summary.tsv"
@@ -322,17 +358,19 @@ test_perf_render_summary_aggregates_measured_samples_only() {
 		"$(cat "$ZXFER_PERF_MARKDOWN_FILE")" "| \`chain_local\` |"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_record_sample_preserves_missing_profile_counters_as_empty() {
 	ZXFER_PERF_LABEL=older-upstream
 	ZXFER_PERF_SAMPLES_FILE="$TEST_TMPDIR/samples-missing-counters.tsv"
 	stdout_file="$TEST_TMPDIR/sample.stdout"
 	stderr_file="$TEST_TMPDIR/sample.stderr"
 	: >"$stdout_file"
-	printf '%s\n' "zxfer profile: startup_latency_ms=77" >"$stderr_file"
+	printf '%s\n' "zxfer profile: startup_latency_ms=10" "zxfer profile: startup_latency_ms=77" \
+		"zxfer profile: zfs_send_calls=0" "zxfer profile: unknown_metric=15" >"$stderr_file"
 	zxfer_perf_print_sample_header >"$ZXFER_PERF_SAMPLES_FILE"
 
-	zxfer_perf_record_sample chain_local sample 1 0 100 1000 "$stdout_file" "$stderr_file" ""
+	completion=$(zxfer_perf_record_sample chain_local sample 1 0 100 1000 "$stdout_file" "$stderr_file" "")
+	assertContains "The completion message uses the same last and absent metrics as the TSV." \
+		"$completion" "throughput_Bps=10000.00 startup_latency_ms=77 cleanup_ms= mock_ssh_invocations=0"
 
 	result=$(awk -F '\t' '
 		NR == 1 {
@@ -340,7 +378,7 @@ test_perf_record_sample_preserves_missing_profile_counters_as_empty() {
 			next
 		}
 		NR == 2 {
-			printf "label=%s startup=%s cleanup=<%s> runtime_files=<%s>\n", $1, $(col["startup_latency_ms"]), $(col["cleanup_ms"]), $(col["runtime_artifact_files_created"])
+			printf "label=%s startup=%s cleanup=<%s> runtime_files=<%s> sends=<%s>\n", $1, $(col["startup_latency_ms"]), $(col["cleanup_ms"]), $(col["runtime_artifact_files_created"]), $(col["zfs_send_calls"])
 		}
 	' "$ZXFER_PERF_SAMPLES_FILE")
 
@@ -352,9 +390,9 @@ test_perf_record_sample_preserves_missing_profile_counters_as_empty() {
 		"$result" "cleanup=<>"
 	assertContains "New counters missing from older output should stay empty." \
 		"$result" "runtime_files=<>"
+	assertContains "A reported zero is retained." "$result" "sends=<0>"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_record_sample_sanitizes_freeform_tsv_fields() {
 	ZXFER_PERF_LABEL=$(printf 'candidate\tlabel\nnext')
 	ZXFER_PERF_SAMPLES_FILE="$TEST_TMPDIR/samples-sanitized.tsv"
@@ -388,7 +426,6 @@ test_perf_record_sample_sanitizes_freeform_tsv_fields() {
 		"$result" "stderr=<stderr path next>"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_run_case_sample_dispatches_noop_cases() {
 	ZXFER_PERF_OUTPUT_DIR="$TEST_TMPDIR/perf-noop-dispatch"
 	ZXFER_PERF_SAMPLES=1
@@ -417,7 +454,6 @@ test_perf_run_case_sample_dispatches_noop_cases() {
 		"$output" "chain:chain_remote_mock_noop:1:1"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_run_case_sample_dispatches_incremental_and_pull_cases() {
 	ZXFER_PERF_OUTPUT_DIR="$TEST_TMPDIR/perf-incr-dispatch"
 	ZXFER_PERF_SAMPLES=1
@@ -446,7 +482,6 @@ test_perf_run_case_sample_dispatches_incremental_and_pull_cases() {
 		"$output" "chain:chain_remote_mock_pull_noop:2:1:0"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_invoke_chain_replication_pull_mode_uses_remote_origin_only() {
 	ZXFER_BIN="$TEST_TMPDIR/zxfer-args-echo"
 	printf '%s\n' "#!/bin/sh" 'printf "%s\n" "$*"' >"$ZXFER_BIN"
@@ -466,7 +501,6 @@ test_perf_invoke_chain_replication_pull_mode_uses_remote_origin_only() {
 		"$output" "-R pool/src pool/dest"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_invoke_chain_replication_remote_modes_export_mock_path() {
 	ZXFER_BIN="$TEST_TMPDIR/zxfer-path-echo"
 	# shellcheck disable=SC2016  # $PATH must expand inside the stub, not here.
@@ -483,7 +517,6 @@ test_perf_invoke_chain_replication_remote_modes_export_mock_path() {
 		"$output" "PATH=$TEST_TMPDIR/mock-bin:/usr/bin"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_invoke_fanout_replication_props_mode_controls_property_flag() {
 	ZXFER_BIN="$TEST_TMPDIR/zxfer-args-echo"
 	printf '%s\n' "#!/bin/sh" 'printf "%s\n" "$*"' >"$ZXFER_BIN"
@@ -506,7 +539,6 @@ test_perf_invoke_fanout_replication_props_mode_controls_property_flag() {
 		"$output" "-j 1 -R pool/src pool/dest"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_write_run_info_records_label_versions_and_fixture_sizes() {
 	ZXFER_PERF_RUN_INFO_FILE="$TEST_TMPDIR/run-info.tsv"
 	ZXFER_PERF_LABEL=baseline-ref
@@ -534,15 +566,15 @@ test_perf_write_run_info_records_label_versions_and_fixture_sizes() {
 	assertContains "Run info should record fixture sizes." "$output" "fixture_chain_snapshots	6"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_cleanup_fails_successful_run_when_pool_cleanup_fails() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		ZXFER_RUN_PERF_SOURCE_ONLY=1
-		ZXFER_PERF_TESTS_DIR=\"$TESTS_DIR\"
-		. \"$PERF_RUNNER\"
+		ZXFER_PERF_TESTS_DIR="$TESTS_DIR"
+		# shellcheck source=tests/run_perf_tests.sh
+		. "$PERF_RUNNER"
 		set +e
-		WORKDIR=\"$TEST_TMPDIR/cleanup-work\"
-		mkdir -p \"\$WORKDIR\"
+		WORKDIR="$TEST_TMPDIR/cleanup-work"
+		mkdir -p "$WORKDIR"
 		SRC_POOL=src
 		DEST_POOL=dst
 		SRC_POOL_CREATED=1
@@ -553,10 +585,11 @@ test_perf_cleanup_fails_successful_run_when_pool_cleanup_fails() {
 		safe_rm_rf() { return 0; }
 		true
 		zxfer_perf_cleanup
-		l_cleanup_status=\$?
-		printf 'cleanup_status=%s\n' \"\$l_cleanup_status\"
+		l_cleanup_status=$?
+		printf 'cleanup_status=%s\n' "$l_cleanup_status"
 		exit 0
-	"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Perf cleanup failures should make otherwise successful runs fail." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "cleanup_status=1"
@@ -564,15 +597,15 @@ test_perf_cleanup_fails_successful_run_when_pool_cleanup_fails() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "preserving perf workdir"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_cleanup_preserves_original_failure_status() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		ZXFER_RUN_PERF_SOURCE_ONLY=1
-		ZXFER_PERF_TESTS_DIR=\"$TESTS_DIR\"
-		. \"$PERF_RUNNER\"
+		ZXFER_PERF_TESTS_DIR="$TESTS_DIR"
+		# shellcheck source=tests/run_perf_tests.sh
+		. "$PERF_RUNNER"
 		set +e
-		WORKDIR=\"$TEST_TMPDIR/cleanup-work-original-failure\"
-		mkdir -p \"\$WORKDIR\"
+		WORKDIR="$TEST_TMPDIR/cleanup-work-original-failure"
+		mkdir -p "$WORKDIR"
 		SRC_POOL=src
 		DEST_POOL=dst
 		SRC_POOL_CREATED=1
@@ -584,16 +617,16 @@ test_perf_cleanup_preserves_original_failure_status() {
 		return_seven() { return 7; }
 		return_seven
 		zxfer_perf_cleanup
-		l_cleanup_status=\$?
-		printf 'cleanup_status=%s\n' \"\$l_cleanup_status\"
+		l_cleanup_status=$?
+		printf 'cleanup_status=%s\n' "$l_cleanup_status"
 		exit 0
-	"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Cleanup failures should not mask the original perf failure status." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "cleanup_status=7"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_compare_baseline_writes_regression_annotations_without_failing() {
 	ZXFER_PERF_BASELINE="$TEST_TMPDIR/baseline.tsv"
 	ZXFER_PERF_SUMMARY_FILE="$TEST_TMPDIR/current.tsv"
@@ -611,7 +644,6 @@ test_perf_compare_baseline_writes_regression_annotations_without_failing() {
 		"$(cat "$ZXFER_PERF_COMPARE_FILE")" "regression"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_parse_args_accepts_a_baseline_binary_and_label() {
 	zxfer_perf_parse_args --baseline-bin "$TEST_TMPDIR/base-zxfer" --baseline-label upstream
 
@@ -621,7 +653,6 @@ test_perf_parse_args_accepts_a_baseline_binary_and_label() {
 		"upstream" "$ZXFER_PERF_BASELINE_LABEL"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_baseline_bin_runs_the_baseline_first_and_compares_against_it() {
 	l_base_bin="$TEST_TMPDIR/base-zxfer"
 	l_mock_runner="$TEST_TMPDIR/mock-run-perf-tests"
@@ -650,7 +681,11 @@ EOF
 	ZXFER_PERF_OUTPUT_DIR="$TEST_TMPDIR/baseline-bin-out"
 	mkdir -p "$ZXFER_PERF_OUTPUT_DIR"
 
-	MOCK_PERF_LOG=$l_mock_log zxfer_perf_run_baseline_bin >/dev/null 2>&1
+	# FreeBSD sh and ksh do not export a variable prefixed to a function call.
+	# Keep this call in the current shell: it publishes ZXFER_PERF_BASELINE.
+	export MOCK_PERF_LOG="$l_mock_log"
+	zxfer_perf_run_baseline_bin >/dev/null 2>&1
+	unset MOCK_PERF_LOG
 
 	assertEquals "The baseline run should use the baseline binary and the same cases and counts." \
 		"ZXFER_BIN=$l_base_bin
@@ -671,7 +706,6 @@ EOF
 		"$(cat "$ZXFER_PERF_OUTPUT_DIR/compare.md")" "| \`chain_local\` | \`wall_ms_avg\` | 100.00 | 125.00 | 25.00 | regression |"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_perf_main_rejects_a_bad_baseline_binary_before_confirmation() {
 	# The sourced runner enables errexit, so capture each status with ||.
 	both_status=0

@@ -6,6 +6,7 @@
 # argv-fuzz CI job runs a fresh seed on every push); the self-tests prove that
 # an injected quoting bug is reported.
 #
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -37,7 +38,6 @@ fuzz_assert_output_has() {
 		fail "$1: missing [$2] in: $(cat "$FUZZ_OUT")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_a_fixed_seed_passes_in_every_mode() {
 	fuzz_run --seed 1 --iterations 2
 	assertEquals "seed 1 should pass: $(cat "$FUZZ_OUT")" 0 "$FUZZ_STATUS"
@@ -47,7 +47,6 @@ test_a_fixed_seed_passes_in_every_mode() {
 	assertEquals "the work directory is removed" "" "$(ls "$CASE_DIR")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_split_arguments_are_reported_with_a_reproduction() {
 	ZXFER_ARGV_FUZZ_FAULT="split"
 	export ZXFER_ARGV_FUZZ_FAULT
@@ -67,7 +66,6 @@ test_split_arguments_are_reported_with_a_reproduction() {
 
 # A value that loses its last byte still replicates, so only the argv check
 # can see it.
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_a_changed_property_value_is_reported_although_zxfer_succeeds() {
 	ZXFER_ARGV_FUZZ_FAULT="truncate"
 	export ZXFER_ARGV_FUZZ_FAULT
@@ -82,7 +80,6 @@ test_a_changed_property_value_is_reported_although_zxfer_succeeds() {
 
 # A property no source holds, such as one a record-shaped value could
 # smuggle in, fails the case even when its value is valid.
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_an_injected_native_property_is_reported() {
 	ZXFER_ARGV_FUZZ_FAULT="inject"
 	export ZXFER_ARGV_FUZZ_FAULT
@@ -98,7 +95,6 @@ test_an_injected_native_property_is_reported() {
 # through the recursive prefetch. A prefetch that reports local sources as
 # received breaks every mode that prefetches, and mode L, whose per-dataset
 # reads are right, reports that its changes differ from mode P's.
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_a_prefetch_that_disagrees_with_per_dataset_reads_is_reported() {
 	ZXFER_ARGV_FUZZ_FAULT="prefetch"
 	export ZXFER_ARGV_FUZZ_FAULT
@@ -112,7 +108,6 @@ test_a_prefetch_that_disagrees_with_per_dataset_reads_is_reported() {
 	fuzz_assert_output_has "only the property modes fail" "case 1: FAILED in P L j O T"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_a_seed_and_case_always_generate_the_same_case() {
 	argv_fuzz_generate_case 7 3 "$CASE_DIR/a" || fail "generation failed"
 	argv_fuzz_generate_case 7 3 "$CASE_DIR/b" || fail "generation failed"
@@ -125,7 +120,6 @@ test_a_seed_and_case_always_generate_the_same_case() {
 	assertFalse "another case must differ" "cmp -s '$CASE_DIR/a/model' '$CASE_DIR/c/model'"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_every_case_holds_each_required_hostile_byte() {
 	for l_case in 1 2 3 4 5; do
 		argv_fuzz_generate_case 11 "$l_case" "$CASE_DIR/$l_case" ||
@@ -175,7 +169,6 @@ test_every_case_holds_each_required_hostile_byte() {
 # backslash for both, marked the row "must", and failed on main although
 # zxfer rightly left the property alone. The verdicts are judged by the
 # values now; these 40 cases include that one.
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_every_expectation_matches_the_generated_values() {
 	l_case=1
 	while [ "$l_case" -le 40 ]; do
@@ -207,7 +200,6 @@ test_every_expectation_matches_the_generated_values() {
 	done
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_fake_zfs_answers_whole_names_and_flags_split_ones() {
 	argv_fuzz_generate_case 3 1 "$CASE_DIR/case" || fail "generation failed"
 	mkdir "$CASE_DIR/state" || fail "Unable to create the state directory."
@@ -229,7 +221,6 @@ test_fake_zfs_answers_whole_names_and_flags_split_ones() {
 		"$(awk 'END { print NR }' "$CASE_DIR/state/argv.log")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_bad_arguments_are_usage_errors() {
 	for l_args in "--seed abc" "--iterations 0" "--case" "--bogus"; do
 		# shellcheck disable=SC2086  # one word per option on purpose

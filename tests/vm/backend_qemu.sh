@@ -2,6 +2,7 @@
 #
 # QEMU backend for local disposable guest execution.
 #
+# shellcheck disable=SC2154  # Guest fields are loaded by zxfer_vm_load_guest.
 
 zxfer_vm_backend_qemu_check_host() {
 	case "$ZXFER_VM_HOST_OS" in
@@ -24,25 +25,21 @@ zxfer_vm_backend_qemu_check_host() {
 
 	l_required_qemu_commands=
 	for l_guest in $ZXFER_VM_SELECTED_GUESTS; do
-		l_guest_arch=$(zxfer_vm_guest_qemu_preferred_arch "$l_guest") ||
+		zxfer_vm_load_guest "$l_guest" ||
 			zxfer_vm_die "No qemu guest architecture is defined for guest [$l_guest]"
-		l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest" "$l_guest_arch") ||
-			zxfer_vm_die "No qemu seed transport is defined for guest [$l_guest]"
-		l_archive_compression=$(zxfer_vm_guest_qemu_archive_compression "$l_guest" "$l_guest_arch") ||
-			zxfer_vm_die "No qemu archive compression is defined for guest [$l_guest]"
-		l_qemu_cmd=$(zxfer_vm_qemu_system_binary "$l_guest_arch") ||
-			zxfer_vm_die "No qemu system binary is defined for guest architecture [$l_guest_arch]"
+		l_qemu_cmd=$(zxfer_vm_qemu_system_binary "$g_vm_guest_arch") ||
+			zxfer_vm_die "No qemu system binary is defined for guest architecture [$g_vm_guest_arch]"
 		if ! zxfer_vm_list_contains "$l_required_qemu_commands" "$l_qemu_cmd"; then
 			zxfer_vm_require_command "$l_qemu_cmd"
 			l_required_qemu_commands=$(zxfer_vm_append_word "$l_required_qemu_commands" "$l_qemu_cmd")
 		fi
-		if [ "$l_guest_arch" = "arm64" ]; then
+		if [ "$g_vm_guest_arch" = "arm64" ]; then
 			zxfer_vm_qemu_resolve_aarch64_efi >/dev/null
 		fi
-		if [ "$l_seed_transport" = "disk-cidata" ]; then
+		if [ "$g_vm_guest_seed_transport" = "disk-cidata" ]; then
 			zxfer_vm_qemu_require_seed_image_builder
 		fi
-		case "$l_archive_compression" in
+		case "$g_vm_guest_archive_compression" in
 		xz)
 			zxfer_vm_require_command xz
 			;;
@@ -470,22 +467,18 @@ zxfer_vm_qemu_prepare_remote_ssh_step() {
 }
 
 zxfer_vm_qemu_render_cloud_init() {
-	l_guest=$1
-	l_seed_dir=$2
-	l_public_key_file=$3
+	l_seed_dir=$1
+	l_public_key_file=$2
 	l_public_key=
-	l_cloud_init_style=
 
 	l_public_key=$(cat "$l_public_key_file") ||
 		zxfer_vm_die "Unable to read generated SSH public key: $l_public_key_file"
-	l_cloud_init_style=$(zxfer_vm_guest_cloud_init_style "$l_guest") ||
-		zxfer_vm_die "No cloud-init style is defined for guest [$l_guest]"
 	zxfer_vm_mkdir_p "$l_seed_dir"
 	cat <<EOF >"$l_seed_dir/meta-data"
-instance-id: zxfer-$l_guest
-local-hostname: zxfer-$l_guest
+instance-id: zxfer-$g_vm_guest_name
+local-hostname: zxfer-$g_vm_guest_name
 EOF
-	case "$l_cloud_init_style" in
+	case "$g_vm_guest_cloud_init_style" in
 	root-login)
 		cat <<EOF >"$l_seed_dir/user-data"
 #cloud-config
@@ -530,7 +523,7 @@ runcmd:
 EOF
 		;;
 	*)
-		zxfer_vm_die "Unsupported cloud-init style [$l_cloud_init_style] for guest [$l_guest]"
+		zxfer_vm_die "Unsupported cloud-init style [$g_vm_guest_cloud_init_style] for guest [$g_vm_guest_name]"
 		;;
 	esac
 }
@@ -710,8 +703,8 @@ zxfer_vm_qemu_run_remote_script() {
 	if zxfer_vm_run_command_with_captured_output \
 		"$l_stdout_file" \
 		"$l_stderr_file" \
-		"[$ZXFER_VM_CURRENT_GUEST stdout]" \
-		"[$ZXFER_VM_CURRENT_GUEST stderr]" \
+		"[$g_vm_guest_name stdout]" \
+		"[$g_vm_guest_name stderr]" \
 		ssh -i "$l_identity" \
 		-o BatchMode=yes \
 		-o IdentitiesOnly=yes \
@@ -748,17 +741,6 @@ zxfer_vm_qemu_collect_remote_artifacts() {
 zxfer_vm_backend_qemu_run_guest() {
 	l_guest=$1
 	l_artifact_dir=$2
-	l_guest_label=
-	l_guest_image_url=
-	l_guest_checksum_url=
-	l_guest_image_filename=
-	l_guest_base_name=
-	l_guest_archive_compression=
-	l_guest_base_format=
-	l_guest_min_disk_size=
-	l_guest_arch=
-	l_seed_transport=
-	l_ssh_ready_timeout_seconds=
 	l_guest_cache_dir=
 	l_checksum_file=
 	l_checksum=
@@ -777,79 +759,58 @@ zxfer_vm_backend_qemu_run_guest() {
 	l_remote_dir=/root/zxfer
 	l_remote_baseline_dir=/root/zxfer-baseline
 	l_remote_artifact_dir=/var/tmp/zxfer-vm-matrix
-	l_ssh_ready_probe_count=1
 	l_status=0
 	l_saved_traps=
 
-	l_guest_arch=$(zxfer_vm_guest_qemu_preferred_arch "$l_guest") ||
+	zxfer_vm_load_guest "$l_guest" ||
 		zxfer_vm_die "No qemu guest architecture is defined for guest [$l_guest]"
-	l_guest_label=$(zxfer_vm_guest_label "$l_guest") || return 1
-	l_guest_image_url=$(zxfer_vm_guest_qemu_image_url "$l_guest" "$l_guest_arch") ||
-		zxfer_vm_die "No qemu image URL is defined for guest [$l_guest]"
-	l_guest_checksum_url=$(zxfer_vm_guest_qemu_checksum_url "$l_guest" "$l_guest_arch") ||
-		zxfer_vm_die "No qemu checksum URL is defined for guest [$l_guest]"
-	l_guest_image_filename=$(zxfer_vm_guest_qemu_image_filename "$l_guest" "$l_guest_arch") ||
-		zxfer_vm_die "No qemu image filename is defined for guest [$l_guest]"
-	l_guest_base_name=$(zxfer_vm_guest_qemu_base_image_name "$l_guest" "$l_guest_arch") ||
-		zxfer_vm_die "No qemu base image name is defined for guest [$l_guest]"
-	l_guest_archive_compression=$(zxfer_vm_guest_qemu_archive_compression "$l_guest" "$l_guest_arch") ||
-		zxfer_vm_die "No qemu archive compression is defined for guest [$l_guest]"
-	l_guest_base_format=$(zxfer_vm_guest_qemu_base_format "$l_guest" "$l_guest_arch") ||
-		zxfer_vm_die "No qemu base image format is defined for guest [$l_guest]"
-	l_guest_min_disk_size=$(zxfer_vm_guest_qemu_min_disk_size "$l_guest" "$l_guest_arch") ||
-		zxfer_vm_die "No qemu minimum disk size is defined for guest [$l_guest]"
-	l_seed_transport=$(zxfer_vm_guest_qemu_seed_transport "$l_guest" "$l_guest_arch") ||
-		zxfer_vm_die "No qemu seed transport is defined for guest [$l_guest]"
-	zxfer_vm_guest_qemu_shell "$l_guest" >/dev/null ||
-		zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
-	l_ssh_ready_timeout_seconds=$(zxfer_vm_guest_qemu_ssh_ready_timeout_seconds "$l_guest") ||
-		zxfer_vm_die "No qemu SSH readiness timeout is defined for guest [$l_guest]"
-	l_ssh_ready_probe_count=$(zxfer_vm_guest_qemu_ssh_ready_probe_count "$l_guest") ||
-		zxfer_vm_die "No qemu SSH readiness threshold is defined for guest [$l_guest]"
-	l_prepare_script=$(zxfer_vm_guest_prepare_script "$l_guest" "qemu" "$ZXFER_VM_TEST_LAYER") ||
+	l_guest_display_name="$g_vm_guest_label/$g_vm_guest_arch"
+	l_prepare_script=$(zxfer_vm_guest_prepare_script qemu "$ZXFER_VM_TEST_LAYER") ||
 		zxfer_vm_die "No qemu guest preparation script is defined for guest [$l_guest]"
-	l_accel=$(zxfer_vm_qemu_select_accel "$l_guest_arch")
+	l_accel=$(zxfer_vm_qemu_select_accel "$g_vm_guest_arch")
 
 	if [ "$l_accel" = "tcg" ]; then
-		if [ "$ZXFER_VM_STRICT_ISOLATION_REQUIRED" = "1" ]; then
-			zxfer_vm_die "Guest [$l_guest/$l_guest_arch] requires hardware virtualization for strict isolation, but only TCG emulation is available on $ZXFER_VM_HOST_OS/$ZXFER_VM_HOST_ARCH"
-		fi
-		zxfer_vm_warn "Guest [$l_guest_label/$l_guest_arch] is running under best-effort TCG emulation; this is not a strict isolation gate."
+		case ",$g_vm_guest_strict_qemu_profiles," in
+		*",$ZXFER_VM_PROFILE,"*)
+			zxfer_vm_die "Guest [$l_guest/$g_vm_guest_arch] requires hardware virtualization for strict isolation, but only TCG emulation is available on $ZXFER_VM_HOST_OS/$ZXFER_VM_HOST_ARCH"
+			;;
+		esac
+		zxfer_vm_warn "Guest [$l_guest_display_name] is running under best-effort TCG emulation; this is not a strict isolation gate."
 	fi
-	l_test_script=$(zxfer_vm_render_guest_test_script "$l_guest" "$l_remote_dir" "$l_remote_artifact_dir")
+	l_test_script=$(zxfer_vm_render_guest_test_script "$l_remote_dir" "$l_remote_artifact_dir")
 
-	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] resolving image via qemu backend"
+	zxfer_vm_log "==> [$l_guest_display_name] resolving image via qemu backend"
 	zxfer_vm_mkdir_p "$ZXFER_VM_CACHE_DIR"
 	zxfer_vm_mkdir_p "$l_artifact_dir"
 
 	l_guest_cache_dir=$(zxfer_vm_join_path "$ZXFER_VM_CACHE_DIR" "$l_guest")
-	l_guest_cache_dir=$(zxfer_vm_join_path "$l_guest_cache_dir" "$l_guest_arch")
+	l_guest_cache_dir=$(zxfer_vm_join_path "$l_guest_cache_dir" "$g_vm_guest_arch")
 	zxfer_vm_mkdir_p "$l_guest_cache_dir"
-	l_checksum_file=$(zxfer_vm_join_path "$l_guest_cache_dir" "$(basename "$l_guest_checksum_url")")
-	l_archive_path=$(zxfer_vm_join_path "$l_guest_cache_dir" "$l_guest_image_filename")
-	l_base_image_path=$(zxfer_vm_join_path "$l_guest_cache_dir" "$l_guest_base_name")
+	l_checksum_file=$(zxfer_vm_join_path "$l_guest_cache_dir" "$(basename "$g_vm_guest_checksum_url")")
+	l_archive_path=$(zxfer_vm_join_path "$l_guest_cache_dir" "$g_vm_guest_image_filename")
+	l_base_image_path=$(zxfer_vm_join_path "$l_guest_cache_dir" "$g_vm_guest_base_image_name")
 
-	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] refreshing checksum manifest $(basename "$l_checksum_file")"
+	zxfer_vm_log "==> [$l_guest_display_name] refreshing checksum manifest $(basename "$l_checksum_file")"
 	zxfer_vm_refresh_cached_download \
-		"$l_guest_checksum_url" \
+		"$g_vm_guest_checksum_url" \
 		"$l_checksum_file" \
-		"$l_guest_label/$l_guest_arch" \
+		"$l_guest_display_name" \
 		"checksum manifest $(basename "$l_checksum_file")"
-	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] checksum manifest ready ($(zxfer_vm_format_bytes "$(zxfer_vm_file_size_bytes "$l_checksum_file")"))"
-	l_checksum=$(zxfer_vm_resolve_expected_checksum "$l_checksum_file" "$l_guest_image_filename")
+	zxfer_vm_log "==> [$l_guest_display_name] checksum manifest ready ($(zxfer_vm_format_bytes "$(zxfer_vm_file_size_bytes "$l_checksum_file")"))"
+	l_checksum=$(zxfer_vm_resolve_expected_checksum "$l_checksum_file" "$g_vm_guest_image_filename")
 
-	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] ensuring guest image cache $(basename "$l_archive_path")"
-	zxfer_vm_download_and_verify_file "$l_guest_image_url" "$l_archive_path" "$l_checksum"
+	zxfer_vm_log "==> [$l_guest_display_name] ensuring guest image cache $(basename "$l_archive_path")"
+	zxfer_vm_download_and_verify_file "$g_vm_guest_image_url" "$l_archive_path" "$l_checksum"
 	zxfer_vm_qemu_log_cached_download_state \
-		"$l_guest_label/$l_guest_arch" \
+		"$l_guest_display_name" \
 		"guest image" \
 		"$ZXFER_VM_LAST_DOWNLOAD_ACTION" \
 		"$ZXFER_VM_LAST_DOWNLOAD_SIZE_BYTES"
 
-	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] preparing base image $(basename "$l_base_image_path")"
-	zxfer_vm_decompress_archive "$l_archive_path" "$l_base_image_path" "$l_guest_archive_compression"
+	zxfer_vm_log "==> [$l_guest_display_name] preparing base image $(basename "$l_base_image_path")"
+	zxfer_vm_decompress_archive "$l_archive_path" "$l_base_image_path" "$g_vm_guest_archive_compression"
 	zxfer_vm_qemu_log_base_image_state \
-		"$l_guest_label/$l_guest_arch" \
+		"$l_guest_display_name" \
 		"$ZXFER_VM_LAST_DECOMPRESS_ACTION" \
 		"$ZXFER_VM_LAST_DECOMPRESS_SIZE_BYTES"
 
@@ -872,10 +833,10 @@ zxfer_vm_backend_qemu_run_guest() {
 
 	ssh-keygen -q -t ed25519 -N "" -f "$l_identity_path" >/dev/null ||
 		zxfer_vm_die "Unable to generate temporary SSH key for guest [$l_guest]"
-	zxfer_vm_qemu_render_cloud_init "$l_guest" "$l_seed_dir" "$l_identity_path.pub"
-	case "$l_seed_transport" in
+	zxfer_vm_qemu_render_cloud_init "$l_seed_dir" "$l_identity_path.pub"
+	case "$g_vm_guest_seed_transport" in
 	disk-cidata)
-		zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] building cidata seed image"
+		zxfer_vm_log "==> [$l_guest_display_name] building cidata seed image"
 		zxfer_vm_qemu_create_seed_image "$l_seed_dir" "$l_seed_image_path"
 		;;
 	*)
@@ -888,17 +849,17 @@ zxfer_vm_backend_qemu_run_guest() {
 		;;
 	esac
 
-	qemu-img create -f qcow2 -F "$l_guest_base_format" -b "$l_base_image_path" "$l_overlay_path" >/dev/null ||
+	qemu-img create -f qcow2 -F "$g_vm_guest_base_format" -b "$l_base_image_path" "$l_overlay_path" >/dev/null ||
 		zxfer_vm_die "Failed to create writable overlay for guest [$l_guest]"
-	zxfer_vm_qemu_resize_overlay_if_needed "$l_guest_label/$l_guest_arch" "$l_overlay_path" "$l_guest_min_disk_size"
+	zxfer_vm_qemu_resize_overlay_if_needed "$l_guest_display_name" "$l_overlay_path" "$g_vm_guest_min_disk_size"
 	ZXFER_VM_QEMU_PID_FILE=$(zxfer_vm_join_path "$l_state_dir" "qemu.pid")
 
-	zxfer_vm_qemu_start_guest "$l_guest_arch" "$l_accel" "$l_http_port" "$l_ssh_port" \
-		"$l_overlay_path" "$l_artifact_dir" "$l_seed_transport" "$l_seed_image_path" ||
+	zxfer_vm_qemu_start_guest "$g_vm_guest_arch" "$l_accel" "$l_http_port" "$l_ssh_port" \
+		"$l_overlay_path" "$l_artifact_dir" "$g_vm_guest_seed_transport" "$l_seed_image_path" ||
 		zxfer_vm_die "Failed to start qemu guest [$l_guest]"
 
-	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] waiting for SSH readiness on 127.0.0.1:$l_ssh_port"
-	if ! zxfer_vm_qemu_wait_for_ssh 127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" "$l_ssh_ready_timeout_seconds" "$l_guest_label/$l_guest_arch" "$l_ssh_ready_probe_count"; then
+	zxfer_vm_log "==> [$l_guest_display_name] waiting for SSH readiness on 127.0.0.1:$l_ssh_port"
+	if ! zxfer_vm_qemu_wait_for_ssh 127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" "$g_vm_guest_ssh_ready_timeout_seconds" "$l_guest_display_name" "$g_vm_guest_ssh_ready_probe_count"; then
 		ZXFER_VM_QEMU_PRESERVE_STATE=$ZXFER_VM_PRESERVE_FAILED_GUESTS
 		if [ "${ZXFER_VM_QEMU_WAIT_FAILURE_REASON:-}" = "qemu_exited" ]; then
 			zxfer_vm_die "Guest [$l_guest] qemu exited before SSH readiness; inspect $l_artifact_dir/serial.log"
@@ -906,17 +867,17 @@ zxfer_vm_backend_qemu_run_guest() {
 		zxfer_vm_die "Timed out waiting for guest [$l_guest] SSH readiness; inspect $l_artifact_dir/serial.log"
 	fi
 
-	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] copying repository into guest"
+	zxfer_vm_log "==> [$l_guest_display_name] copying repository into guest"
 	zxfer_vm_qemu_prepare_remote_ssh_step \
 		127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
-		"$l_guest_label/$l_guest_arch" "copying the repository" ||
+		"$l_guest_display_name" "copying the repository" ||
 		zxfer_vm_die "Guest [$l_guest] did not accept SSH on its pinned host key before copying the repository"
 	zxfer_vm_qemu_copy_repo_to_guest "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" "$l_remote_dir"
 	if [ "$ZXFER_VM_TEST_LAYER" = "perf-compare" ]; then
-		zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] copying baseline ref ${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final} into guest"
+		zxfer_vm_log "==> [$l_guest_display_name] copying baseline ref ${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final} into guest"
 		zxfer_vm_qemu_prepare_remote_ssh_step \
 			127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
-			"$l_guest_label/$l_guest_arch" "copying the performance baseline" ||
+			"$l_guest_display_name" "copying the performance baseline" ||
 			zxfer_vm_die "Guest [$l_guest] did not accept SSH on its pinned host key before copying the performance baseline"
 		zxfer_vm_qemu_copy_ref_to_guest \
 			"$l_ssh_port" \
@@ -926,7 +887,7 @@ zxfer_vm_backend_qemu_run_guest() {
 			"${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final}"
 	fi
 	if [ "$ZXFER_VM_STREAM_GUEST_OUTPUT" != "1" ]; then
-		zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] guest logs: $l_artifact_dir/prepare.stdout, $l_artifact_dir/prepare.stderr, $l_artifact_dir/harness.stdout, $l_artifact_dir/harness.stderr"
+		zxfer_vm_log "==> [$l_guest_display_name] guest logs: $l_artifact_dir/prepare.stdout, $l_artifact_dir/prepare.stderr, $l_artifact_dir/harness.stdout, $l_artifact_dir/harness.stderr"
 	fi
 
 	cat <<EOF >"$l_artifact_dir/prepare-guest.sh"
@@ -936,10 +897,10 @@ $l_prepare_script
 EOF
 	chmod 700 "$l_artifact_dir/prepare-guest.sh"
 
-	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] running guest preparation"
+	zxfer_vm_log "==> [$l_guest_display_name] running guest preparation"
 	zxfer_vm_qemu_prepare_remote_ssh_step \
 		127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
-		"$l_guest_label/$l_guest_arch" "guest preparation" ||
+		"$l_guest_display_name" "guest preparation" ||
 		zxfer_vm_die "Guest [$l_guest] did not accept SSH on its pinned host key before guest preparation"
 	if zxfer_vm_qemu_run_remote_script "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
 		"$l_artifact_dir/prepare-guest.sh" "$l_artifact_dir/prepare.stdout" "$l_artifact_dir/prepare.stderr"; then
@@ -957,10 +918,10 @@ $l_test_script
 EOF
 	chmod 700 "$l_artifact_dir/run-harness.sh"
 
-	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] running $(zxfer_vm_test_layer_run_label "$ZXFER_VM_TEST_LAYER")"
+	zxfer_vm_log "==> [$l_guest_display_name] running $(zxfer_vm_test_layer_run_label "$ZXFER_VM_TEST_LAYER")"
 	zxfer_vm_qemu_prepare_remote_ssh_step \
 		127.0.0.1 "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
-		"$l_guest_label/$l_guest_arch" "the selected guest test layer" ||
+		"$l_guest_display_name" "the selected guest test layer" ||
 		zxfer_vm_die "Guest [$l_guest] did not accept SSH on its pinned host key before the selected guest test layer"
 	if zxfer_vm_qemu_run_remote_script "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
 		"$l_artifact_dir/run-harness.sh" "$l_artifact_dir/harness.stdout" "$l_artifact_dir/harness.stderr"; then
@@ -968,7 +929,7 @@ EOF
 	else
 		l_status=$?
 		zxfer_vm_report_guest_command_failure \
-			"$l_guest_label/$l_guest_arch" \
+			"$l_guest_display_name" \
 			"$(zxfer_vm_test_layer_run_label "$ZXFER_VM_TEST_LAYER")" \
 			"$l_status" \
 			"$l_artifact_dir/harness.stdout" \
@@ -976,7 +937,7 @@ EOF
 		ZXFER_VM_QEMU_PRESERVE_STATE=$ZXFER_VM_PRESERVE_FAILED_GUESTS
 	fi
 
-	zxfer_vm_log "==> [$l_guest_label/$l_guest_arch] collecting guest artifacts"
+	zxfer_vm_log "==> [$l_guest_display_name] collecting guest artifacts"
 	zxfer_vm_qemu_collect_remote_artifacts "$l_ssh_port" "$l_state_dir/known_hosts" "$l_identity_path" \
 		"$l_remote_artifact_dir" "$l_artifact_dir"
 

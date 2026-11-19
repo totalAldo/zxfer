@@ -187,16 +187,12 @@ test_source_listing_launchers_retain_commands_across_producer_rendering() {
 			zxfer_build_source_snapshot_list_cmd() {
 				g_zxfer_shell_command_result="printf snapshot"
 			}
-			zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
+			zxfer_start_source_snapshot_producer() {
 				zxfer_render_shell_command_from_argv ignored scratch
-				zxfer_execute_rendered_shell_command "$1"
-			}
-			zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
-				zxfer_render_shell_command_from_argv ignored scratch
-				zxfer_execute_rendered_shell_command "$1"
+				zxfer_execute_rendered_shell_command "$2"
 			}
 			if [ "$listing_mode" = fast ]; then
-				zxfer_start_fast_recursive_noop_source_discovery out err count
+				zxfer_start_fast_recursive_noop_source_discovery out err
 			else
 				zxfer_write_source_snapshot_list_to_file out err sorted
 			fi
@@ -217,10 +213,9 @@ test_source_listing_launchers_account_parallel_by_listing_mode() {
 				output=$(
 					g_option_j_jobs=$listing_jobs
 					g_option_V_very_verbose=$listing_verbose
-					zxfer_execute_source_snapshot_name_list_background_sort_cmd() { return 0; }
-					zxfer_execute_source_snapshot_list_background_cmd_with_sort() { return 0; }
+					zxfer_start_source_snapshot_producer() { return 0; }
 					if [ "$listing_mode" = fast ]; then
-						zxfer_start_fast_recursive_noop_source_discovery out err count
+						zxfer_start_fast_recursive_noop_source_discovery out err
 					else
 						zxfer_write_source_snapshot_list_to_file out err sorted
 					fi >/dev/null
@@ -276,7 +271,7 @@ test_write_source_snapshot_list_to_file_keeps_the_status_of_a_failed_launch() {
 			zxfer_build_source_snapshot_list_cmd() {
 				g_zxfer_shell_command_result="printf '%s\n' snap"
 			}
-			zxfer_execute_source_snapshot_list_background_cmd_with_sort() {
+			zxfer_start_source_snapshot_producer() {
 				return 32
 			}
 			zxfer_write_source_snapshot_list_to_file "$outfile" "$errfile" "$outfile.sorted"
@@ -305,7 +300,7 @@ status file=33 calls=2" "$output"
 
 # A producer that cannot allocate its status files never starts and keeps
 # the allocation's status: the full listing's group, and the proof listing's
-# first and count status files.
+# listing and optional exclusion-filter status files.
 test_source_snapshot_producers_keep_the_status_of_a_failed_setup() {
 	sorted_file="$TEST_TMPDIR/producer_setup.sorted"
 
@@ -314,8 +309,8 @@ test_source_snapshot_producers_keep_the_status_of_a_failed_setup() {
 			zxfer_create_runtime_artifact_workspace() {
 				return 14
 			}
-			zxfer_execute_source_snapshot_list_background_cmd_with_sort "printf x" \
-				"$TEST_TMPDIR/producer_setup.out" "" "$sorted_file"
+			zxfer_start_source_snapshot_producer full "printf x" \
+				"$sorted_file" "" "$TEST_TMPDIR/producer_setup.out"
 			printf 'records=%s\n' "$?"
 		)
 		for l_setup_case in 1:23 2:57; do
@@ -329,8 +324,8 @@ test_source_snapshot_producers_keep_the_status_of_a_failed_setup() {
 					g_zxfer_runtime_artifact_path_result="$TEST_TMPDIR/producer_setup.$temp_calls"
 					: >"$g_zxfer_runtime_artifact_path_result"
 				}
-				zxfer_execute_source_snapshot_name_list_background_sort_cmd "printf x" \
-					"$sorted_file" "" "$TEST_TMPDIR/producer_setup.count"
+				g_option_x_exclude_datasets=skip
+				zxfer_start_source_snapshot_producer fast "printf x" "$sorted_file"
 				printf 'names %s=%s\n' "$FAIL_AT" "$?"
 			)
 		done
@@ -350,12 +345,12 @@ test_source_snapshot_producers_preserve_spawn_failure_without_registering_stale_
 			zxfer_spawn_background_shell() { return 79; }
 			zxfer_register_cleanup_pid() { printf 'registered stale PID'; }
 			if [ "$producer" = names ]; then
-				zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				zxfer_start_source_snapshot_producer fast \
 					'printf x' "$TEST_TMPDIR/failed-spawn.sorted"
 			else
-				zxfer_execute_source_snapshot_list_background_cmd_with_sort \
-					'printf x' "$TEST_TMPDIR/failed-spawn.out" "" \
-					"$TEST_TMPDIR/failed-spawn.sorted"
+				zxfer_start_source_snapshot_producer full \
+					'printf x' "$TEST_TMPDIR/failed-spawn.sorted" "" \
+					"$TEST_TMPDIR/failed-spawn.out"
 			fi
 		) || status=$?
 
@@ -366,7 +361,7 @@ test_source_snapshot_producers_preserve_spawn_failure_without_registering_stale_
 }
 
 # Exercise the rendered pipelines themselves: full discovery keeps creation
-# order, the proof filters before counting, and the first failed stage wins
+# order, the proof filters before sorting, and the first failed stage wins
 # even if sort also fails. Paths containing shell syntax stay literal.
 test_source_snapshot_producers_preserve_stage_order_and_failure_precedence() {
 	producer_path="$TEST_TMPDIR/producer ' \$(touch forbidden)"
@@ -388,17 +383,10 @@ test_source_snapshot_producers_preserve_stage_order_and_failure_precedence() {
 		command sort "$@"
 		return "$SORT_STATUS"
 	}
-	cat() {
-		command cat "$@"
-		return "$CAT_STATUS"
-	}
-	for producer_case in full:0:0:0:0:0 full:37:38:0:39:37 \
-		full:0:38:0:39:38 full:0:0:0:39:39 \
-		fast:0:0:0:0:0 fast:37:38:40:39:37 \
-		fast:0:38:40:39:38 fast:0:0:40:39:40 \
-		fast:0:0:0:39:39 empty:0:0:40:0:0; do
+	for producer_case in full:0:0:0:0 full:37:38:39:37 full:0:38:39:38 full:0:0:39:39 \
+		fast:0:0:0:0 fast:37:38:39:37 fast:0:38:39:38 fast:0:0:39:39 empty:0:0:0:0; do
 		(
-			IFS=: read -r MODE LIST_STATUS FILTER_STATUS CAT_STATUS SORT_STATUS EXPECTED <<EOF
+			IFS=: read -r MODE LIST_STATUS FILTER_STATUS SORT_STATUS EXPECTED <<EOF
 $producer_case
 EOF
 			export FILTER_STATUS
@@ -407,11 +395,11 @@ EOF
 			producer_cmd="printf '%s\n' 'tank/src@z${ZXFER_TAB}2' 'tank/skip@a${ZXFER_TAB}1' 'tank/src@a${ZXFER_TAB}0'; exit $LIST_STATUS"
 			[ "$MODE" != empty ] || producer_cmd=:
 			if [ "$MODE" = full ]; then
-				zxfer_execute_source_snapshot_list_background_cmd_with_sort \
-					"$producer_cmd" "$producer_path.raw" "" "$producer_path.sorted"
+				zxfer_start_source_snapshot_producer full \
+					"$producer_cmd" "$producer_path.sorted" "" "$producer_path.raw"
 			else
-				zxfer_execute_source_snapshot_name_list_background_sort_cmd \
-					"$producer_cmd" "$producer_path.sorted" "" "$producer_path.count"
+				zxfer_start_source_snapshot_producer fast \
+					"$producer_cmd" "$producer_path.sorted"
 			fi
 			(eval "$RENDERED_PRODUCER")
 			printf 'status=%s\n' "$?"
@@ -419,8 +407,6 @@ EOF
 			if [ "$MODE" = full ]; then
 				printf 'raw:\n'
 				command cat "$producer_path.raw"
-			else
-				printf 'count=%s\n' "$(command cat "$producer_path.count")"
 			fi
 		) >"$TEST_TMPDIR/producer-result"
 		output=$(command cat "$TEST_TMPDIR/producer-result")
@@ -435,16 +421,15 @@ tank/skip@a	1
 tank/src@a	0"
 			;;
 		fast:*)
-			assertContains "The proof counts the filtered records." "$output" count=1
 			assertContains "The proof byte-sorts the retained records." "$output" "tank/src@a	0
 tank/src@z	2"
 			assertNotContains "The proof filters before sort." "$output" tank/skip
 			;;
-		empty:*) assertContains "An empty stream bypasses cat and publishes absence." "$output" count=0 ;;
+		empty:*) assertEquals "An empty stream leaves the sorted file empty." "status=0" "$output" ;;
 		esac
 	done
-	unset -f cat sort tee
-	zxfer_source_runtime_modules_through zxfer_snapshot_discovery.sh
+	unset -f sort tee
+	zxfer_source_modules_for_tests "$ZXFER_ROOT"
 }
 
 # A producer whose cleanup registration fails is stopped at once: TERM, then
@@ -470,11 +455,11 @@ test_source_snapshot_producers_stop_an_unregistered_producer_and_its_descendants
 				[ "$3" = TERM ]
 			}
 			if [ "$producer_mode" = names ]; then
-				zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+				zxfer_start_source_snapshot_producer fast \
 					'printf x' "$sorted_file" "$errfile"
 			else
-				zxfer_execute_source_snapshot_list_background_cmd_with_sort \
-					'printf x' "$outfile" "$errfile" "$sorted_file"
+				zxfer_start_source_snapshot_producer full \
+					'printf x' "$sorted_file" "$errfile" "$outfile"
 			fi
 			printf 'status=%s pid=%s\n' "$?" "$g_last_background_pid"
 			zxfer_find_cleanup_pid_record 12345
@@ -511,7 +496,7 @@ test_source_snapshot_producers_stop_an_unregistered_producer_and_its_descendants
 				done
 				return 1
 			}
-			zxfer_execute_source_snapshot_name_list_background_sort_cmd \
+			zxfer_start_source_snapshot_producer fast \
 				"$producer_cmd" "$sorted_file" "$errfile"
 			printf 'status=%s pid=<%s> records=<%s>\n' \
 				"$?" "$g_last_background_pid" "$g_zxfer_cleanup_pid_records"
@@ -551,31 +536,4 @@ second line
 	assertNotEquals "A capture that cannot be opened for reading should fail." 0 "$?"
 	assertEquals "A failed read should publish no stale or partial capture." \
 		"" "$g_zxfer_runtime_artifact_read_result"
-}
-
-test_read_snapshot_discovery_status_file_defaults_and_validates() {
-	status_file="$TEST_TMPDIR/snapshot_discovery_status.out"
-	# file contents ("-" for none, "empty" for an empty file)|default|status|result
-	while IFS='|' read -r l_contents l_default l_status l_result; do
-		rm -f "$status_file"
-		case $l_contents in
-		-) ;;
-		empty) : >"$status_file" ;;
-		*) printf '%s\n' "$l_contents" >"$status_file" ;;
-		esac
-		if [ -n "$l_default" ]; then
-			zxfer_read_snapshot_discovery_status_file "$status_file" "$l_default"
-		else
-			zxfer_read_snapshot_discovery_status_file "$status_file"
-		fi
-		assertEquals "The reader's status [file:$l_contents default:$l_default]." "$l_status" "$?"
-		assertEquals "The published status [file:$l_contents default:$l_default]." \
-			"$l_result" "$g_zxfer_snapshot_discovery_status_file_result"
-	done <<'EOF_STATUS'
--|37|0|37
-empty|37|0|37
-7|37|0|7
-bad|37|1|bad
--||0|1
-EOF_STATUS
 }

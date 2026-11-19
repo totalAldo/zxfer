@@ -73,11 +73,12 @@ EOF
 
 test_reverse_file_lines_reverses_small_and_large_inputs() {
 	input_file="$TEST_TMPDIR/reverse_file_lines_input.txt"
-	printf '%s\n' "tank/src@snap-a" "tank/src@snap-b" "tank/src@snap-million" \
+	printf '%s\n' "tank/src@snap-a" "" "tank/src@snap:b" "tank/src@snap-million" \
 		"tank/src@snap-c" >"$input_file"
 	expected="tank/src@snap-c
 tank/src@snap-million
-tank/src@snap-b
+tank/src@snap:b
+
 tank/src@snap-a"
 
 	# No limit uses the linear awk reverse; a limit below the line count, or
@@ -116,14 +117,19 @@ EOF
 			printf 'tempfile=%s\n' "$?"
 		)
 		(
-			cat() {
-				if [ "$1" = "-n" ]; then
-					return 1
-				fi
-				command cat "$@"
-			}
+			grep() { return 44; }
 			zxfer_reverse_file_lines "$input_file" 1
 			printf 'numbering=%s\n' "$?"
+		)
+		(
+			sort() { return 42; }
+			zxfer_reverse_file_lines "$input_file" 1
+			printf 'sort=%s\n' "$?"
+		)
+		(
+			cut() { return 43; }
+			zxfer_reverse_file_lines "$input_file" 1
+			printf 'cut=%s\n' "$?"
 		)
 	)
 
@@ -132,7 +138,10 @@ EOF
 	assertContains "The sort fallback should preserve temp-file allocation failures." \
 		"$output" "tempfile=45"
 	assertContains "The sort fallback should fail cleanly when numbering the file fails." \
-		"$output" "numbering=1"
+		"$output" "numbering=44"
+	assertContains "The fallback should propagate a failed sort." "$output" "sort=42"
+	assertContains "The fallback should propagate a failed cut." "$output" "cut=43"
+	assertNotContains "A failed sort must not publish snapshot records." "$output" "tank/src@"
 }
 
 test_failed_source_discovery_wait_stops_descendants_after_group_leader_exit() {
@@ -311,18 +320,18 @@ test_snapshot_discovery_need_helpers_cover_recursive_shortcuts() {
 			g_option_U_skip_unsupported_properties=0
 
 			g_recursive_source_list="tank/src"
-			zxfer_snapshot_discovery_needs_destination_dataset_inventory
+			zxfer_pass_has_replication_work
 			printf 'dest_source=%s\n' "$?"
 			g_recursive_source_list=""
 			g_option_o_override_property=""
 			g_option_d_delete_destination_snapshots=1
 			g_recursive_destination_extra_dataset_list="tank/src"
-			zxfer_snapshot_discovery_needs_destination_dataset_inventory
+			zxfer_pass_has_replication_work
 			printf 'dest_delete=%s\n' "$?"
 			g_recursive_destination_extra_dataset_list=""
 			g_option_d_delete_destination_snapshots=0
 			g_option_P_transfer_property=1
-			zxfer_snapshot_discovery_needs_destination_dataset_inventory
+			zxfer_pass_has_replication_work
 			printf 'dest_props=%s\n' "$?"
 		)
 	)
@@ -342,16 +351,12 @@ test_snapshot_discovery_need_helpers_cover_recursive_shortcuts() {
 }
 
 test_set_g_recursive_source_list_reports_missing_presorted_source_sidecar() {
-	source_tmp="$TEST_TMPDIR/source_presorted_missing_raw.txt"
 	dest_tmp="$TEST_TMPDIR/dest_presorted_missing.txt"
 	presorted_tmp="$TEST_TMPDIR/source_presorted_missing.txt"
-	: >"$source_tmp"
 	: >"$dest_tmp"
 	rm -f "$presorted_tmp"
 
-	zxfer_test_capture_subshell "
-		zxfer_set_g_recursive_source_list '$source_tmp' '$dest_tmp' '$presorted_tmp'
-	"
+	zxfer_test_capture_subshell zxfer_set_g_recursive_source_list "$presorted_tmp" "$dest_tmp"
 
 	assertEquals "Recursive planning should fail closed when the advertised sorted source sidecar is missing." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -447,11 +452,12 @@ rm "$2" || exit 7
 printf '1 0 1 0\n'
 EOF
 	chmod +x "$fake_awk"
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
-		g_cmd_awk='$fake_awk'
+	capture_case() {
+		g_cmd_awk="$fake_awk"
 		g_option_v_verbose=1
-		zxfer_report_recursive_snapshot_delta '$missing_file' '$extra_file'
-	"
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+	}
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_case
 	assertEquals "A delta file lost after counting must fail closed." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "An unreadable delta must report which side failed on stderr." \
 		"$(cat "$stderr_file")" "Failed to read the recursive source snapshot delta."

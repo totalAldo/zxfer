@@ -284,6 +284,8 @@ zxfer_get_temp_file() {
   the order of a module's calls.
 - Stub `src/` functions inside a subshell so the stub cannot leak into later
   cases.
+- Use the capture helpers with command arguments or a scenario function;
+  keep shell programs as ordinary code rather than quoted strings to evaluate.
 - Capture a command's status (`l_run_status=$?`) on the line after it before
   asserting on it. In `assertEquals "... $(cat ERR)" 0 $?`, bash, ksh and zsh
   expand `$?` to the substitution's status, so the check always passes.

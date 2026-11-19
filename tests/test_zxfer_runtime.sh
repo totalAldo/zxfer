@@ -16,10 +16,6 @@ TEST_ORIGINAL_PATH=$PATH
 # shellcheck source=tests/helpers/exec_fixtures.sh
 . "$TESTS_DIR/helpers/exec_fixtures.sh"
 
-# Session owns startup and shutdown composition; source the complete graph for
-# lifecycle tests while runtime-only helpers remain independently testable.
-zxfer_source_runtime_modules_through "zxfer_session.sh"
-
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_runtime"
 	zxfer_test_exec_fixture_one_time_setup
@@ -208,7 +204,7 @@ test_runtime_workspace_partial_failure_preserves_status_and_releases_allocated_p
 		[ ! -e "$artifact" ] || leaked=$((leaked + 1))
 	done
 	unset -f zxfer_get_temp_file
-	zxfer_source_runtime_modules_through "zxfer_replication.sh"
+	zxfer_source_modules_for_tests "$ZXFER_ROOT"
 	assertEquals "A partial family preserves the allocation failure status." 73 "$status"
 	assertEquals "A partial family publishes no group." "" "$group_result"
 	assertEquals "A partial family publishes no stem." "" "$stem_result"
@@ -277,7 +273,7 @@ test_zxfer_register_cleanup_pid_rejects_invalid_self_and_dead_pids() {
 }
 
 test_zxfer_register_cleanup_pid_rejects_a_purpose_that_would_split_a_row() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_runtime_spawn_live_child tracked || exit 1
 		tracked_pid=$g_zxfer_runtime_live_child_pid
 		zxfer_register_cleanup_pid "$tracked_pid" "unit${ZXFER_TAB}helper"
@@ -287,7 +283,8 @@ test_zxfer_register_cleanup_pid_rejects_a_purpose_that_would_split_a_row() {
 		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
 		kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
 		wait "$tracked_pid" 2>/dev/null || true
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 	output=$ZXFER_TEST_CAPTURE_OUTPUT
 
 	assertContains "Registration should fail closed on a purpose with a tab." \
@@ -352,7 +349,7 @@ test_zxfer_abort_cleanup_pid_handles_untracked_and_already_exited_helpers() {
 }
 
 test_zxfer_abort_cleanup_pid_fails_closed_when_signalling_a_live_helper_fails() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_runtime_spawn_live_child tracked || exit 1
 		tracked_pid=$g_zxfer_runtime_live_child_pid
 		zxfer_register_cleanup_pid "$tracked_pid" "unit cleanup helper"
@@ -372,7 +369,8 @@ test_zxfer_abort_cleanup_pid_fails_closed_when_signalling_a_live_helper_fails() 
 		unset -f kill
 		kill -s TERM "$tracked_pid" >/dev/null 2>&1 || true
 		wait "$tracked_pid" 2>/dev/null || true
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 	output=$ZXFER_TEST_CAPTURE_OUTPUT
 
 	assertContains "Aborting should fail closed when the signal cannot be delivered to a live helper." \
@@ -384,7 +382,7 @@ test_zxfer_abort_cleanup_pid_fails_closed_when_signalling_a_live_helper_fails() 
 }
 
 test_zxfer_abort_helpers_treat_exit_during_failed_signal_as_success_without_duplicate_tracking() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		g_zxfer_cleanup_pid_records="701	already tracked helper"
 		kill() {
 			case "$2" in
@@ -416,7 +414,8 @@ test_zxfer_abort_helpers_treat_exit_during_failed_signal_as_success_without_dupl
 		zxfer_abort_cleanup_pid 703 TERM
 		printf "tracked_race_status=%s\n" "$?"
 		printf "tracked_race_records=<%s>\n" "$g_zxfer_cleanup_pid_records"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "A failed signal to an already tracked live direct child should remain an error." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "tracked_status=1"
@@ -433,14 +432,15 @@ test_zxfer_abort_helpers_treat_exit_during_failed_signal_as_success_without_dupl
 }
 
 test_zxfer_cleanup_pid_abort_grace_wait_uses_bounded_default_for_invalid_internal_state() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		g_zxfer_cleanup_pid_abort_grace_seconds=invalid
 		sleep() {
 			printf "sleep:%s\n" "$1"
 		}
 
 		zxfer_cleanup_pid_abort_grace_wait
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Invalid internal grace state should fall back to the bounded two-second delay." \
 		"sleep:2" "$ZXFER_TEST_CAPTURE_OUTPUT"
@@ -449,7 +449,7 @@ test_zxfer_cleanup_pid_abort_grace_wait_uses_bounded_default_for_invalid_interna
 }
 
 test_zxfer_abort_direct_child_pid_tracks_live_child_when_immediate_signal_fails() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_runtime_spawn_live_child child || exit 1
 		child_pid=$g_zxfer_runtime_live_child_pid
 		kill() {
@@ -466,7 +466,8 @@ test_zxfer_abort_direct_child_pid_tracks_live_child_when_immediate_signal_fails(
 		unset -f kill
 		kill -s TERM "$child_pid" >/dev/null 2>&1 || true
 		wait "$child_pid" 2>/dev/null || true
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 	tracked_pid=$(printf '%s\n' "$ZXFER_TEST_CAPTURE_OUTPUT" | sed -n 's/^tracked=//p')
 
 	assertContains "A failed immediate direct-child signal should remain a cleanup failure." \
@@ -497,7 +498,7 @@ test_zxfer_abort_direct_child_pid_rejects_invalid_self_and_dead_pids() {
 }
 
 test_zxfer_abort_direct_child_pid_still_signals_with_a_purpose_that_would_split_a_row() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_runtime_spawn_live_child child || exit 1
 		child_pid=$g_zxfer_runtime_live_child_pid
 		zxfer_abort_direct_child_pid "$child_pid" TERM "unit${ZXFER_LF}direct helper"
@@ -505,7 +506,8 @@ test_zxfer_abort_direct_child_pid_still_signals_with_a_purpose_that_would_split_
 		printf "records=<%s>\n" "$g_zxfer_cleanup_pid_records"
 		wait "$child_pid" 2>/dev/null
 		[ "$?" -gt 128 ] && printf "%s\n" "child=signalled"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "A multi-line purpose must not stop the abort from signalling." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=0"
@@ -516,7 +518,7 @@ test_zxfer_abort_direct_child_pid_still_signals_with_a_purpose_that_would_split_
 }
 
 test_zxfer_kill_registered_cleanup_pids_reaps_successes_and_preserves_failures() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		set +e
 		g_zxfer_cleanup_pid_abort_grace_seconds=0
 		g_zxfer_cleanup_pid_records="401	first helper
@@ -536,7 +538,8 @@ test_zxfer_kill_registered_cleanup_pids_reaps_successes_and_preserves_failures()
 		printf "status=%s\n" "$?"
 		printf "message=%s\n" "$g_zxfer_cleanup_pid_abort_failure_message"
 		printf "remaining=<%s>\n" "$g_zxfer_cleanup_pid_records"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 	output=$ZXFER_TEST_CAPTURE_OUTPUT
 
 	assertContains "Cleanup-helper shutdown should preserve the first abort failure status." \
@@ -809,7 +812,7 @@ test_zxfer_find_default_tmpdir_skips_missing_and_unsafe_candidates() {
 }
 
 test_zxfer_run_tmp_root_safe_shape_rejects_untrusted_parent_relationships() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		g_zxfer_owned_run_tmp_root="/tmp/zxfer.$$.owned"
 		g_zxfer_owned_run_tmp_root_parent="relative-parent"
 		zxfer_run_tmp_root_has_safe_owned_shape "$g_zxfer_owned_run_tmp_root"
@@ -824,7 +827,8 @@ test_zxfer_run_tmp_root_safe_shape_rejects_untrusted_parent_relationships() {
 		g_zxfer_owned_run_tmp_root_parent="/tmp"
 		zxfer_run_tmp_root_has_safe_owned_shape "$g_zxfer_owned_run_tmp_root"
 		printf "wrong_parent=%s\n" "$?"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Whole-root cleanup should reject a relative recorded parent." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "relative_parent=1"
@@ -836,20 +840,20 @@ test_zxfer_run_tmp_root_safe_shape_rejects_untrusted_parent_relationships() {
 
 test_zxfer_ensure_run_tmp_root_removes_an_allocation_whose_identity_cannot_be_recorded() {
 	candidate_root="$TEST_TMPDIR/zxfer.$$.identity-failure"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		g_zxfer_run_tmp_root=""
 		g_zxfer_owned_run_tmp_root=""
 		g_zxfer_owned_run_tmp_root_parent=""
 		g_zxfer_owned_run_tmp_root_identity=""
 		zxfer_try_get_effective_tmpdir() {
-			g_zxfer_effective_tmpdir="'"$TEST_TMPDIR"'"
+			g_zxfer_effective_tmpdir="$TEST_TMPDIR"
 		}
 		zxfer_validate_temp_root_candidate() {
-			g_zxfer_temp_root_candidate_result="'"$TEST_TMPDIR"'"
+			g_zxfer_temp_root_candidate_result="$TEST_TMPDIR"
 		}
 		mktemp() {
-			mkdir "'"$candidate_root"'" || return 1
-			printf "%s\n" "'"$candidate_root"'"
+			mkdir "$candidate_root" || return 1
+			printf "%s\n" "$candidate_root"
 		}
 		zxfer_get_private_directory_security_record() {
 			return 1
@@ -857,12 +861,13 @@ test_zxfer_ensure_run_tmp_root_removes_an_allocation_whose_identity_cannot_be_re
 
 		zxfer_ensure_run_tmp_root
 		printf "status=%s\n" "$?"
-		if [ -e "'"$candidate_root"'" ]; then
+		if [ -e "$candidate_root" ]; then
 			printf "candidate_exists=yes\n"
 		else
 			printf "candidate_exists=no\n"
 		fi
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Run-root allocation should fail closed when its object identity cannot be recorded." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=1"
@@ -1111,19 +1116,20 @@ test_zxfer_ensure_run_tmp_root_refuses_a_mktemp_answer_outside_its_template() {
 	foreign_dir="$TEST_TMPDIR/operator-owned-dir.$$"
 	mkdir -m 700 "$foreign_dir"
 	: >"$foreign_dir/must-survive"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_discard_runtime_cleanup_state
 		zxfer_try_get_effective_tmpdir() {
-			g_zxfer_effective_tmpdir="'"$TEST_TMPDIR"'"
+			g_zxfer_effective_tmpdir="$TEST_TMPDIR"
 		}
 		mktemp() {
-			printf "%s\n" "'"$foreign_dir"'"
+			printf "%s\n" "$foreign_dir"
 		}
 		zxfer_ensure_run_tmp_root
 		printf "status=%s root=<%s> owned=<%s> parent=<%s>\n" "$?" \
 			"$g_zxfer_run_tmp_root" "$g_zxfer_owned_run_tmp_root" \
 			"$g_zxfer_owned_run_tmp_root_parent"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Run-root creation should refuse a path outside the zxfer.<pid>.* template and record nothing." \
 		"status=1 root=<> owned=<> parent=<>" "$ZXFER_TEST_CAPTURE_OUTPUT"
@@ -1133,19 +1139,20 @@ test_zxfer_ensure_run_tmp_root_refuses_a_mktemp_answer_outside_its_template() {
 
 test_zxfer_ensure_run_tmp_root_rejects_a_root_that_is_not_mode_0700() {
 	candidate_root="$TEST_TMPDIR/zxfer.$$.wide-mode"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_discard_runtime_cleanup_state
 		zxfer_try_get_effective_tmpdir() {
-			g_zxfer_effective_tmpdir="'"$TEST_TMPDIR"'"
+			g_zxfer_effective_tmpdir="$TEST_TMPDIR"
 		}
 		mktemp() {
-			mkdir -m 755 "'"$candidate_root"'" || return 1
-			printf "%s\n" "'"$candidate_root"'"
+			mkdir -m 755 "$candidate_root" || return 1
+			printf "%s\n" "$candidate_root"
 		}
 		zxfer_ensure_run_tmp_root
 		printf "status=%s root=<%s>\n" "$?" "$g_zxfer_run_tmp_root"
-		[ -e "'"$candidate_root"'" ] && printf "%s\n" "candidate=present"
-	'
+		[ -e "$candidate_root" ] && printf "%s\n" "candidate=present"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Run-root allocation should fail closed when the new root is not private." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=1 root=<>"
@@ -1155,14 +1162,14 @@ test_zxfer_ensure_run_tmp_root_rejects_a_root_that_is_not_mode_0700() {
 
 test_zxfer_ensure_run_tmp_root_accepts_special_bits_in_front_of_mode_0700() {
 	candidate_root="$TEST_TMPDIR/zxfer.$$.setgid-mode"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_discard_runtime_cleanup_state
 		zxfer_try_get_effective_tmpdir() {
-			g_zxfer_effective_tmpdir="'"$TEST_TMPDIR"'"
+			g_zxfer_effective_tmpdir="$TEST_TMPDIR"
 		}
 		mktemp() {
-			mkdir -m 700 "'"$candidate_root"'" || return 1
-			printf "%s\n" "'"$candidate_root"'"
+			mkdir -m 700 "$candidate_root" || return 1
+			printf "%s\n" "$candidate_root"
 		}
 		zxfer_get_private_directory_security_record() {
 			g_zxfer_private_directory_record_result="2${ZXFER_TAB}0${ZXFER_TAB}2700"
@@ -1171,8 +1178,9 @@ test_zxfer_ensure_run_tmp_root_accepts_special_bits_in_front_of_mode_0700() {
 		printf "status=%s root=<%s>\n" "$?" "$g_zxfer_run_tmp_root"
 		zxfer_run_tmp_root_is_current_private_dir "$g_zxfer_run_tmp_root"
 		printf "current=%s\n" "$?"
-		rmdir "'"$candidate_root"'"
-	'
+		rmdir "$candidate_root"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "A 0700 root with a GNU-reported setgid bit (2700) should be accepted." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=0 root=<$candidate_root>"
@@ -1531,14 +1539,11 @@ test_runtime_artifact_reuse_preserves_allocation_failure_status_and_clears_resul
 		"status=47 path=<>" "$output"
 }
 
-# zxfer-test-fragment: suites/zxfer_runtime_tmpdir_tests.sh
 # shellcheck source=tests/suites/zxfer_runtime_tmpdir_tests.sh
 . "$TESTS_DIR/suites/zxfer_runtime_tmpdir_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_runtime.sh" \
-		"$TESTS_DIR/suites/zxfer_runtime_tmpdir_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

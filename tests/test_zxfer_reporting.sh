@@ -15,8 +15,6 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/helpers/fake_tool_fixtures.sh
 . "$TESTS_DIR/helpers/fake_tool_fixtures.sh"
 
-zxfer_source_runtime_modules_through "zxfer_reporting.sh"
-
 # The usage throws print this after their message; the throw case looks for it.
 zxfer_usage() {
 	printf '%s\n' "usage: zxfer (usage output)"
@@ -168,6 +166,17 @@ V_last=<[redacted]>
 unsafe_last=<'zfs' 'get'>" "$output"
 }
 
+test_report_escape_preserves_each_newline_and_returns_awk_status() {
+	assertEquals 'one\ntwo\n\n\n' \
+		"$(zxfer_escape_report_value "one${ZXFER_LF}two${ZXFER_LF}${ZXFER_LF}${ZXFER_LF}")"
+	assertEquals '\n\n' "$(zxfer_escape_report_value "$ZXFER_LF$ZXFER_LF")"
+	(
+		g_cmd_awk=false
+		zxfer_escape_report_value "$ZXFER_LF"
+	)
+	assertEquals "A failed escape must return the awk status." 1 "$?"
+}
+
 test_zxfer_render_failure_report_escapes_raw_control_bytes_in_unsafe_mode() {
 	esc=$(printf '\033')
 	bell=$(printf '\007')
@@ -230,11 +239,12 @@ test_throw_helpers_exit_with_the_requested_status_and_keep_an_earlier_class() {
 	stdout_file="$TEST_TMPDIR/throw.stdout"
 	stderr_file="$TEST_TMPDIR/throw.stderr"
 
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" '
+	capture_case() {
 		zxfer_set_failure_class dependency
 		trap "printf \"class=%s message=%s\n\" \"\$g_zxfer_failure_class\" \"\$g_zxfer_failure_message\" >&2" EXIT
 		zxfer_throw_error "missing tool" 3
-	'
+	}
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_case
 
 	assertEquals "zxfer_throw_error should exit with the requested status." 3 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertEquals "zxfer_throw_error should not write to stdout." "" "$(cat "$stdout_file")"
@@ -242,10 +252,11 @@ test_throw_helpers_exit_with_the_requested_status_and_keep_an_earlier_class() {
 		"missing tool
 class=dependency message=missing tool" "$(cat "$stderr_file")"
 
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" '
+	capture_case() {
 		trap - EXIT INT TERM HUP QUIT
 		zxfer_throw_error_with_usage "boom with usage" 3
-	'
+	}
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_case
 
 	assertEquals "zxfer_throw_error_with_usage should preserve the requested exit status." \
 		3 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -255,13 +266,14 @@ class=dependency message=missing tool" "$(cat "$stderr_file")"
 	assertContains "zxfer_throw_error_with_usage should print usage to stderr." \
 		"$(cat "$stderr_file")" "usage: zxfer (usage output)"
 
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" '
+	capture_case() {
 		zxfer_emit_failure_report() {
 			printf "class=%s message=<%s>\n" "$g_zxfer_failure_class" "$g_zxfer_failure_message" >&2
 		}
 		trap "zxfer_emit_failure_report \$?" EXIT
 		zxfer_throw_error_with_usage ""
-	'
+	}
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_case
 
 	assertEquals "zxfer_throw_error_with_usage should default to exit status 1." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertNotContains "A blank message should not print an Error: line." \
@@ -409,18 +421,13 @@ test_zxfer_report_quoting_renders_invalid_multibyte_bytes_under_utf8() {
 	assertEquals "Rendering a printable-looking invalid UTF-8 token should not warn." "" "$fast_stderr"
 }
 
-# zxfer-test-fragment: suites/zxfer_reporting_output_tests.sh
 # shellcheck source=tests/suites/zxfer_reporting_output_tests.sh
 . "$TESTS_DIR/suites/zxfer_reporting_output_tests.sh"
-# zxfer-test-fragment: suites/zxfer_reporting_error_log_tests.sh
 # shellcheck source=tests/suites/zxfer_reporting_error_log_tests.sh
 . "$TESTS_DIR/suites/zxfer_reporting_error_log_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_reporting.sh" \
-		"$TESTS_DIR/suites/zxfer_reporting_output_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_reporting_error_log_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

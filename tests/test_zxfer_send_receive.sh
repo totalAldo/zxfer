@@ -25,10 +25,6 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_send_receive"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	if zxfer_test_running_test_is_in "$TESTS_DIR/suites/zxfer_send_receive_jobs_tests.sh"; then
 		zxfer_test_send_job_fixture_setup
@@ -506,14 +502,11 @@ test_zfs_send_receive_propagates_background_spawn_failure() {
 		"Failed to start the send/receive job for [tank/a@new -> backup/a]." "$output"
 }
 
-# zxfer-test-fragment: suites/zxfer_send_receive_jobs_tests.sh
 # shellcheck source=tests/suites/zxfer_send_receive_jobs_tests.sh
 . "$TESTS_DIR/suites/zxfer_send_receive_jobs_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_send_receive.sh" \
-		"$TESTS_DIR/suites/zxfer_send_receive_jobs_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

@@ -78,8 +78,7 @@ test_remote_target_discovery_succeeds_with_very_verbose() {
 	export MOCK_SSH_LOG="$SSH_LOG"
 
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -V -O localhost -T localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$FIXTURE_DIR/noop" -V -O localhost -T localhost
 	l_remote_noop_status=$?
 	unset MOCK_SSH_LOG
 
@@ -111,8 +110,7 @@ test_remote_origin_pull_noop_opens_master_first_and_probes_once() {
 	export MOCK_SSH_LOG="$SSH_LOG"
 
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$FIXTURE_DIR/noop" -O localhost
 	l_pull_noop_status=$?
 	unset MOCK_SSH_LOG
 
@@ -142,8 +140,7 @@ test_remote_target_push_noop_opens_master_first_and_probes_once() {
 	export MOCK_SSH_LOG="$SSH_LOG"
 
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -T localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$FIXTURE_DIR/noop" -T localhost
 	l_push_noop_status=$?
 	unset MOCK_SSH_LOG
 
@@ -176,8 +173,7 @@ test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 	export MOCK_SSH_LOG="$SSH_LOG"
 
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -T 127.0.0.1 -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$FIXTURE_DIR/noop" -O localhost -T 127.0.0.1
 	l_both_noop_status=$?
 
 	assertEquals "-O -T no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
@@ -194,8 +190,7 @@ test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 
 	: >"$SSH_LOG"
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -T localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$FIXTURE_DIR/noop" -O localhost -T localhost
 	l_same_noop_status=$?
 	unset MOCK_SSH_LOG
 
@@ -236,8 +231,7 @@ test_remote_noop_under_a_long_tmpdir_removes_its_short_socket_directory() {
 		PATH=$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")
 		MOCK_SSH_LOG=$SSH_LOG
 		export TMPDIR PATH MOCK_SSH_LOG
-		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -R \
-			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$FIXTURE_DIR/noop" -O localhost
 	)
 	l_long_tmpdir_status=$?
 	l_long_socket=$(awk '$1 == "-M" || index($0, " -M -S ") {
@@ -288,8 +282,7 @@ planning_run_remote_target_push() {
 	MOCK_SSH_LOG=$SSH_LOG
 	export MOCK_SSH_LOG
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$STATE_DIR" -T localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$STATE_DIR" -T localhost
 	PLANNING_RUN_STATUS=$?
 	unset MOCK_SSH_LOG
 }
@@ -418,8 +411,7 @@ EOF
 	export MOCK_SSH_LOG="$SSH_LOG"
 
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/incremental" -O localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$FIXTURE_DIR/incremental" -O localhost
 	l_master_failure_status=$?
 	unset MOCK_SSH_LOG
 
@@ -448,8 +440,7 @@ test_remote_invalid_ssh_policy_fails_at_startup_without_very_verbose() {
 	export ZXFER_SSH_USER_KNOWN_HOSTS_FILE=relative_known_hosts
 
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/noop" -O localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$FIXTURE_DIR/noop" -O localhost
 	l_invalid_policy_status=$?
 	unset MOCK_SSH_LOG ZXFER_SSH_USER_KNOWN_HOSTS_FILE
 
@@ -474,8 +465,7 @@ test_remote_origin_pull_incremental_opens_master_once() {
 	export MOCK_SSH_LOG="$SSH_LOG"
 
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$FIXTURE_DIR/incremental" -O localhost -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$FIXTURE_DIR/incremental" -O localhost
 	l_pull_incr_status=$?
 	unset MOCK_SSH_LOG
 
@@ -517,14 +507,13 @@ test_remote_target_property_pass_reads_destination_properties_over_ssh() {
 	export MOCK_SSH_LOG="$SSH_LOG"
 
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
-		planning_run_zxfer "$STATE_DIR" -T localhost -P -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$STATE_DIR" -T localhost -P
 	l_remote_props_status=$?
 	unset MOCK_SSH_LOG
 
 	assertEquals "-T -P no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
 		0 "$l_remote_props_status"
-	planning_assert_property_reads_routed_by_side
+	planning_assert_property_reads_routed_by_side T
 	planning_assert_no_mutations
 	planning_assert_no_send_receive
 }

@@ -229,7 +229,7 @@ function store_row(payload,    row, file) {
 # dataset's native properties before its user properties, so creating a user
 # property (the userprop permission) forges only user properties; a native
 # record can be forged only when a whole dataset is recreated between the
-# calls. KNOWN_ISSUES.md lists both windows as Low.
+# calls. KNOWN_ISSUES.md describes both race windows.
 #   mode=merge     ARGV: SKELETON MACHINE HUMAN for one dataset. Prints the
 #                  payload in skeleton order (machine values and sources, a
 #                  human "none" replacing the machine value) with a bare name
@@ -284,7 +284,7 @@ function line_head(line,    at, next_at) {
 function starts_record(i, head, head_count) {
 	return head[i] == key[i] && head_count[key[i]] == 1
 }
-function read_view(view, file,    lines, count, head, head_count, i, rest) {
+function read_view(view, file, limit,    lines, count, head, head_count, i, rest) {
 	count = read_lines(file, lines)
 	if (key_count == 0 && count > 0)
 		failed = 1
@@ -292,36 +292,37 @@ function read_view(view, file,    lines, count, head, head_count, i, rest) {
 		head[i] = line_head(lines[i])
 		head_count[head[i]]++
 	}
-	for (i = 1; i <= key_count && starts_record(i, head, head_count); i++) {
+	for (i = 1; i <= limit && starts_record(i, head, head_count); i++) {
 		if (i < key_count ? !starts_record(i + 1, head, head_count) : count != key_count)
 			break
 		rest = substr(lines[i], length(key[i]) + 2)
 		if (!match(rest, /\t[^\t]*$/) || !valid_source(substr(rest, RSTART + 1)))
 			break
-		known[view, i] = 1
-		value[view, i] = substr(rest, 1, RSTART - 1)
-		source[view, i] = substr(rest, RSTART + 1)
+		if (view == "machine") {
+			value[i] = substr(rest, 1, RSTART - 1)
+			source[i] = substr(rest, RSTART + 1)
+		} else if (substr(rest, 1, RSTART - 1) == "none")
+			value[i] = "none"
 	}
+	return i - 1
 }
-function complete(i) {
-	return known["machine", i] && known["human", i]
-}
-function merged_item(i,    item_value) {
-	item_value = (value["human", i] == "none") ? "none" : value["machine", i]
-	return key_property[i] "=" encode_value(item_value) "=" source["machine", i]
+function merged_item(i) {
+	return key_property[i] "=" encode_value(value[i]) "=" source[i]
 }
 BEGIN {
 	has_name = (mode == "store")
 	read_skeleton(ARGV[1 + has_name])
-	read_view("machine", ARGV[2 + has_name])
-	read_view("human", ARGV[3 + has_name])
+	# Each view contributes one validated prefix. Repeated heads anywhere in
+	# the full human capture can still disqualify a row in the machine prefix.
+	machine_count = read_view("machine", ARGV[2 + has_name], key_count)
+	complete_count = read_view("human", ARGV[3 + has_name], machine_count)
 	if (has_name)
 		wanted_count = read_lines(ARGV[1], wanted_rows)
 	if (failed)
 		exit 1
 	if (mode == "merge") {
 		for (i = 1; i <= key_count; i++) {
-			if (complete(i)) {
+			if (i <= complete_count) {
 				payload = append_csv(payload, merged_item(i))
 			} else {
 				payload = append_csv(payload, key_property[i])
@@ -336,18 +337,19 @@ BEGIN {
 		wanted[wanted_rows[i]] = 1
 	for (i = 1; i <= key_count; i++) {
 		dataset = key_dataset[i]
+		if (!(dataset in wanted)) continue
 		if (!(dataset in dataset_payload)) {
 			order[++dataset_count] = dataset
 			dataset_payload[dataset] = ""
 		}
-		if (complete(i))
+		if (i <= complete_count)
 			dataset_payload[dataset] = append_csv(dataset_payload[dataset], merged_item(i))
 		else
 			incomplete[dataset] = 1
 	}
 	for (i = 1; i <= dataset_count; i++) {
 		dataset = order[i]
-		if (!(dataset in wanted) || (dataset in incomplete) || dataset_payload[dataset] == "")
+		if (dataset in incomplete || dataset_payload[dataset] == "")
 			continue
 		row = store_row(dataset_payload[dataset])
 		printf "%s\t%s\n", row, dataset

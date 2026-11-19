@@ -63,7 +63,8 @@ this run deleted snapshots. Roll back only under the existing `-F`
 guards, seed a missing or snapshot-less destination when allowed, and send the
 remaining range. A seed queues another property pass after receives finish.
 The ready queue serializes conflicting destination ancestry while allowing
-independent datasets to use available `-j` slots.
+independent datasets to use available `-j` slots. When every slot is occupied,
+it waits for one job to finish before scanning deferred datasets again.
 
 ## Module Reference
 
@@ -74,8 +75,8 @@ module or a chain of setters.
 - [../src/zxfer_modules.sh](../src/zxfer_modules.sh): canonical loader and
   source-order entry point for the runtime modules; the modules below are
   listed in its manifest order
-- [../src/zxfer_path_security.sh](../src/zxfer_path_security.sh): owner, mode
-  and inode read from one `ls -ldin` line, the effective-UID memo, the
+- [../src/zxfer_path_security.sh](../src/zxfer_path_security.sh): owner, mode,
+  link count and inode read from one `ls -ldin` line, the effective-UID memo, the
   single-subshell TMPDIR candidate check, and symlink-aware trusted-path
   validation for the backup metadata and `ZXFER_ERROR_LOG` paths
 - [../src/zxfer_quoting.sh](../src/zxfer_quoting.sh): literal token splitting,
@@ -182,8 +183,11 @@ module or a chain of setters.
 - [../src/zxfer_snapshot_plan.sh](../src/zxfer_snapshot_plan.sh):
   pass-level grouped snapshot planning (common snapshot, transfer range,
   capped divergence summary, and file-backed `-d` delete records), with one
-  keyed sort and one shared planner traversal per queue. Source slices support live rechecks using the
-  same algorithm; malformed identity is deferred to the dataset boundary.
+  keyed sort and one shared planner traversal per queue. For each dataset,
+  the planner marks the exact destination identities it encounters on the source.
+  Unmarked destination identities supply the delete records. Source slices
+  support live rechecks using the same algorithm. Malformed identity is
+  deferred to the dataset boundary.
   It also owns one batched creation-time query
   per delete plan that decides rollback eligibility and `-g`, deletion with
   its safety rechecks, the divergence contract, the live re-plan of a dataset
@@ -507,6 +511,8 @@ the file as a unit. Before every append it checks the path (absolute, no
 symlinked component, a trusted parent, a regular 0600 file with a single
 link, owned by root or the effective user); a missing log is created under
 umask 077 with noclobber and set to mode 0600 only after those checks pass.
+Owner, link count and mode use one metadata record; a newly created log's
+mode is re-read after `chmod` so a stale record cannot approve its permissions.
 The write goes through awk rather than the shell's `printf`: bash
 line-buffers its builtins' output, so a report printed by the shell would go
 out one line per write and could interleave with another run's report. A
@@ -540,6 +546,8 @@ physical login-shell command line; a fixed POSIX `sh` bootstrap reconstructs
 the exact program before the explicit `sh -c` handoff. This keeps individual
 words below the illumos csh lexical limit while preserving standard input and
 the program's exit status.
+The renderer publishes only `g_zxfer_shell_command_result`; it writes no
+stdout, so callers retain the result before another render.
 Remote zfs commands are rendered from argv; when an argument contains a
 newline the command uses the same chunked form, so argument boundaries,
 including empty arguments, survive a csh login shell.
@@ -586,10 +594,11 @@ The parser (`ZXFER_PROPERTY_NORMALIZE_AWK`, run behind the shared
 record i only in an unbroken run from line 1: lines i and i+1 start with keys
 i and i+1, and no other line starts with either key. The value runs from the
 key's TAB to the line's last TAB, since a source holds none. A malformed or
-repeated list row fails the read closed. The prefetch stores merged
-payloads only for wanted datasets (one name per filter line) whose every
-record is in the run in both views; the rest take the per-dataset path,
-which re-reads every property after the run alone
+repeated list row fails the read closed. The parser retains machine values
+and sources, substituting a human-readable `none` only within the prefix
+both views validated. Prefetch builds payloads only for wanted datasets
+(one name per filter line) and stores only complete ones. The rest take the
+per-dataset path, which re-reads every property after the run alone
 (`zfs get -H[p]o property,value,source -- PROP DS`, where `--` keeps a user
 property name that starts with `-` from being parsed as an option, split at
 its last TAB). A multi-line value therefore costs two extra `zfs get` calls
@@ -618,9 +627,10 @@ relative key), stored when each live pass validates the backup file. A
 destination receive puts a tombstone line ahead of the dataset's rows, and a
 create, set or inherit also strips its descendants' lines.
 
-The dataset property operation owns its original source view (for `-k`),
-effective restored/backfilled view, and completed plan. Collection no longer
-publishes separate raw/effective globals. The planner's internal API takes six
+The dataset property operation backfills the live source properties once and
+uses that view for planning and `-k` capture. With `-e`, it plans from a
+separate restored view and fills missing creation-time properties from the
+live view when available. The planner's internal API takes six
 dataset inputs: initial-root flag, destination-exists flag, type, source view,
 destination view and unsupported-property policy. Both flags are explicit 0/1
 values; an empty destination view still represents an existing dataset when
@@ -730,8 +740,8 @@ must be absent, and snapshot creation, migration, property transfer or
 restore, backup metadata, and property overrides must be inactive.
 The proof starts one recursive source `name,guid` producer even when `-j` is
 configured, starts one normalized destination `name,guid` producer, sorts both
-streams into regular files under the per-run temp root, and treats a non-empty
-`comm -3` diff as a mismatch. `-U` unsupported-property filtering and `-g`
+streams into regular files under the per-run temp root, and compares those
+files directly with `cmp -s`. `-U` unsupported-property filtering and `-g`
 grandfather protection can remain enabled because a proven no-op leaves no
 source transfer queue, destination delete queue, or property/create work to
 consume those checks. A mismatch, missing destination, excluded-dataset
@@ -759,10 +769,12 @@ inventory; a missing destination root is bootstrapped only after the live
 pool probe lists its pool. Snapshot-list stderr precedes the `Failed to
 retrieve snapshot list from the destination.` report, locally and over `-T`.
 
-Delta processing extracts transfer datasets, extra destination datasets and any
-needed full-source inventory in one AWK pass. Fixed role tags keep those lists
-independent through one C-locale unique sort; the current shell publishes each
-list without splitting names on spaces. Empty recursive work skips extraction
+Full discovery compares the two sorted listings produced by the source and
+destination stages. It allocates filtered copies only for `-x`. One AWK pass
+extracts transfer datasets, extra destination datasets and any needed source
+inventory. It emits one tagged row per consecutive dataset in each list. A
+C-locale unique sort orders the dataset names, including parents and children.
+The current shell publishes each list without splitting names on spaces. Empty recursive work skips extraction
 entirely. Record exclusions retain AWK's regex semantics and dataset exclusions
 retain grep's regex semantics. Snapshot identity validation and the live-source
 inventory guard for `-d` still precede any destructive work.
@@ -774,9 +786,10 @@ builder preserves its diagnostic or empty result and status; partial render
 output is cleared. Parallel accounting follows the selected producer: the fast
 proof always runs one recursive listing, while a successful full listing uses
 parallel exactly when `-j` exceeds one. No separate parallel-use flag is kept.
-Both source launchers use `zxfer_start_source_snapshot_producer`: the fast
-pipeline optionally filters exclusions and counts presence, while the full
-pipeline tees creation-ordered output. They share sort, ordered stage-status
+Both source launchers use `zxfer_start_source_snapshot_producer`. The fast
+pipeline filters exclusions when requested. After both listings match and the
+producers succeed, the proof checks the sorted source file for snapshots.
+Full discovery tees creation-ordered output. Both share sort, ordered stage-status
 validation, command recording, spawn and cleanup registration. Status files
 retain their existing private allocation and lifetime; the first failed or
 unreadable stage wins over sort's status. Listing builders still own compressed
@@ -789,8 +802,8 @@ flowchart TD
     C --> D["Start normalized destination name,guid snapshot producer"]
     D --> E["Sort both streams into per-run temp files"]
     E --> E1["Wait for both producers and parse the destination status record once; retain a successful raw listing for fallback"]
-    E1 --> F{"comm -3 finds no identity diff?"}
-    F -- "yes" --> F1["Validate destination and source results"]
+    E1 --> F{"Sorted identity records are identical?"}
+    F -- "yes" --> F1["Validate producer results and check the sorted source file for snapshots"]
     F1 --> G["Publish clean no-op; EXIT removes the proof files"]
     F -- "different" --> H["Release proof scratch, retain the reusable listing, then run full discovery"]
     F1 -- "missing destination or excluded empty source" --> H
@@ -801,7 +814,7 @@ flowchart TD
     B -- "no (-T, -P, -k, ...)" --> H
     H --> H1["Full discovery owner retains a named workspace and timer/status scratch; start the creation-order source listing as a registered background producer (fanned out through parallel with -j)"]
     H1 --> L["Reuse the proof's raw destination listing, or list the destination through zxfer_run_destination_zfs_cmd, locally or over the -T master (exact existence probe only on a zfs failure; ssh's 255 stops the run), then normalize its prefixes"]
-    L --> M["Wait for the source producer by PID, then diff identity records; extract role-tagged dataset lists in one pass and one unique sort"]
+    L --> M["Wait for the source producer by PID, then diff the sorted listings and sort one tagged row per dataset and role"]
     M --> M1["For recursive -d delete work, list source datasets and exclude target-only datasets with a notice; failed or rootless inventories stop the run"]
     M1 --> I{"Transfers, -d deletes, or property work pending?"}
     I -- "yes" --> J["Validate and retain the destination inventory once, clearing earlier observation rows (live pool probe when the root is missing)"]
@@ -1024,12 +1037,11 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A["Enter zxfer_transfer_properties()"] --> B["Load original source properties and retain the raw and effective views in this operation"]
+    A["Enter zxfer_transfer_properties()"] --> B["Load live source properties"]
     B --> C{"-e restore mode?"}
-    C -- "yes" --> D["Look up the exact v2 relative backup row in this pass's validated store; retain the row reader's result as the effective source view"]
-    C -- "no" --> E["Keep the live effective source property view"]
-    D --> F["Validate source create metadata and backfill required creation-time properties in both views"]
-    E --> F
+    C -- "yes" --> D["Retain the exact restored row from the validated backup"]
+    D --> F["Validate live source metadata and backfill the live view, then the restored view if present"]
+    C -- "no" --> F
     F --> G["Check every -o property against the initial source, before any destination property is read or changed (-d may already have destroyed destination-only snapshots)"]
     G --> I{"Does the destination exist (recursive listing, else a live probe)?"}
     I -- "no" --> J["Plan with destination-exists=0 and session policy: stage encoded inputs, write selected create actions in one AWK, validate the file, and create the destination (a child drops inheritable -o overrides its parent already supplies)"]

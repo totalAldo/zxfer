@@ -21,10 +21,6 @@ oneTimeSetUp() {
 	zxfer_test_property_fixture_one_time_setup
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	zxfer_test_property_fixture_setup
 }
@@ -85,9 +81,17 @@ user:a,user:b"
 		'compression\nuser:z\n' 'compression\tlz4\tlocal\nuser:z\tv\tlocal\nuser:z\tw\tlocal\n' \
 		= 0 "compression,user:z
 compression,user:z"
-	zxfer_property_test_assert_merge "a human none replaces the machine value, in name-list order" \
+	zxfer_property_test_assert_merge "a human none replaces the machine value and keeps the machine source" \
 		'quota\ncompression\n' 'quota\t1073741824\tlocal\ncompression\tlz4\tlocal\n' \
-		'quota\tnone\tlocal\ncompression\tlz4\tlocal\n' 0 "quota=none=local,compression=lz4=local"
+		'quota\tnone\tdefault\ncompression\tlz4\tlocal\n' 0 "quota=none=local,compression=lz4=local"
+	zxfer_property_test_assert_merge "a longer human view cannot certify an invalid machine record" \
+		'quota\natime\n' 'quota\t0\tlocal\natime\toff\tinvalid\n' \
+		'quota\tnone\tlocal\natime\toff\tlocal\n' 0 "quota=none=local,atime
+atime"
+	zxfer_property_test_assert_merge "a repeated human head beyond the machine prefix still disqualifies its record" \
+		'quota\natime\n' 'quota\t0\tlocal\natime\toff\tinvalid\n' \
+		'quota\tnone\tlocal\natime\toff\tlocal\nquota\tunbounded\tlocal\n' 0 "quota,atime
+quota,atime"
 	zxfer_property_test_assert_merge "a property one view lacks cannot be placed, so every record is re-read" \
 		'compression\natime\n' 'compression\tlz4\tlocal\natime\toff\tlocal\n' \
 		'compression\tlz4\tlocal\nrecordsize\t128K\tdefault\n' 0 "compression,atime
@@ -206,7 +210,7 @@ test_property_read_workspace_failure_preserves_status_and_publishes_nothing() {
 		[ ! -e "$l_property_workspace_path" ] || l_property_workspace_leaked=$((l_property_workspace_leaked + 1))
 	done
 	unset -f zxfer_get_temp_file
-	zxfer_source_runtime_modules_through "zxfer_property_state.sh"
+	zxfer_source_modules_for_tests "$ZXFER_ROOT"
 	assertEquals "The allocator status is preserved." 73 "$l_property_workspace_status"
 	assertEquals "No incomplete read workspace is published." "" "$l_property_workspace_result"
 	assertEquals "Row allocation cannot follow a workspace failure." "" "$l_property_workspace_rows"

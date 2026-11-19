@@ -191,21 +191,19 @@ END {
 # collapse newest-row-wins in first-appearance order. Returns 1 for a
 # malformed row.
 zxfer_validate_backup_metadata_record_list() {
-	l_existing_records=$1
-
 	# shellcheck disable=SC2016  # awk program should see literal field references.
-	printf '%s\n' "$l_existing_records" |
+	printf '%s\n' "$1" |
 		"${g_cmd_awk:-awk}" "$ZXFER_BACKUP_METADATA_PROPERTIES_AWK"'
 {
 	if ($0 == "")
 		next
 	tab = index($0, "\t")
-	if (tab <= 0)
-		exit 3
-	current_key = substr($0, 1, tab - 1)
 	current_properties = substr($0, tab + 1)
-	if (current_key == "" || !validate_properties(current_properties))
-		exit 3
+	if (tab < 2 || !validate_properties(current_properties)) {
+		invalid = 1
+		exit
+	}
+	current_key = substr($0, 1, tab - 1)
 	if (!(current_key in row_properties)) {
 		row_count++
 		row_keys[row_count] = current_key
@@ -213,14 +211,10 @@ zxfer_validate_backup_metadata_record_list() {
 	row_properties[current_key] = current_properties
 }
 END {
-	for (row_index = 1; row_index <= row_count; row_index++) {
-		line = row_keys[row_index] "\t" row_properties[row_keys[row_index]]
-		if (output == "")
-			output = line
-		else
-			output = output "\n" line
-	}
-	printf "%s\n", output
+	if (invalid) exit 3
+	if (!row_count) print ""
+	for (i = 1; i <= row_count; i++)
+		print row_keys[i] "\t" row_properties[row_keys[i]]
 }' || return 1
 }
 
@@ -933,7 +927,7 @@ zxfer_run_remote_backup_script() {
 	l_run_remote_label=$5
 	l_run_remote_own_statuses=$6
 
-	zxfer_build_remote_sh_c_command "$l_run_remote_script" >/dev/null
+	zxfer_build_remote_sh_c_command "$l_run_remote_script"
 	zxfer_capture_remote_probe_output "$l_run_remote_host" \
 		"$g_zxfer_shell_command_result" "$l_run_remote_profile_side" "${7:-}"
 	l_run_remote_status=$?

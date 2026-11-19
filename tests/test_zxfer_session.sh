@@ -275,18 +275,13 @@ first=17 <runtime|trap cleanup|first cleanup failure>
 second=17 <first cleanup failure>" "$output"
 }
 
-# zxfer-test-fragment: suites/zxfer_session_remote_tests.sh
 # shellcheck source=tests/suites/zxfer_session_remote_tests.sh
 . "$TESTS_DIR/suites/zxfer_session_remote_tests.sh"
-# zxfer-test-fragment: suites/zxfer_session_lifecycle_tests.sh
 # shellcheck source=tests/suites/zxfer_session_lifecycle_tests.sh
 . "$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_session.sh" \
-		"$TESTS_DIR/suites/zxfer_session_remote_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_session_lifecycle_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

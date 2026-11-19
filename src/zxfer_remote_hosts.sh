@@ -391,7 +391,7 @@ zxfer_emit_remote_probe_failure_message() {
 zxfer_run_remote_probe_script() {
 	zxfer_escape_single_quotes_into_result "${g_zxfer_secure_path:-$ZXFER_DEFAULT_SECURE_PATH}"
 	zxfer_build_remote_sh_c_command \
-		"PATH='$g_zxfer_escaped_single_quotes_result'; export PATH; $3" >/dev/null
+		"PATH='$g_zxfer_escaped_single_quotes_result'; export PATH; $3"
 	zxfer_capture_remote_probe_output "$1" "$g_zxfer_shell_command_result" "$2"
 }
 
@@ -403,7 +403,7 @@ zxfer_run_remote_probe_script() {
 zxfer_fetch_remote_host_capabilities_live() {
 	zxfer_build_remote_capability_probe_script "$3" >/dev/null || return 1
 	zxfer_build_remote_sh_c_command \
-		"$g_zxfer_remote_capability_probe_script_result" >/dev/null
+		"$g_zxfer_remote_capability_probe_script_result"
 	if ! zxfer_capture_remote_probe_output "$1" "$g_zxfer_shell_command_result" "$2"; then
 		zxfer_emit_remote_probe_failure_message >&2
 		return 1

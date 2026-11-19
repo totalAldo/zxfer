@@ -52,9 +52,8 @@
 #   control masters (each open is in the runtime cleanup-PID registry until
 #   it finishes) and closes them at exit.
 # returns via stdout: remote command output, the remote context label, and
-#   the commands rendered by zxfer_build_remote_sh_c_command and
-#   zxfer_render_{source,destination}_zfs_command (each also publishes its
-#   result global).
+#   the commands rendered by zxfer_render_{source,destination}_zfs_command
+#   (each also publishes its result global).
 
 ZXFER_SSH_CONTROL_SOCKET_PATH_MAX=104
 ZXFER_SSH_CONTROL_SOCKET_TEMP_SUFFIX_SAMPLE=".Mvij6x1tYLn6woxm"
@@ -386,7 +385,7 @@ zxfer_invoke_ssh_shell_command_for_host() {
 
 # Purpose: Render `sh -c SCRIPT` for a remote login shell, csh included,
 # without changing the script bytes or consuming its stdin.
-# Usage: zxfer_build_remote_sh_c_command SCRIPT; publishes and prints
+# Usage: zxfer_build_remote_sh_c_command SCRIPT; publishes
 # g_zxfer_shell_command_result. A single-line command of at most 768
 # bytes keeps the plain form; a longer or multi-line script travels as tagged
 # chunks that a fixed bootstrap reassembles, so no word reaches illumos csh's
@@ -461,7 +460,7 @@ zxfer_build_remote_sh_c_command() {
 	else
 		unset LC_ALL
 	fi
-	printf '%s' "$g_zxfer_shell_command_result"
+	return 0
 }
 
 # Purpose: Render the ssh command for a remote shell command and publish it,
@@ -480,7 +479,7 @@ zxfer_publish_prepared_ssh_shell_command_for_host_or_throw() {
 	# A wrapper such as doas or pfexec runs one command, so hand it an explicit
 	# `sh -c` to run the whole remote pipeline under the wrapper.
 	if [ -n "$g_zxfer_ssh_wrapper_result" ]; then
-		zxfer_build_remote_sh_c_command "$l_prepared_remote_cmd" >/dev/null
+		zxfer_build_remote_sh_c_command "$l_prepared_remote_cmd"
 		l_prepared_remote_cmd=$g_zxfer_shell_command_result
 	fi
 	zxfer_ssh_shell_command_for_host render "$1" "$l_prepared_remote_cmd" || {
@@ -544,7 +543,7 @@ zxfer_zfs_command_for_role() {
 	case $g_zxfer_shell_command_result in
 	*"$ZXFER_LF"*)
 		# csh/tcsh would end a command at a raw newline in an argument.
-		zxfer_build_remote_sh_c_command "$g_zxfer_shell_command_result" >/dev/null
+		zxfer_build_remote_sh_c_command "$g_zxfer_shell_command_result"
 		;;
 	esac
 	zxfer_ssh_shell_command_for_host "$l_zfs_dispatch_mode" "$l_zfs_dispatch_host" \

@@ -1015,8 +1015,9 @@ zxfer_execute_property_plan() {
 		[ "$l_execute_property_plan_parents" != yes ] || set -- "$@" -p
 		[ "$l_execute_property_plan_type" != volume ] || set -- "$@" -V "$l_execute_property_plan_size"
 	else
+		[ "${g_zxfer_property_plan_summary_result%% *}" -ne 0 ] || return 0
 		set --
-		if [ "${g_option_v_verbose:-0}" -eq 1 ] && [ "${g_zxfer_property_plan_summary_result%% *}" -ne 0 ]; then
+		if [ "${g_option_v_verbose:-0}" -eq 1 ]; then
 			zxfer_echov "Setting properties/sources on destination filesystem \"$l_execute_property_plan_dest\"."
 			for l_execute_property_plan_kind in set inherit; do
 				l_execute_property_plan_display=$(zxfer_property_plan_list "$l_execute_property_plan_file" "$l_execute_property_plan_kind") ||
@@ -1098,13 +1099,12 @@ zxfer_transfer_properties() {
 	zxfer_load_normalized_dataset_properties "$l_transfer_source" source ||
 		zxfer_throw_error "${g_zxfer_property_error_result:-Failed to retrieve source properties for [$l_transfer_source].}" "$?"
 	l_transfer_raw_pvs=$g_zxfer_normalized_dataset_properties
-	l_transfer_effective_pvs=$l_transfer_raw_pvs
 	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
 		l_transfer_restore_status=0
 		zxfer_find_restored_backup_properties "$l_transfer_source" "$g_actual_dest" ||
 			l_transfer_restore_status=$?
 		case $l_transfer_restore_status in
-		0) l_transfer_effective_pvs=$g_zxfer_property_row_payload_result ;;
+		0) l_transfer_restored_pvs=$g_zxfer_property_row_payload_result ;;
 		3 | 8)
 			zxfer_throw_usage_error "Can't find the properties for the filesystem $l_transfer_source and destination $g_actual_dest"
 			;;
@@ -1136,10 +1136,13 @@ zxfer_transfer_properties() {
 		"$l_transfer_must_create_properties" source ||
 		zxfer_throw_error "$g_zxfer_property_error_result" "$?"
 	l_transfer_raw_pvs=$g_zxfer_required_properties_result
-	zxfer_backfill_required_properties "$l_transfer_source" "$l_transfer_effective_pvs" \
-		"$l_transfer_must_create_properties" source "$l_transfer_raw_pvs" ||
-		zxfer_throw_error "$g_zxfer_property_error_result" "$?"
-	l_transfer_effective_pvs=$g_zxfer_required_properties_result
+	l_transfer_effective_pvs=$l_transfer_raw_pvs
+	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
+		zxfer_backfill_required_properties "$l_transfer_source" "$l_transfer_restored_pvs" \
+			"$l_transfer_must_create_properties" source "$l_transfer_raw_pvs" ||
+			zxfer_throw_error "$g_zxfer_property_error_result" "$?"
+		l_transfer_effective_pvs=$g_zxfer_required_properties_result
+	fi
 
 	# The -o policy, prepared at startup; the initial source must hold
 	# every -o property before any destination property changes (-d may already

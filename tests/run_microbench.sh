@@ -328,13 +328,15 @@ zxfer_microbench_run_scenario() {
 		fi
 	fi
 
-	for l_tool in $g_microbench_tools; do
-		# BSD and GNU grep both print the 0 count on no match (status 1).
-		l_count=$(grep -Fxc "$l_tool" "$l_spawn_log" || :)
-		printf '%s\t%s\t%s\n' "$l_scenario" "$l_tool" "${l_count:-0}"
-	done
-	l_total=$(wc -l <"$l_spawn_log" | tr -d '[:space:]')
-	printf '%s\tTOTAL\t%s\n' "$l_scenario" "$l_total"
+	awk -v scenario="$l_scenario" -v tools="$g_microbench_tools" '
+		{ count[$0]++ }
+		END {
+			n = split(tools, ordered, " ")
+			for (i = 1; i <= n; i++)
+				printf "%s\t%s\t%d\n", scenario, ordered[i], count[ordered[i]] + 0
+			printf "%s\tTOTAL\t%d\n", scenario, NR
+		}
+	' "$l_spawn_log" || return "$?"
 	zxfer_mockbin_ssh_log_rows "$l_scenario" "$l_ssh_log"
 
 	if [ "$g_microbench_very_verbose" -eq 1 ]; then

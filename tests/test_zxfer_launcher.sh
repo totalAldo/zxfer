@@ -13,10 +13,6 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_launcher"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 # Purpose: Build a launcher tree with an empty src file for every manifest
 # module and a zxfer_main stub, so a test sees only what ./zxfer itself does.
 # Usage: zxfer_test_create_launcher_fixture DIR; each run appends
@@ -39,16 +35,17 @@ EOF
 }
 
 test_module_loader_has_no_source_time_initialization() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		unset -f zxfer_set_failure_stage
-		ZXFER_SOURCE_MODULES_ROOT=\"$ZXFER_ROOT\"
-		. \"$ZXFER_ROOT/src/zxfer_modules.sh\"
+		ZXFER_SOURCE_MODULES_ROOT="$ZXFER_ROOT"
+		. "$ZXFER_ROOT/src/zxfer_modules.sh"
 		if command -v zxfer_set_failure_stage >/dev/null 2>&1; then
 			exit 9
 		fi
 		zxfer_load_modules
 		command -v zxfer_set_failure_stage >/dev/null 2>&1
-	"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Sourcing the manifest should define only loader functions until zxfer_load_modules is called." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -57,11 +54,12 @@ test_module_loader_has_no_source_time_initialization() {
 }
 
 test_module_loader_does_not_publish_a_default_root_at_source_time() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		unset ZXFER_SOURCE_MODULES_ROOT
-		. \"$ZXFER_ROOT/src/zxfer_modules.sh\"
-		[ \"\${ZXFER_SOURCE_MODULES_ROOT+set}\" != set ]
-	"
+		. "$ZXFER_ROOT/src/zxfer_modules.sh"
+		[ "${ZXFER_SOURCE_MODULES_ROOT+set}" != set ]
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Sourcing the pure loader must not mutate module-root state." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -88,30 +86,32 @@ test_canonical_module_loader_rejects_unknown_boundary() {
 }
 
 test_module_loader_stops_after_a_valid_boundary() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		unset -f zxfer_split_begin zxfer_set_failure_stage
-		ZXFER_SOURCE_MODULES_ROOT=\"$ZXFER_ROOT\"
-		. \"$ZXFER_ROOT/src/zxfer_modules.sh\"
+		ZXFER_SOURCE_MODULES_ROOT="$ZXFER_ROOT"
+		. "$ZXFER_ROOT/src/zxfer_modules.sh"
 		zxfer_load_modules zxfer_quoting.sh || exit 8
 		command -v zxfer_split_begin >/dev/null 2>&1 || exit 9
 		command -v zxfer_set_failure_stage >/dev/null 2>&1 && exit 10
 		exit 0
-	"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "A partial load should source the boundary module and stop before the next one." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
 test_module_loader_rejects_unknown_boundary_before_sourcing_modules() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		unset -f zxfer_set_failure_stage
-		ZXFER_SOURCE_MODULES_ROOT=\"$ZXFER_ROOT\"
-		. \"$ZXFER_ROOT/src/zxfer_modules.sh\"
+		ZXFER_SOURCE_MODULES_ROOT="$ZXFER_ROOT"
+		. "$ZXFER_ROOT/src/zxfer_modules.sh"
 		zxfer_load_modules not-a-module.sh
-		l_status=\$?
+		l_status=$?
 		command -v zxfer_set_failure_stage >/dev/null 2>&1 && exit 9
-		exit \"\$l_status\"
-	"
+		exit "$l_status"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "An unknown partial-load boundary should fail before any modules are sourced." \
 		2 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -120,9 +120,9 @@ test_module_loader_rejects_unknown_boundary_before_sourcing_modules() {
 }
 
 test_module_loader_rejects_multiline_boundary_before_sourcing_modules() {
-	zxfer_test_capture_subshell '
-		ZXFER_SOURCE_MODULES_ROOT="'"$ZXFER_ROOT"'"
-		. "'"$ZXFER_ROOT"'/src/zxfer_modules.sh"
+	capture_case() {
+		ZXFER_SOURCE_MODULES_ROOT="$ZXFER_ROOT"
+		. "$ZXFER_ROOT/src/zxfer_modules.sh"
 		zxfer_source_module() {
 			printf "%s\n" unexpected-source
 			return 99
@@ -130,7 +130,8 @@ test_module_loader_rejects_multiline_boundary_before_sourcing_modules() {
 		l_boundary="zxfer_path_security.sh
 zxfer_quoting.sh"
 		zxfer_load_modules "$l_boundary"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "A multiline boundary spanning adjacent manifest entries must be rejected." \
 		2 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -139,18 +140,19 @@ zxfer_quoting.sh"
 }
 
 test_module_loader_preserves_caller_ifs_and_globbing_state() {
-	zxfer_test_capture_subshell "
-		ZXFER_SOURCE_MODULES_ROOT=\"$ZXFER_ROOT\"
+	capture_case() {
+		ZXFER_SOURCE_MODULES_ROOT="$ZXFER_ROOT"
 		IFS=:
 		set -f
-		. \"$ZXFER_ROOT/src/zxfer_modules.sh\"
+		. "$ZXFER_ROOT/src/zxfer_modules.sh"
 		zxfer_load_modules || exit 8
-		[ \"\$IFS\" = : ] || exit 9
-		case \$- in
+		[ "$IFS" = : ] || exit 9
+		case $- in
 		*f*) ;;
 		*) exit 10 ;;
 		esac
-	"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Loading modules should not alter a caller's IFS or globbing mode." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -204,11 +206,12 @@ test_launcher_finds_modules_when_invoked_without_a_directory_prefix() {
 	zxfer_test_create_launcher_fixture "$fixture_dir"
 	log_path="$fixture_dir/launcher.log"
 
-	zxfer_test_capture_subshell "
-		cd \"$fixture_dir\" || exit 97
-		ZXFER_TEST_LOG=\"$log_path\" sh zxfer backup/dst || exit
-		ZXFER_TEST_LOG=\"$log_path\" ./zxfer backup/dst
-	"
+	capture_case() {
+		cd "$fixture_dir" || exit 97
+		ZXFER_TEST_LOG="$log_path" sh zxfer backup/dst || exit
+		ZXFER_TEST_LOG="$log_path" ./zxfer backup/dst
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "The launcher should load ./src when \$0 has no directory part or a ./ prefix." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -224,13 +227,14 @@ test_launcher_prescans_argv_for_very_verbose_before_main() {
 	zxfer_test_create_launcher_fixture "$fixture_dir"
 	log_path="$fixture_dir/launcher.log"
 
-	zxfer_test_capture_subshell "
-		export ZXFER_TEST_LOG=\"$log_path\"
-		g_zxfer_profile_prescan=1 \"$fixture_dir/zxfer\" backup/dst || exit
-		\"$fixture_dir/zxfer\" -vV backup/dst || exit
-		\"$fixture_dir/zxfer\" -R tank/src -V backup/dst || exit
-		\"$fixture_dir/zxfer\" -O userV@host backup/dst
-	"
+	capture_case() {
+		export ZXFER_TEST_LOG="$log_path"
+		g_zxfer_profile_prescan=1 "$fixture_dir/zxfer" backup/dst || exit
+		"$fixture_dir/zxfer" -vV backup/dst || exit
+		"$fixture_dir/zxfer" -R tank/src -V backup/dst || exit
+		"$fixture_dir/zxfer" -O userV@host backup/dst
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "The fixture launcher runs should succeed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertEquals "The prescan should always assign 0 or 1, overriding an inherited value, and find V in any short-option cluster." \

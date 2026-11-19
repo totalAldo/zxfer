@@ -28,10 +28,6 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_replication"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	zxfer_test_replication_fixture_setup
 }
@@ -372,6 +368,49 @@ test_iteration_list_split_failure_clears_previous_result() {
 
 	assertEquals "A failed record split must propagate its status and publish neither the list nor slices." \
 		"status=7 published=<> slices=<>" "$output"
+}
+
+test_full_send_queue_waits_before_rescanning_deferred_rows() {
+	output=$(
+		g_option_j_jobs=2
+		g_count_zfs_send_jobs=1
+		g_zxfer_send_jobs=active
+		g_option_v_verbose=0
+		row_reads=0
+		read() {
+			# shellcheck disable=SC2162 # Forward the queue reader's flags.
+			command read "$@" || return 1
+			row_reads=$((row_reads + 1))
+		}
+		zxfer_wait_for_any_send_job() {
+			printf 'wait %s\n' "$1"
+			g_count_zfs_send_jobs=1
+		}
+		zxfer_map_destination_dataset() {
+			printf 'map %s\n' "$1"
+			g_zxfer_destination_dataset_result=backup/${1##*/}
+		}
+		zxfer_send_job_conflicts_with_destination() {
+			printf 'check %s\n' "$1"
+			return 1
+		}
+		zxfer_process_source_dataset() {
+			printf 'process %s\n' "$1"
+			g_count_zfs_send_jobs=2
+		}
+		zxfer_process_replication_ready_queue "1${ZXFER_TAB}tank/first
+2${ZXFER_TAB}tank/second" 0
+		printf 'rows read %s\n' "$row_reads"
+	)
+	assertEquals "The free slot starts the first job, then only reaping makes the deferred row worth scanning again." \
+		"map tank/first
+check backup/first
+process tank/first
+wait job limit
+map tank/second
+check backup/second
+process tank/second
+rows read 3" "$output"
 }
 
 test_grandfather_preflight_reuses_full_queue_positions_in_original_snapshot_order() {

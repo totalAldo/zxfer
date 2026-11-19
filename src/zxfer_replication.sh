@@ -385,10 +385,10 @@ zxfer_process_replication_ready_queue() {
 			[ -n "$l_queue_row" ] || continue
 			l_queue_source=${l_queue_row#*"$ZXFER_TAB"}
 			if [ "$l_queue_job_limit" -gt 1 ] && [ -n "${g_zxfer_send_jobs:-}" ]; then
-				zxfer_map_destination_dataset "$l_queue_source"
+				# Only map a destination when a slot is available to use it.
 				if [ "${g_count_zfs_send_jobs:-0}" -ge "$l_queue_job_limit" ] ||
-					zxfer_send_job_conflicts_with_destination \
-						"$g_zxfer_destination_dataset_result"; then
+					{ zxfer_map_destination_dataset "$l_queue_source" &&
+						zxfer_send_job_conflicts_with_destination "$g_zxfer_destination_dataset_result"; }; then
 					l_queue_next=${l_queue_next:+$l_queue_next$ZXFER_LF}$l_queue_row
 					continue
 				fi
@@ -403,16 +403,19 @@ $l_queue_pending
 EOF
 		l_queue_pending=$l_queue_next
 		[ -n "$l_queue_pending" ] || break
-		[ "$l_queue_progress" -eq 0 ] || continue
-
+		# A full queue cannot make progress until a job is reaped. With a
+		# free slot, rescan after progress in case a deferred row is ready.
+		if [ "${g_count_zfs_send_jobs:-0}" -ge "$l_queue_job_limit" ]; then
+			l_queue_wait_reason="job limit"
+		elif [ "$l_queue_progress" -eq 1 ]; then
+			continue
+		else
+			l_queue_wait_reason="destination ancestry"
+		fi
 		[ -n "${g_zxfer_send_jobs:-}" ] ||
 			zxfer_throw_error "Failed to select a ready replication dataset while no send/receive jobs are active."
 		l_queue_waits=$((l_queue_waits + 1))
-		if [ "${g_count_zfs_send_jobs:-0}" -ge "$l_queue_job_limit" ]; then
-			zxfer_wait_for_any_send_job "job limit"
-		else
-			zxfer_wait_for_any_send_job "destination ancestry"
-		fi
+		zxfer_wait_for_any_send_job "$l_queue_wait_reason"
 	done
 	# Every queued dataset is processed exactly once, so both counts match.
 	[ "$l_queue_job_limit" -le 1 ] ||
@@ -436,19 +439,12 @@ zxfer_copy_filesystems() {
 		[ "$g_option_o_override_property" != "" ]; then
 		l_copy_property_pass=1
 	fi
-	if [ "$l_copy_property_pass" -eq 0 ] &&
-		[ -z "${g_recursive_source_list:-}" ] &&
-		{ [ "$g_option_d_delete_destination_snapshots" -ne 1 ] ||
-			[ -z "${g_recursive_destination_extra_dataset_list:-}" ]; }; then
+	if zxfer_pass_has_replication_work; then
+		zxfer_build_replication_iteration_list "$l_copy_property_pass" ||
+			zxfer_throw_error "Failed to prepare replication dataset iteration list." "$?"
+	else
 		g_zxfer_replication_iteration_list_result=""
-		zxfer_perform_grandfather_protection_checks
-		[ "$g_option_g_grandfather_protection" = "" ] || zxfer_echoV "Begin zxfer_copy_filesystems()"
-		zxfer_wait_for_zfs_send_jobs "final sync"
-		zxfer_echoV "End zxfer_copy_filesystems()"
-		return
 	fi
-	zxfer_build_replication_iteration_list "$l_copy_property_pass" ||
-		zxfer_throw_error "Failed to prepare replication dataset iteration list." "$?"
 	zxfer_perform_grandfather_protection_checks
 	[ "$g_option_g_grandfather_protection" = "" ] || zxfer_echoV "Begin zxfer_copy_filesystems()"
 	if [ -z "$g_zxfer_replication_iteration_list_result" ]; then

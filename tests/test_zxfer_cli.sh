@@ -12,14 +12,8 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-zxfer_source_runtime_modules_through "zxfer_cli.sh"
-
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_cli"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
@@ -141,7 +135,7 @@ test_refresh_compression_commands_clears_stale_safe_commands_without_z() {
 }
 
 test_refresh_compression_commands_marks_dependency_failure_for_decompression_lookup() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_throw_error() {
 			printf "class=%s\n" "${g_zxfer_failure_class:-}"
 			printf "msg=%s\n" "$1"
@@ -158,7 +152,8 @@ test_refresh_compression_commands_marks_dependency_failure_for_decompression_loo
 		g_cmd_compress="zstd -3"
 		g_cmd_decompress="zstd -d"
 		zxfer_refresh_compression_commands
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Decompression-helper lookup failures should abort command refresh." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -169,7 +164,7 @@ test_refresh_compression_commands_marks_dependency_failure_for_decompression_loo
 }
 
 test_refresh_compression_commands_rejects_shell_quoted_decompression_command() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_throw_error() {
 			printf "%s\n" "$1"
 			exit "${2:-1}"
@@ -178,7 +173,8 @@ test_refresh_compression_commands_rejects_shell_quoted_decompression_command() {
 		g_cmd_compress="zstd -3"
 		g_cmd_decompress="\"/opt/zstd dir/zstd\" -d"
 		zxfer_refresh_compression_commands
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Quoted decompression commands should fail validation instead of being silently re-tokenized." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"

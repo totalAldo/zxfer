@@ -985,8 +985,7 @@ contract_run_noop_with_tmpdir() {
 		cd "$CASE_DIR" || exit 1
 		TMPDIR=$l_noop_tmpdir
 		export TMPDIR
-		planning_run_zxfer "$FIXTURE_DIR/noop" "$@" -R \
-			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$FIXTURE_DIR/noop" "$@"
 	)
 }
 
@@ -1230,8 +1229,7 @@ contract_run_migration() {
 		fail "The mock svcadm is missing; refusing to run zxfer."
 		return 125
 	fi
-	planning_run_zxfer "$STATE_DIR" "$@" -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	planning_run_recursive "$STATE_DIR" "$@"
 }
 
 # Purpose: Print the -m steps of the zfs log in order: service changes, mount

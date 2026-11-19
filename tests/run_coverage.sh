@@ -41,7 +41,7 @@ Modes:
   bash-xtrace Require the bash xtrace fallback.
 
 Coverage is report-only: no minimum, baseline, or no-regression policy is
-applied, and the exit status reflects only the selected suites. The
+applied. Suite failures and errors generating the report return nonzero. The
 --report-only flag is accepted for compatibility and has no effect.
 
 The bash-xtrace mode writes repo-relative summary.tsv and missing.txt reports
@@ -77,44 +77,6 @@ resolve_coverage_collector_mode() {
 	esac
 }
 
-resolve_suite_path() {
-	l_suite=$1
-	case "$l_suite" in
-	/*)
-		printf '%s\n' "$l_suite"
-		;;
-	"$TEST_DIR"/*)
-		printf '%s\n' "$l_suite"
-		;;
-	tests/*)
-		printf '%s\n' "$ZXFER_ROOT/$l_suite"
-		;;
-	*)
-		printf '%s\n' "$TEST_DIR/$l_suite"
-		;;
-	esac
-}
-
-resolve_suites() {
-	if [ "$#" -eq 0 ]; then
-		set -- "$TEST_DIR"/test_*.sh
-	fi
-
-	for l_suite in "$@"; do
-		l_suite_path=$(resolve_suite_path "$l_suite")
-		case "$(basename "$l_suite_path")" in
-		test_helper.sh)
-			continue
-			;;
-		esac
-		if [ ! -f "$l_suite_path" ]; then
-			echo "Missing suite: $l_suite_path" >&2
-			return 1
-		fi
-		printf '%s\n' "$l_suite_path"
-	done
-}
-
 list_coverage_target_labels() {
 	if [ "$ZXFER_COVERAGE_INCLUDE_ENTRYPOINT" = "1" ]; then
 		printf '%s\n' zxfer
@@ -134,14 +96,13 @@ write_target_file_list() {
 }
 
 run_with_kcov() {
-	l_target_list_file=$1
-	shift
 	mkdir -p "$COVERAGE_DIR/kcov"
 	rm -rf "$COVERAGE_DIR/kcov"/*
 
 	l_overall_status=0
-	l_kcov_dirs=""
+	# Replace each suite argument with its output directory for kcov --merge.
 	for l_suite_path in "$@"; do
+		shift
 		l_suite_name=$(basename "$l_suite_path" .sh)
 		l_suite_dir="$COVERAGE_DIR/kcov/$l_suite_name"
 		echo "==> Running kcov for $l_suite_path"
@@ -149,12 +110,10 @@ run_with_kcov() {
 			"$l_suite_dir" "$l_suite_path"; then
 			l_overall_status=1
 		fi
-		l_kcov_dirs="$l_kcov_dirs $l_suite_dir"
+		set -- "$@" "$l_suite_dir"
 	done
 
-	if [ -n "$l_kcov_dirs" ]; then
-		# shellcheck disable=SC2086
-		set -- $l_kcov_dirs
+	if [ "$#" -gt 0 ]; then
 		kcov --merge "$COVERAGE_DIR/kcov/merged" "$@" >/dev/null
 		echo "Coverage report: $COVERAGE_DIR/kcov/merged/index.html"
 	fi
@@ -666,50 +625,56 @@ function is_coverable_line(line, t, l_heredoc_delimiter) {
 	}
 	return 1
 }
+function finish_read(file, status) {
+	close(file)
+	if (status < 0) {
+		print "Cannot read coverage input: " file
+		exit 1
+	}
+}
 BEGIN {
 	root_prefix = canonicalize_path(zxfer_root) "/"
-	while ((getline file < target_list_file) > 0) {
+	while ((target_status = (getline file < target_list_file)) > 0) {
 		normalized_file = canonicalize_path(file)
-		target[normalized_file] = 1
 		files[++file_count] = normalized_file
 		target_label[normalized_file] = normalize_path(normalized_file, root_prefix)
 		line_no = 0
-		while ((getline source_line < file) > 0) {
+		while ((source_status = (getline source_line < file)) > 0) {
 			line_no++
 			source[normalized_file, line_no] = source_line
 			if (is_coverable_line(source_line)) {
-				coverable[normalized_file, line_no] = 1
+				covered[normalized_file, line_no] = 0
 				coverable_count[normalized_file]++
 			}
 		}
-		close(file)
+		finish_read(file, source_status)
 	}
-	while ((getline trace_line < merged_trace_file) > 0) {
+	finish_read(target_list_file, target_status)
+	while ((trace_status = (getline trace_line < merged_trace_file)) > 0) {
 		if (trace_line ~ /^\++[^:]+:[0-9]+: /) {
 			sub(/^\++/, "", trace_line)
-			trace_file = trace_line
-			sub(/:[0-9]+: .*/, "", trace_file)
-			trace_file = canonicalize_path(trace_file)
+			raw_path = trace_line
+			sub(/:[0-9]+: .*/, "", raw_path)
+			if (!(raw_path in trace_paths))
+				trace_paths[raw_path] = canonicalize_path(raw_path)
+			trace_file = trace_paths[raw_path]
+			if (!(trace_file in target_label))
+				continue
 			trace_line_no = trace_line
 			sub(/^[^:]+:/, "", trace_line_no)
 			sub(/: .*/, "", trace_line_no)
 			trace_line_no += 0
-			if ((trace_file in target) && ((trace_file, trace_line_no) in coverable)) {
-				hit[trace_file, trace_line_no] = 1
+			key = trace_file SUBSEP trace_line_no
+			if ((key in covered) && !covered[key]) {
+				covered[key] = 1
+				hit_count[trace_file]++
 			}
 		}
 	}
-	close(merged_trace_file)
+	finish_read(merged_trace_file, trace_status)
 
 	for (i = 1; i <= file_count; i++) {
 		file = files[i]
-		hit_count[file] = 0
-		for (key in hit) {
-			split(key, parts, SUBSEP)
-			if (parts[1] == file) {
-				hit_count[file]++
-			}
-		}
 		miss_count[file] = coverable_count[file] - hit_count[file]
 		if (coverable_count[file] > 0) {
 			pct = (hit_count[file] * 100.0) / coverable_count[file]
@@ -721,7 +686,7 @@ BEGIN {
 		if (miss_count[file] > 0) {
 			printf "%s\n", target_label[file] >> missing_file
 			for (line_no = 1; (file, line_no) in source; line_no++) {
-				if ((file, line_no) in coverable && !((file, line_no) in hit)) {
+				if (((file, line_no) in covered) && !covered[file, line_no]) {
 					printf "  %d:%s\n", line_no, source[file, line_no] >> missing_file
 				}
 			}
@@ -729,7 +694,7 @@ BEGIN {
 		}
 	}
 }
-' /dev/null
+' /dev/null >&2
 }
 
 append_total_summary_row() {
@@ -814,7 +779,7 @@ run_with_bash_xtrace() {
 		cat "$l_trace_file" >>"$l_merged_trace"
 	done
 
-	render_bash_xtrace_report "$l_target_list_file" "$l_merged_trace" "$l_summary_file" "$l_missing_file"
+	render_bash_xtrace_report "$l_target_list_file" "$l_merged_trace" "$l_summary_file" "$l_missing_file" || return "$?"
 	append_total_summary_row "$l_summary_file"
 
 	echo "Coverage summary: $l_summary_file"
@@ -859,8 +824,28 @@ main() {
 
 	COVERAGE_COLLECTOR_MODE=$(resolve_coverage_collector_mode)
 
-	SUITES=$(resolve_suites "$@")
-	if [ -z "$SUITES" ]; then
+	# shellcheck source=tests/helpers/test_catalog.sh
+	. "$ZXFER_ROOT/tests/helpers/test_catalog.sh"
+	if [ "$#" -eq 0 ]; then
+		set -- "$TEST_DIR"/test_*.sh
+	fi
+
+	# Replace each original argument with its resolved path, skipping the helper.
+	for l_suite in "$@"; do
+		shift
+		l_suite_path=$(zxfer_test_resolve_suite_path "$ZXFER_ROOT" "$l_suite")
+		case ${l_suite_path##*/} in
+		test_helper.sh)
+			continue
+			;;
+		esac
+		if [ ! -f "$l_suite_path" ]; then
+			echo "Missing suite: $l_suite_path" >&2
+			return 1
+		fi
+		set -- "$@" "$l_suite_path"
+	done
+	if [ "$#" -eq 0 ]; then
 		echo "No shunit2 suites found." >&2
 		exit 1
 	fi
@@ -880,12 +865,10 @@ main() {
 			echo "kcov is not installed." >&2
 			exit 1
 		fi
-		# shellcheck disable=SC2086
-		run_with_kcov "$TARGET_LIST_FILE" $SUITES
+		run_with_kcov "$@"
 		;;
 	bash-xtrace)
-		# shellcheck disable=SC2086
-		run_with_bash_xtrace "$TARGET_LIST_FILE" $SUITES
+		run_with_bash_xtrace "$TARGET_LIST_FILE" "$@"
 		;;
 	esac
 }

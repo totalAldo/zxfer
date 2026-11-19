@@ -21,32 +21,20 @@ oneTimeSetUp() {
 	zxfer_test_property_fixture_one_time_setup
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	zxfer_test_property_fixture_setup
 }
 
-# Each fragment has a "zxfer-test-fragment" marker, a source line and a path
-# in suite(); keep the three in the same order so listing and execution agree.
-# zxfer-test-fragment: suites/zxfer_property_transfer_policy_tests.sh
+# Literal fragment source lines define loading, registration and discovery order.
 # shellcheck source=tests/suites/zxfer_property_transfer_policy_tests.sh
 . "$TESTS_DIR/suites/zxfer_property_transfer_policy_tests.sh"
-# zxfer-test-fragment: suites/zxfer_property_transfer_plan_tests.sh
 # shellcheck source=tests/suites/zxfer_property_transfer_plan_tests.sh
 . "$TESTS_DIR/suites/zxfer_property_transfer_plan_tests.sh"
-# zxfer-test-fragment: suites/zxfer_property_transfer_apply_tests.sh
 # shellcheck source=tests/suites/zxfer_property_transfer_apply_tests.sh
 . "$TESTS_DIR/suites/zxfer_property_transfer_apply_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_property_transfer.sh" \
-		"$TESTS_DIR/suites/zxfer_property_transfer_policy_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_property_transfer_plan_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_property_transfer_apply_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

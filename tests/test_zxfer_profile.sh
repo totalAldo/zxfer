@@ -14,10 +14,6 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_profile"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	zxfer_test_reset_all_owner_state
 	TMPDIR=$TEST_TMPDIR

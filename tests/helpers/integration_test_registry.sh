@@ -5,6 +5,7 @@ zxfer_integration_registry_path() {
 	printf '%s\n' "${ZXFER_INTEGRATION_REGISTRY_FILE:-$INTEGRATION_TESTS_DIR/integration_test_registry.tsv}"
 }
 
+# Validate the registry and retain its two ordered name lists for this load.
 zxfer_validate_integration_registry_file() {
 	l_registry=${1:-$(zxfer_integration_registry_path)}
 	l_tab=$(printf '\t')
@@ -14,7 +15,7 @@ zxfer_validate_integration_registry_file() {
 		return 1
 	fi
 
-	LC_ALL=C awk -F "$l_tab" -v registry="$l_registry" '
+	l_registry_sequences=$(LC_ALL=C awk -F "$l_tab" -v registry="$l_registry" '
 		function fail(message) {
 			if (!failed) {
 				printf "Invalid integration test registry [%s]: %s\n", registry, message
@@ -51,10 +52,9 @@ zxfer_validate_integration_registry_file() {
 				fail("line " NR " duplicates function [" $1 "]")
 			}
 			names[$1] = 1
-			if ($3 == "yes") {
-				pre_pool_count++
-			}
-			row_count++
+			ordered[++row_count] = $1
+			if ($3 == "yes")
+				pre_pool[++pre_pool_count] = $1
 		}
 		END {
 			if (failed) {
@@ -69,8 +69,20 @@ zxfer_validate_integration_registry_file() {
 			if (pre_pool_count == 0) {
 				fail("registry contains no pre-pool checks")
 			}
+			# A tab separates the two newline-delimited lists. Valid names
+			# cannot contain tabs or newlines.
+			for (i = 1; i <= row_count; i++)
+				printf "%s%s", (i > 1 ? "\n" : ""), ordered[i]
+			printf "\t"
+			for (i = 1; i <= pre_pool_count; i++)
+				printf "%s%s", (i > 1 ? "\n" : ""), pre_pool[i]
 		}
-	' <"$l_registry" >&2
+	' <"$l_registry") || {
+		printf '%s\n' "$l_registry_sequences" >&2
+		return 1
+	}
+	g_integration_registry_names=${l_registry_sequences%%"$l_tab"*}
+	g_integration_pre_pool_names=${l_registry_sequences#*"$l_tab"}
 }
 
 # Purpose: Print the integration fragments, integration/NAME_tests.sh, in C
@@ -131,7 +143,7 @@ zxfer_integration_fragment_paths() (
 )
 
 # Purpose: Scan one shfmt-formatted shell file for its top-level functions.
-# Usage: zxfer_scan_integration_fragment headers|definitions FILE. headers
+# Usage: zxfer_scan_integration_fragment headers|definitions FILE [RELATIVE_PATH]. headers
 # prints "FILE<TAB>NAME<TAB>LINE" for each "name() {" header at column 0.
 # definitions prints one "Invalid integration fragment" line and returns 1
 # for anything else outside a function (a fragment must be definition-only),
@@ -139,12 +151,13 @@ zxfer_integration_fragment_paths() (
 # a function body (a nested definition) and for an unterminated function. A
 # function ends at the first lone "}" in column 0; shfmt, which lint runs on
 # every fragment, puts each function's closing brace there and nothing else.
+# With RELATIVE_PATH, a valid definitions scan also emits NAME<TAB>RELATIVE_PATH.
 # awk runs in the C locale, as the registry check does, so a range such as
 # [A-Za-z_] means ASCII in every awk.
 zxfer_scan_integration_fragment() {
-	LC_ALL=C awk -v headers_only="$([ "$1" = headers ] && echo 1 || echo 0)" '
+	LC_ALL=C awk -v mode="$1" -v relative_path="${3:-}" '
 		function report(message, line) {
-			if (headers_only)
+			if (mode == "headers")
 				return
 			printf "Invalid integration fragment [%s]: %s at line %d.\n", FILENAME, message, line
 			bad = 1
@@ -159,11 +172,12 @@ zxfer_scan_integration_fragment() {
 		!in_function {
 			if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{$/) {
 				in_function = FNR
-				if (headers_only) {
-					name = $0
-					sub(/\(.*/, "", name)
+				name = $0
+				sub(/\(.*/, "", name)
+				if (mode == "headers")
 					printf "%s\t%s\t%d\n", FILENAME, name, FNR
-				}
+				else if (relative_path != "")
+					names[++count] = name
 			} else {
 				report("executable top-level shell code", FNR)
 			}
@@ -184,21 +198,12 @@ zxfer_scan_integration_fragment() {
 		END {
 			if (in_function)
 				report("unterminated function", in_function)
+			if (!bad)
+				for (i = 1; i <= count; i++)
+					print names[i] "\t" relative_path
 			exit bad
 		}
 	' "$2"
-}
-
-zxfer_validate_integration_fragment_contents() {
-	l_fragment_contents_paths=$(zxfer_integration_fragment_paths) || return 1
-	while IFS= read -r l_fragment_contents_relative_path; do
-		[ -n "$l_fragment_contents_relative_path" ] || continue
-		zxfer_scan_integration_fragment definitions \
-			"$INTEGRATION_TESTS_DIR/$l_fragment_contents_relative_path" >&2 ||
-			return "$?"
-	done <<-EOF
-		$l_fragment_contents_paths
-	EOF
 }
 
 zxfer_integration_fragment_files() {
@@ -212,16 +217,14 @@ zxfer_integration_fragment_files() {
 }
 
 zxfer_integration_fragment_definition_rows() {
-	l_fragment_definition_paths=$(zxfer_integration_fragment_paths) || return 1
-	l_fragment_definition_tab=$(printf '\t')
+	l_fragment_definition_paths=${1:-$(zxfer_integration_fragment_paths)} || return 1
 	while IFS= read -r l_fragment_definition_relative_path; do
-		[ -n "$l_fragment_definition_relative_path" ] || continue
-		l_fragment_definition_metrics=$(zxfer_scan_integration_fragment headers \
-			"$INTEGRATION_TESTS_DIR/$l_fragment_definition_relative_path") || return "$?"
-		printf '%s\n' "$l_fragment_definition_metrics" |
-			awk -F "$l_fragment_definition_tab" \
-				-v relative_path="$l_fragment_definition_relative_path" \
-				'NF >= 2 { printf "%s\t%s\n", $2, relative_path }' || return "$?"
+		l_fragment_definition_rows=$(zxfer_scan_integration_fragment definitions \
+			"$INTEGRATION_TESTS_DIR/$l_fragment_definition_relative_path" "$l_fragment_definition_relative_path") || {
+			printf '%s\n' "$l_fragment_definition_rows" >&2
+			return 1
+		}
+		[ -z "$l_fragment_definition_rows" ] || printf '%s\n' "$l_fragment_definition_rows"
 	done <<-EOF
 		$l_fragment_definition_paths
 	EOF
@@ -232,19 +235,17 @@ zxfer_validate_integration_registry_definitions() {
 	l_definition_tab=$(printf '\t')
 
 	zxfer_validate_integration_registry_file "$l_definition_registry" || return 1
-	zxfer_validate_integration_fragment_contents || return 1
-	l_definition_rows=$(zxfer_integration_fragment_definition_rows) || return 1
+	g_integration_fragment_paths=$(zxfer_integration_fragment_paths) || return 1
+	l_definition_rows=$(zxfer_integration_fragment_definition_rows "$g_integration_fragment_paths") || return 1
 
 	awk -F "$l_definition_tab" '
-		FILENAME == ARGV[1] {
-			if (FNR == 1) {
-				next
-			}
+		# Registry names occupy one field, fragment definitions two.
+		NF == 1 {
 			registry[$1] = 1
 			registry_order[++registry_count] = $1
 			next
 		}
-		FILENAME == "-" && NF == 2 {
+		NF == 2 {
 			definition_count[$1]++
 		}
 		END {
@@ -266,7 +267,8 @@ zxfer_validate_integration_registry_definitions() {
 			}
 			exit failed
 		}
-	' "$l_definition_registry" - >&2 <<-EOF
+	' >&2 <<-EOF
+		$g_integration_registry_names
 		$l_definition_rows
 	EOF
 }
@@ -284,41 +286,32 @@ zxfer_integration_shell_function_p() {
 }
 
 zxfer_integration_registry_names() {
-	l_registry=$(zxfer_integration_registry_path) || return 1
-	l_tab=$(printf '\t')
-
-	zxfer_validate_integration_registry_file "$l_registry" || return 1
-	awk -F "$l_tab" 'NR > 1 { print $1 }' <"$l_registry"
+	zxfer_validate_integration_registry_file || return 1
+	printf '%s\n' "$g_integration_registry_names"
 }
 
 zxfer_integration_registry_pre_pool_names() {
-	l_registry=$(zxfer_integration_registry_path) || return 1
-	l_tab=$(printf '\t')
-
-	zxfer_validate_integration_registry_file "$l_registry" || return 1
-	awk -F "$l_tab" 'NR > 1 && $3 == "yes" { print $1 }' <"$l_registry"
+	zxfer_validate_integration_registry_file || return 1
+	printf '%s\n' "$g_integration_pre_pool_names"
 }
 
 zxfer_load_integration_test_fragments() {
-	l_fragment_load_registry=$(zxfer_integration_registry_path) || return 1
-	zxfer_validate_integration_registry_definitions "$l_fragment_load_registry" || return 1
-	l_fragment_load_paths=$(zxfer_integration_fragment_paths) || return 1
-
+	zxfer_validate_integration_registry_definitions || return 1
 	while IFS= read -r l_fragment_load_relative_path; do
-		[ -n "$l_fragment_load_relative_path" ] || continue
 		# shellcheck source=/dev/null
 		. "$INTEGRATION_TESTS_DIR/$l_fragment_load_relative_path" || return $?
 	done <<-EOF
-		$l_fragment_load_paths
+		$g_integration_fragment_paths
 	EOF
 }
 
 zxfer_validate_integration_registry() {
-	l_registry_path=$(zxfer_integration_registry_path) || return 1
-	zxfer_validate_integration_registry_definitions "$l_registry_path" || return 1
-	l_registry_names=$(zxfer_integration_registry_names) || return 1
+	zxfer_validate_integration_registry_definitions || return 1
+	zxfer_check_loaded_integration_functions
+}
 
-	for l_registry_name in $l_registry_names; do
+zxfer_check_loaded_integration_functions() {
+	for l_registry_name in $g_integration_registry_names; do
 		# The static definition pass above rejects missing, duplicated, and
 		# unlisted functions, so command -v now checks only that sourcing made the
 		# exact registered function callable in this shell.

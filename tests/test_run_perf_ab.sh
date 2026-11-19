@@ -19,10 +19,6 @@ oneTimeSetUp() {
 	PERF_AB_BIN="$ZXFER_ROOT/tests/run_perf_ab.sh"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 # Run the A/B runner. Sets PERF_AB_STATUS, PERF_AB_STDOUT, PERF_AB_STDERR
 # and PERF_AB_WORKDIR (the work directory it announced, if any).
 perf_ab_run() {
@@ -117,6 +113,7 @@ perf_ab_assert_tsv_rows() {
 }
 
 test_metadata_read_scenarios_drive_both_trees() {
+	perf_ab_require_ref HEAD || return 0
 	perf_ab_run --baseline-ref HEAD --sizes 1 --snapshots 2 --reps 1 \
 		--latency-ms 0 --scenarios restore,remote_restore,forward,remote_forward
 	assertEquals "Metadata scenarios succeed: $PERF_AB_STDERR" 0 "$PERF_AB_STATUS"

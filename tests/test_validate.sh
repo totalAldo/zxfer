@@ -2,7 +2,7 @@
 #
 # shunit2 tests for the conservative validation dispatcher.
 #
-# shellcheck disable=SC2317,SC2329
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -14,17 +14,14 @@ oneTimeSetUp() {
 	VALIDATE_BIN="$ZXFER_ROOT/tests/validate.sh"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 reset_validate_fixture_root() {
 	FAKE_ROOT="$TEST_TMPDIR/fake-root"
 	VALIDATION_LOG="$TEST_TMPDIR/validation.log"
 	rm -rf "$FAKE_ROOT"
-	mkdir -p "$FAKE_ROOT/tests"
+	mkdir -p "$FAKE_ROOT/tests/helpers"
 	: >"$VALIDATION_LOG"
 	ln -s "$VALIDATE_BIN" "$FAKE_ROOT/tests/validate.sh"
+	ln -s "$ZXFER_ROOT/tests/helpers/test_catalog.sh" "$FAKE_ROOT/tests/helpers/test_catalog.sh"
 	ln -s "$ZXFER_ROOT/tests/validation_map.tsv" "$FAKE_ROOT/tests/validation_map.tsv"
 	ln -s "$ZXFER_ROOT/tests/validation_profiles.tsv" "$FAKE_ROOT/tests/validation_profiles.tsv"
 }
@@ -71,7 +68,6 @@ validation_mapping_block() {
 	'
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_quick_maps_explicit_paths_to_offline_checks() {
 	output=$(
 		VALIDATION_LOG="$VALIDATION_LOG" \
@@ -87,7 +83,6 @@ test_validate_quick_maps_explicit_paths_to_offline_checks() {
 shunit:--jobs 4 tests/test_run_coverage.sh" "$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_quick_selects_the_module_entry_and_every_contract_suite_by_name() {
 	: >"$FAKE_ROOT/tests/test_zxfer_path_security.sh"
 	: >"$FAKE_ROOT/tests/test_contract_alpha.sh"
@@ -111,7 +106,6 @@ shunit:--jobs 4 tests/test_zxfer_path_security.sh tests/test_contract_alpha.sh t
 		"$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_quick_expands_the_contract_token_of_a_map_row() {
 	: >"$FAKE_ROOT/tests/test_contract_alpha.sh"
 	: >"$FAKE_ROOT/tests/test_run_argv_fuzz.sh"
@@ -128,23 +122,26 @@ test_validate_quick_expands_the_contract_token_of_a_map_row() {
 shunit:--jobs 4 tests/test_contract_alpha.sh tests/test_run_argv_fuzz.sh" "$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_validate_quick_maps_every_fragment_to_the_entry_suite_that_marks_it() {
+test_validate_quick_maps_every_fragment_to_the_entry_suite_that_sources_it() {
 	set --
 	fragment_owners=
 	expected_suites=
-	for l_entry_path in "$ZXFER_ROOT"/tests/test_*.sh; do
-		l_entry=tests/${l_entry_path##*/}
-		l_fragments=$(sed -n 's/^# zxfer-test-fragment: //p' "$l_entry_path")
-		[ -n "$l_fragments" ] || continue
-		# @self resolves only to an entry file that exists under the fake root.
-		ln -s "$l_entry_path" "$FAKE_ROOT/$l_entry"
-		expected_suites="$expected_suites${expected_suites:+ }$l_entry"
-		for l_fragment in $l_fragments; do
-			set -- "$@" "tests/$l_fragment"
-			fragment_owners="$fragment_owners$l_fragment $l_entry
+	for l_fragment_path in "$ZXFER_ROOT"/tests/suites/*.sh; do
+		l_fragment=tests/suites/${l_fragment_path##*/}
+		# The file inventory and its ShellCheck annotation give us an
+		# expected owner independent of the catalog's source-line parser.
+		l_entry=$(cd "$ZXFER_ROOT" && grep -Flx "# shellcheck source=$l_fragment" tests/test_*.sh)
+		if [ ! -f "$ZXFER_ROOT/$l_entry" ]; then
+			fail "Expected one suite entry for $l_fragment, found [$l_entry]."
+			return 1
+		fi
+		if [ ! -f "$FAKE_ROOT/$l_entry" ]; then
+			ln -s "$ZXFER_ROOT/$l_entry" "$FAKE_ROOT/$l_entry"
+			expected_suites="$expected_suites${expected_suites:+ }$l_entry"
+		fi
+		set -- "$@" "$l_fragment"
+		fragment_owners="$fragment_owners$l_fragment $l_entry
 "
-		done
 	done
 	unmarked_path=tests/suites/zxfer_unmarked_example_tests.sh
 
@@ -155,14 +152,14 @@ test_validate_quick_maps_every_fragment_to_the_entry_suite_that_marks_it() {
 
 	while read -r l_fragment l_entry; do
 		[ -n "$l_fragment" ] || continue
-		assertContains "Each fragment should map to the entry suite whose marker names it." \
-			"$(validation_mapping_block "$output" "tests/$l_fragment")" "fragment of: $l_entry"
+		assertContains "$l_fragment should map to $l_entry." \
+			"$(validation_mapping_block "$output" "$l_fragment")" "fragment of: $l_entry"
 	done <<EOF
 $fragment_owners
 EOF
-	assertNotContains "A path that no entry suite marks should map through the validation map itself." \
+	assertNotContains "A path that no entry suite sources should map through the validation map itself." \
 		"$(validation_mapping_block "$output" "$unmarked_path")" "fragment of:"
-	assertEquals "Fragments should deduplicate to the entry suites that carry markers." \
+	assertEquals "Fragments should deduplicate to the entry suites that source them." \
 		"lint:budget
 shunit:--jobs 4 $expected_suites" "$(cat "$VALIDATION_LOG")"
 }
@@ -178,7 +175,6 @@ integration_fragment_paths() {
 	done
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_quick_maps_every_integration_fragment_to_exact_loader_contracts() {
 	set --
 	while IFS= read -r l_fragment_path; do
@@ -205,7 +201,6 @@ EOF
 shunit:--jobs 4 tests/test_run_integration_zxfer.sh" "$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_quick_maps_unclassified_integration_fragments_to_loader_contracts() {
 	output=$(
 		VALIDATION_LOG="$VALIDATION_LOG" \
@@ -224,7 +219,6 @@ test_validate_quick_maps_unclassified_integration_fragments_to_loader_contracts(
 shunit:--jobs 4 tests/test_run_integration_zxfer.sh" "$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_quick_maps_shared_unit_helpers_to_representative_suites() {
 	output=$(
 		VALIDATION_LOG="$VALIDATION_LOG" \
@@ -267,7 +261,6 @@ shunit:--jobs 4 tests/test_run_shunit_tests.sh tests/test_zxfer_launcher.sh test
 		"$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_quick_maps_remote_script_goldens_to_owning_suites() {
 	output=$(
 		VALIDATION_LOG="$VALIDATION_LOG" \
@@ -294,7 +287,6 @@ shunit:--jobs 4 tests/test_zxfer_backup_metadata.sh tests/test_zxfer_remote_host
 		"$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_full_uses_report_only_bash_xtrace_coverage() {
 	VALIDATION_LOG="$VALIDATION_LOG" \
 		"$FAKE_ROOT/tests/validate.sh" full >/dev/null
@@ -305,7 +297,6 @@ shunit:--jobs 4
 coverage:mode=bash-xtrace args=" "$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_uses_configurable_bounded_unit_concurrency() {
 	VALIDATION_LOG="$VALIDATION_LOG" \
 		ZXFER_VALIDATE_JOBS=2 \
@@ -316,13 +307,13 @@ test_validate_uses_configurable_bounded_unit_concurrency() {
 shunit:--jobs 2 tests/test_run_coverage.sh" "$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_rejects_invalid_unit_concurrency_before_dispatch() {
-	zxfer_test_capture_subshell "
-		VALIDATION_LOG=\"$VALIDATION_LOG\" \\
-		ZXFER_VALIDATE_JOBS=0 \\
-		\"$FAKE_ROOT/tests/validate.sh\" quick tests/run_coverage.sh
-	"
+	capture_case() {
+		VALIDATION_LOG="$VALIDATION_LOG" \
+			ZXFER_VALIDATE_JOBS=0 \
+			"$FAKE_ROOT/tests/validate.sh" quick tests/run_coverage.sh
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Invalid suite concurrency should fail closed." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "The validation error should name the positive-integer contract." \
@@ -331,12 +322,8 @@ test_validate_rejects_invalid_unit_concurrency_before_dispatch() {
 		"lint:budget" "$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_vm_profile_cannot_be_widened_beyond_smoke_or_local() {
-	zxfer_test_capture_subshell "
-		VALIDATION_LOG=\"$VALIDATION_LOG\" \
-		\"$FAKE_ROOT/tests/validate.sh\" vm --profile full
-	"
+	zxfer_test_capture_subshell env VALIDATION_LOG="$VALIDATION_LOG" "$FAKE_ROOT/tests/validate.sh" vm --profile full
 
 	assertEquals "The conservative VM alias should reject attempts to replace its local profile." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -346,7 +333,6 @@ test_validate_vm_profile_cannot_be_widened_beyond_smoke_or_local() {
 		"" "$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_vm_forwards_bounded_smoke_and_local_profiles() {
 	VALIDATION_LOG="$VALIDATION_LOG" \
 		"$FAKE_ROOT/tests/validate.sh" vm smoke --guest ubuntu >/dev/null
@@ -358,7 +344,6 @@ test_validate_vm_forwards_bounded_smoke_and_local_profiles() {
 vm:--profile local --guest freebsd" "$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_quick_without_paths_inspects_git_changes() {
 	mkdir -p "$FAKE_ROOT/src"
 	printf '%s\n' "baseline" >"$FAKE_ROOT/src/zxfer_cli.sh"
@@ -400,7 +385,6 @@ shunit:--jobs 4 tests/test_zxfer_cli.sh tests/test_contract_example.sh tests/tes
 		"$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validate_doctor_reports_optional_capabilities_without_running_them() {
 	output=$(
 		VALIDATION_LOG="$VALIDATION_LOG" \
@@ -421,7 +405,6 @@ test_validate_doctor_reports_optional_capabilities_without_running_them() {
 	assertEquals "Doctor should not dispatch any validation runner." "" "$(cat "$VALIDATION_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 validation_map_field_values() {
 	l_field_number=$1
 	awk -F '\t' -v field="$l_field_number" '
@@ -432,7 +415,6 @@ validation_map_field_values() {
 	' "$ZXFER_ROOT/tests/validation_map.tsv" | sort -u
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validation_map_references_existing_targets() {
 	missing_units=
 	while IFS= read -r l_suite; do
@@ -502,7 +484,6 @@ EOF
 	assertEquals "Every documentation recommendation should name an existing repository surface." "" "$missing_docs"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validation_map_has_an_exact_row_for_every_manifest_module() {
 	missing_modules=
 	while IFS= read -r l_module; do
@@ -522,7 +503,6 @@ EOF
 		"" "$missing_modules"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_every_manifest_module_resolves_to_an_entry_suite() {
 	unresolved_modules=
 	while IFS= read -r l_module; do
@@ -546,7 +526,6 @@ EOF
 		"" "$unresolved_modules"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_validation_map_has_an_exact_row_for_every_integration_fragment() {
 	invalid_fragments=
 	l_fallback_count=$(awk -F '\t' \

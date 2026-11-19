@@ -16,10 +16,6 @@ oneTimeSetUp() {
 	zxfer_path_security_test_write_fake_tools "$TEST_TMPDIR/fake-bin"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	zxfer_test_reset_all_owner_state
 }
@@ -75,47 +71,46 @@ no bits|42 ---------- 1 501 0 0 Sep 26 21:28 none|42|501|0
 execute only|42 ------x--x 1 501 0 0 Sep 26 21:28 low|42|501|11
 leading dash and tab in the name|7 -rw-r----- 1 0 0 0 Jan  1 00:00 -lead	tab|7|0|640'
 
-	zxfer_test_capture_subshell '
+	capture_case() {
 		IFS="|"
 		set -f
-		while IFS="|" read -r l_platform l_line l_inode l_owner l_mode; do
-			zxfer_parse_path_metadata_line "$l_line"
-			printf "%s: status=%s inode=%s owner=%s mode=%s expected=%s/%s/%s\n" \
-				"$l_platform" "$?" "$g_zxfer_path_inode_result" \
-				"$g_zxfer_path_owner_uid_result" "$g_zxfer_path_mode_result" \
-				"$l_inode" "$l_owner" "$l_mode"
-		done <<EOF
-$rows
-EOF
+		zxfer_parse_path_metadata_line "$1" || return "$?"
+		printf 'inode=%s owner=%s mode=%s links=%s\n' \
+			"$g_zxfer_path_inode_result" "$g_zxfer_path_owner_uid_result" \
+			"$g_zxfer_path_mode_result" "$g_zxfer_path_link_count_result"
 		printf "ifs=<%s>\n" "$IFS"
 		case $- in
 		*f*) echo "globbing=disabled" ;;
 		*) echo "globbing=enabled" ;;
 		esac
-	'
-
-	printf '%s\n' "$rows" | while IFS='|' read -r platform line inode owner mode; do
-		assertContains "$platform should parse to inode, owner and mode." \
-			"$ZXFER_TEST_CAPTURE_OUTPUT" \
-			"$platform: status=0 inode=$inode owner=$owner mode=$mode expected="
-	done
-	assertContains "Parsing should keep the caller's IFS." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "ifs=<|>"
-	assertContains "Parsing should keep disabled globbing." \
-		"$ZXFER_TEST_CAPTURE_OUTPUT" "globbing=disabled"
+	}
+	while IFS='|' read -r platform line inode owner mode; do
+		zxfer_test_capture_subshell capture_case "$line"
+		# shellcheck disable=SC2086 # Split the fixture's ls fields deliberately.
+		set -- $line
+		assertEquals "$platform should parse successfully." 0 "$ZXFER_TEST_CAPTURE_STATUS"
+		assertEquals "$platform should retain all four fields and preserve shell options." \
+			"inode=$inode owner=$owner mode=$mode links=$3
+ifs=<|>
+globbing=disabled" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	done <<EOF
+$rows
+EOF
 }
 
 test_zxfer_parse_path_metadata_line_fails_closed_on_lines_it_cannot_trust() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		g_zxfer_path_inode_result=stale
 		g_zxfer_path_owner_uid_result=stale
 		g_zxfer_path_mode_result=stale
 		g_zxfer_path_permissions_result=stale
+		g_zxfer_path_link_count_result=stale
 		while IFS="|" read -r l_case l_line; do
 			zxfer_parse_path_metadata_line "$l_line"
-			printf "%s=%s <%s%s%s%s>\n" "$l_case" "$?" \
+			printf "%s=%s <%s%s%s%s%s>\n" "$l_case" "$?" \
 				"$g_zxfer_path_inode_result" "$g_zxfer_path_owner_uid_result" \
-				"$g_zxfer_path_mode_result" "$g_zxfer_path_permissions_result"
+				"$g_zxfer_path_mode_result" "$g_zxfer_path_permissions_result" \
+				"$g_zxfer_path_link_count_result"
 		done <<EOF
 empty|
 named_owner|42 drwx------ 2 owner 0 64 Jan  1 00:00 named
@@ -128,7 +123,8 @@ short_mode|42 drwx----- 2 0 0 64 Jan  1 00:00 bad
 bad_other_execute|42 drwxrwxrwz 2 0 0 64 Jan  1 00:00 bad
 sticky_in_owner|42 drwt------ 2 0 0 64 Jan  1 00:00 bad
 EOF
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	for failure_case in empty named_owner missing_owner missing_links \
 		letter_inode letter_links two_markers short_mode bad_other_execute \
@@ -196,7 +192,7 @@ test_zxfer_get_path_owner_uid_and_mode_fail_closed_when_ls_fails_or_path_is_miss
 	owner_path="$TEST_TMPDIR/path-owner-unavailable"
 	: >"$owner_path"
 
-	zxfer_test_capture_subshell '
+	capture_case() {
 		PATH="$TEST_TMPDIR/fake-bin:$PATH"
 		FAKE_LS_ANSWERS="*|FAIL"
 		export FAKE_LS_ANSWERS
@@ -207,7 +203,8 @@ test_zxfer_get_path_owner_uid_and_mode_fail_closed_when_ls_fails_or_path_is_miss
 		FAKE_LS_ANSWERS="*|42 -rw-r-----x+ 1 0 0 0 Jan  1 00:00 f"
 		zxfer_get_path_mode_octal "$TEST_TMPDIR/path-owner-unavailable"
 		printf "unparsed_mode_status=%s\n" "$?"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 	zxfer_get_path_owner_uid "$TEST_TMPDIR/does_not_exist" >/dev/null 2>&1
 	missing_owner_status=$?
 	zxfer_get_path_mode_octal "$TEST_TMPDIR/does_not_exist" >/dev/null 2>&1
@@ -227,16 +224,17 @@ test_zxfer_get_private_directory_security_record_reads_one_ls_line() {
 	mkdir -m 700 "$private_dir"
 	rm -f "$tool_log"
 
-	zxfer_test_capture_subshell '
+	capture_case() {
 		PATH="$TEST_TMPDIR/fake-bin:$PATH"
-		FAKE_TOOL_LOG="'"$tool_log"'"
+		FAKE_TOOL_LOG="$tool_log"
 		FAKE_LS_ANSWERS="*|    424242 drwx--S---  2 4242     0      512 Jan  1 00:00 private-record"
 		export FAKE_TOOL_LOG FAKE_LS_ANSWERS
 		zxfer_get_private_directory_security_record "$TEST_TMPDIR/private-record"
 		printf "status=%s record=%s\n" "$?" "$g_zxfer_private_directory_record_result"
 		zxfer_get_private_directory_security_record "$TEST_TMPDIR/does-not-exist"
 		printf "missing=%s record=<%s>\n" "$?" "$g_zxfer_private_directory_record_result"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "The private-directory record should hold the inode, owner and mode of one ls line; a missing directory records nothing." \
 		"status=0 record=424242	4242	2700
@@ -298,9 +296,10 @@ test_get_effective_user_uid_is_memoized_and_fails_closed() {
 	tool_log="$TEST_TMPDIR/effective-uid-tools.log"
 	rm -f "$tool_log"
 
-	zxfer_test_capture_subshell '
+	capture_case() {
+		# shellcheck disable=SC2123 # Exercise helper lookup on a controlled PATH.
 		PATH="$TEST_TMPDIR/fake-bin"
-		FAKE_TOOL_LOG="'"$tool_log"'"
+		FAKE_TOOL_LOG="$tool_log"
 		export FAKE_TOOL_LOG
 		FAKE_ID_UID=""
 		export FAKE_ID_UID
@@ -315,11 +314,13 @@ test_get_effective_user_uid_is_memoized_and_fails_closed() {
 		FAKE_ID_UID=4343
 		zxfer_get_effective_user_uid
 		printf "second=%s memo=<%s>\n" "$?" "$g_zxfer_effective_uid"
+		# shellcheck disable=SC2123 # Exercise lookup when id cannot be found.
 		PATH="$TEST_TMPDIR/no-such-bin"
 		g_zxfer_effective_uid=""
 		zxfer_get_effective_user_uid
 		printf "missing_id=%s memo=<%s>\n" "$?" "$g_zxfer_effective_uid"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "The effective UID should be read once, kept, and never taken from a failed or non-numeric id." \
 		"failed=1 memo=<>
@@ -347,14 +348,11 @@ test_session_reset_discards_an_inherited_effective_uid_memo() {
 		"" "$g_zxfer_temp_root_candidate_result"
 }
 
-# zxfer-test-fragment: suites/zxfer_path_security_validation_tests.sh
 # shellcheck source=tests/suites/zxfer_path_security_validation_tests.sh
 . "$TESTS_DIR/suites/zxfer_path_security_validation_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_path_security.sh" \
-		"$TESTS_DIR/suites/zxfer_path_security_validation_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

@@ -25,13 +25,14 @@ test_zxfer_append_failure_report_to_log_rejects_direct_symlink_target_when_compo
 	: >"$log_target"
 	ln -s "$log_target" "$log_symlink"
 
-	zxfer_test_capture_subshell "
+	capture_case() {
 		zxfer_find_symlink_path_component() {
 			return 1
 		}
-		ZXFER_ERROR_LOG=\"$log_symlink\" \\
-			zxfer_append_failure_report_to_log \"report\"
-	"
+		ZXFER_ERROR_LOG="$log_symlink" \
+			zxfer_append_failure_report_to_log "report"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Direct symlinked error-log targets should still be rejected when path-component scanning does not catch them first." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -49,11 +50,12 @@ test_zxfer_append_failure_report_to_log_warns_when_the_write_fails() {
 
 	# The report is written by the awk in g_cmd_awk; false stands in for an
 	# awk whose write or close fails.
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
-		ZXFER_ERROR_LOG=\"$log_path\"
+	capture_case() {
+		ZXFER_ERROR_LOG="$log_path"
 		g_cmd_awk=false
-		zxfer_append_failure_report_to_log \"append-failure-report\"
-	"
+		zxfer_append_failure_report_to_log "append-failure-report"
+	}
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_case
 
 	assertEquals "Append failures should return a non-zero status." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "Append failures should emit the documented warning." \
@@ -73,10 +75,11 @@ test_zxfer_append_failure_report_to_log_appends_existing_file_when_parent_is_not
 	chmod 600 "$log_path"
 	make_error_log_parent_read_only "$log_dir" || return 0
 
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
-		ZXFER_ERROR_LOG=\"$log_path\"
-		zxfer_append_failure_report_to_log \"message: appended-report\"
-	"
+	capture_case() {
+		ZXFER_ERROR_LOG="$log_path"
+		zxfer_append_failure_report_to_log "message: appended-report"
+	}
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_case
 	chmod 700 "$log_dir"
 
 	assertEquals "Existing secure ZXFER_ERROR_LOG files should still append cleanly when the trusted parent is not writable." \
@@ -98,10 +101,11 @@ test_zxfer_append_failure_report_to_log_warns_when_nonwritable_parent_needs_crea
 	mkdir -p "$log_dir"
 	make_error_log_parent_read_only "$log_dir" || return 0
 
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" "
-		ZXFER_ERROR_LOG=\"$log_path\"
-		zxfer_append_failure_report_to_log \"message: appended-report\"
-	"
+	capture_case() {
+		ZXFER_ERROR_LOG="$log_path"
+		zxfer_append_failure_report_to_log "message: appended-report"
+	}
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_case
 	chmod 700 "$log_dir"
 
 	assertEquals "Missing ZXFER_ERROR_LOG files should fail closed when the trusted parent is not writable." \
@@ -241,19 +245,17 @@ test_zxfer_append_failure_report_to_log_refuses_a_log_it_cannot_prove_private() 
 
 		set +e
 		(
-			case $l_fault in
-			wider_mode) chmod 644 "$log_path" ;;
-			foreign_owner) zxfer_get_path_owner_uid() { printf '%s\n' 1234; } ;;
-			unknown_owner) zxfer_get_path_owner_uid() { return 1; } ;;
-			unknown_mode) zxfer_get_path_mode_octal() { return 1; } ;;
-			unknown_links)
-				# Only the link-count read runs a plain ls; the rest use exec ls.
-				ls() {
-					[ "$2" != "$log_path" ] || return 1
-					command ls "$@"
-				}
-				;;
-			esac
+			[ "$l_fault" != wider_mode ] || chmod 644 "$log_path"
+			zxfer_read_path_metadata() {
+				zxfer_parse_path_metadata_line "$(command ls -ldin "$1")" || return 1
+				[ "$1" = "$log_path" ] || return 0
+				case $l_fault in
+				foreign_owner) g_zxfer_path_owner_uid_result=1234 ;;
+				unknown_owner) return 1 ;;
+				unknown_mode) g_zxfer_path_mode_result="" ;;
+				unknown_links) g_zxfer_path_link_count_result="" ;;
+				esac
+			}
 			ZXFER_ERROR_LOG=$log_path
 			zxfer_append_failure_report_to_log "message: should-not-append"
 		) </dev/null >/dev/null 2>"$stderr_file"

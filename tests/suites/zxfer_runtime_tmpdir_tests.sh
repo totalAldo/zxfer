@@ -237,7 +237,7 @@ test_zxfer_create_private_temp_dir_returns_failure_when_effective_tmpdir_lookup_
 	zxfer_create_private_temp_dir "zxfer_private_tmp" >"$TEST_TMPDIR/private_temp_dir.out" 2>/dev/null
 	status=$?
 
-	zxfer_source_runtime_modules_through "zxfer_runtime.sh"
+	zxfer_source_modules_for_tests "$ZXFER_ROOT"
 
 	assertEquals "Private temp directory creation should fail when the effective temp root cannot be determined." \
 		1 "$status"

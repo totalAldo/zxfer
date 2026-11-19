@@ -287,7 +287,7 @@ test_try_fast_recursive_noop_discovery_preserves_setup_failures() {
 			zxfer_build_source_snapshot_name_list_cmd() {
 				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
-			zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
+			zxfer_start_source_snapshot_producer() {
 				return 44
 			}
 			set +e
@@ -302,7 +302,7 @@ test_try_fast_recursive_noop_discovery_preserves_setup_failures() {
 			zxfer_build_source_snapshot_name_list_cmd() {
 				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
-			zxfer_execute_source_snapshot_name_list_background_sort_cmd() {
+			zxfer_start_source_snapshot_producer() {
 				sleep 5 &
 				g_last_background_pid=$!
 				zxfer_register_cleanup_pid "$g_last_background_pid" "background source snapshot no-op proof helper" || :
@@ -331,10 +331,7 @@ test_try_fast_recursive_noop_discovery_preserves_setup_failures() {
 		45 "$destination_status"
 }
 
-# The proof's source validation reads two staged files the fault injector
-# cannot fail: a failed stderr readback stops the proof with its own status
-# before any source diagnostic, and an unreadable count sidecar fails closed
-# as an empty source.
+# A failed stderr readback stops the proof before any source diagnostic.
 test_try_fast_recursive_noop_discovery_reports_source_failures() {
 	stderr_read_status=0
 	stderr_read_output=$(
@@ -359,39 +356,33 @@ test_try_fast_recursive_noop_discovery_reports_source_failures() {
 			zxfer_try_fast_recursive_noop_discovery
 		) 2>&1
 	) || stderr_read_status=$?
-	count_read_status=0
-	count_read_output=$(
-		(
-			g_option_O_origin_host="origin.example"
-			g_option_R_recursive="tank/src"
-			zxfer_build_source_snapshot_name_list_cmd() {
-				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
-			}
-			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
-				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
-				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
-			}
-			# Only the source count sidecar goes through this reader.
-			zxfer_read_snapshot_discovery_status_file() {
-				g_zxfer_snapshot_discovery_status_file_result=0
-				return 72
-			}
-			zxfer_throw_error() {
-				printf 'throw:%s:%s\n' "$1" "${2:-1}"
-				exit "${2:-1}"
-			}
-			zxfer_try_fast_recursive_noop_discovery
-		) 2>&1
-	) || count_read_status=$?
-
 	assertContains "Fast no-op proof should report staged stderr readback failures before surfacing source failure context." \
 		"$stderr_read_output" "throw:Failed to read staged source snapshot stderr.:68"
 	assertEquals "Fast no-op proof should preserve staged stderr readback failure status." \
 		68 "$stderr_read_status"
-	assertContains "Fast no-op proof should fail closed when source snapshot count sidecar validation fails." \
-		"$count_read_output" "throw:Failed to retrieve snapshots from the source:1"
-	assertEquals "Fast no-op proof should use the generic source failure status for invalid source count sidecars." \
-		1 "$count_read_status"
+}
+
+# A producer may omit the line terminator on its final record. Compare all
+# identity bytes, including the GUID, even when it is the only source record.
+test_fast_recursive_noop_compares_the_whole_unterminated_source_record() {
+	for destination_guid in 123 1234; do
+		proof_status=0
+		(
+			g_option_R_recursive=tank/src
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_zxfer_shell_command_result="printf '%s' 'tank/src@snapA${ZXFER_TAB}123'"
+			}
+			zxfer_start_destination_snapshot_name_sorted_fifo_producer() {
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA${ZXFER_TAB}$destination_guid"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_try_fast_recursive_noop_discovery
+		) || proof_status=$?
+		expected_status=0
+		[ "$destination_guid" = 123 ] || expected_status=1
+		assertEquals "The proof accepts only a complete identity match for GUID $destination_guid." \
+			"$expected_status" "$proof_status"
+	done
 }
 
 # The proof's destination producer reports its listing, normalize and sort
@@ -522,7 +513,7 @@ test_try_fast_recursive_noop_discovery_reports_compare_failures() {
 				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA"
 				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
 			}
-			comm() {
+			cmp() {
 				return 2
 			}
 			zxfer_throw_error() {
@@ -716,7 +707,7 @@ test_fast_recursive_noop_owner_reports_failure_after_releasing_scratch() {
 }
 
 # Allocation scratch and result channels may change while the producers run.
-# The owner must still wait with the right timers, release its seven proof
+# The owner must still wait with the right timers, release its proof
 # files and retain the successful raw listing when the streams differ.
 test_fast_recursive_noop_owner_keeps_paths_pids_and_timers_across_helper_scratch_mutation() {
 	output=$(
@@ -820,8 +811,7 @@ test_full_discovery_keeps_owned_paths_across_helper_scratch_mutation() {
 				g_zxfer_runtime_artifact_path_result=clobbered
 			}
 			zxfer_set_g_recursive_source_list() {
-				[ "$1" = "$source_seen" ] && [ "$2" = "$destination_sorted_seen" ] &&
-					[ "$3" = "$sorted_seen" ] || return 73
+				[ "$#" -eq 2 ] && [ "$1" = "$sorted_seen" ] && [ "$2" = "$destination_sorted_seen" ] || return 73
 				g_recursive_source_list=""
 				g_recursive_source_dataset_list=""
 			}

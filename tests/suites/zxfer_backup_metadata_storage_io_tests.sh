@@ -8,7 +8,6 @@
 zxfer_backup_test_stub_local_transport() {
 	zxfer_build_remote_sh_c_command() {
 		g_zxfer_shell_command_result=$1
-		printf '%s\n' "$1"
 	}
 	zxfer_invoke_ssh_shell_command_for_host() { sh -c "$2"; }
 }
@@ -590,7 +589,6 @@ test_list_remote_backup_storage_dirs_needs_find_only_for_an_existing_root_direct
 				g_zxfer_secure_path=$no_find_bin
 				zxfer_build_remote_sh_c_command() {
 					g_zxfer_shell_command_result=$1
-					printf '%s\n' "$1"
 				}
 				zxfer_invoke_ssh_shell_command_for_host() { sh -c "$2"; }
 				zxfer_list_remote_backup_storage_dirs

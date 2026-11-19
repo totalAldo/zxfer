@@ -4,6 +4,7 @@
 # the props scenario's fixture check. The default rows are covered by
 # tests/test_zxfer_microbench_budgets.sh.
 #
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -15,11 +16,6 @@ oneTimeSetUp() {
 	MICROBENCH_BIN="$ZXFER_ROOT/tests/run_microbench.sh"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_forks_mode_appends_advisory_fork_rows() {
 	trace_bash=${ZXFER_MICROBENCH_BASH:-$(command -v bash 2>/dev/null)}
 	# shellcheck disable=SC2016  # expanded by the bash under test
@@ -49,7 +45,6 @@ test_forks_mode_appends_advisory_fork_rows() {
 		"[ '${run_forks:-0}' -gt 0 ]"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_forks_mode_refuses_a_missing_bash() {
 	status=0
 	output=$(ZXFER_MICROBENCH_BASH="$TEST_TMPDIR/missing-bash" TMPDIR=$TEST_TMPDIR \
@@ -62,9 +57,29 @@ test_forks_mode_refuses_a_missing_bash() {
 		"$output" "noop	TOTAL"
 }
 
+test_spawn_rows_follow_tool_order_and_total_includes_every_log_entry() {
+	fake_zxfer="$TEST_TMPDIR/spawn_zxfer"
+	cat >"$fake_zxfer" <<'EOF'
+#!/bin/sh
+[ "$1" = -n ] || printf '%s\n' sort sed sort unlisted >>"$MOCK_SPAWN_LOG"
+EOF
+	chmod +x "$fake_zxfer"
+	output=$(ZXFER_MOCKBIN_ZXFER_BIN=$fake_zxfer sh "$MICROBENCH_BIN" -d 1 -s 2 noop dryrun_incr) ||
+		fail "Unable to run the spawn-count fixture."
+	counts=$(printf '%s\n' "$output" | awk -F '\t' '$2 ~ /^(sed|awk|sort|TOTAL)$/ {print $1, $2, $3}')
+	assertEquals "Preserve order, zero counts, and the total for empty and populated logs." \
+		'noop sed 1
+noop awk 0
+noop sort 2
+noop TOTAL 4
+dryrun_incr sed 0
+dryrun_incr awk 0
+dryrun_incr sort 0
+dryrun_incr TOTAL 0' "$counts"
+}
+
 # The props fixture's properties already match on both sides; a launcher
 # that changes one is measuring other work, so the scenario must fail.
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_props_scenario_fails_when_a_property_changes() {
 	fake_zxfer="$TEST_TMPDIR/props_zxfer"
 	cat >"$fake_zxfer" <<'EOF'

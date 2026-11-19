@@ -64,7 +64,6 @@ test_check_backup_storage_dir_if_needed_remote_allows_trusted_absolute_root_syml
 	(
 		zxfer_build_remote_sh_c_command() {
 			g_zxfer_shell_command_result=$1
-			printf '%s\n' "$1"
 		}
 		zxfer_invoke_ssh_shell_command_for_host() {
 			sh -c "$2"
@@ -86,7 +85,7 @@ test_check_backup_storage_dir_if_needed_remote_allows_trusted_absolute_root_syml
 }
 
 test_check_backup_storage_dir_if_needed_preserves_remote_dry_run_render_failures() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		g_option_k_backup_property_mode=1
 		g_option_n_dryrun=1
 		g_option_v_verbose=1
@@ -96,7 +95,8 @@ test_check_backup_storage_dir_if_needed_preserves_remote_dry_run_render_failures
 			return 46
 		}
 		zxfer_check_backup_storage_dir_if_needed
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Remote dry-run backup preflight should preserve prepared renderer failures." \
 		46 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -138,8 +138,7 @@ test_check_backup_storage_dir_if_needed_preserves_remote_dry_run_builder_failure
 	l_builder_log="$TEST_TMPDIR/remote_backup_dry_run_builder_failure.log"
 	: >"$l_builder_log"
 
-	# shellcheck disable=SC2016  # Evaluated by zxfer_test_capture_subshell.
-	zxfer_test_capture_subshell '
+	capture_case() {
 		g_option_k_backup_property_mode=1
 		g_option_n_dryrun=1
 		g_option_v_verbose=1
@@ -152,7 +151,8 @@ test_check_backup_storage_dir_if_needed_preserves_remote_dry_run_builder_failure
 			printf "%s\n" unexpected-renderer-call >>"$l_builder_log"
 		}
 		zxfer_check_backup_storage_dir_if_needed
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Remote dry-run backup preflight should preserve directory-script builder failures." \
 		45 "$ZXFER_TEST_CAPTURE_STATUS"

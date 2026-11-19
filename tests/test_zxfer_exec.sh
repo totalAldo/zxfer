@@ -54,20 +54,14 @@ tearDown() {
 	relax_test_tmpdir_permissions
 }
 
-# Each fragment has a "zxfer-test-fragment" marker, a source line and a path
-# in suite(); keep the three in the same order so listing and execution agree.
-# zxfer-test-fragment: suites/zxfer_exec_command_tests.sh
+# Literal fragment source lines define loading, registration and discovery order.
 # shellcheck source=tests/suites/zxfer_exec_command_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_command_tests.sh"
-# zxfer-test-fragment: suites/zxfer_exec_background_shell_tests.sh
 # shellcheck source=tests/suites/zxfer_exec_background_shell_tests.sh
 . "$TESTS_DIR/suites/zxfer_exec_background_shell_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_exec.sh" \
-		"$TESTS_DIR/suites/zxfer_exec_command_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_exec_background_shell_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

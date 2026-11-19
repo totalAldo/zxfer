@@ -2,6 +2,7 @@
 #
 # shunit2 tests for deterministic Solaris/illumos man-page generation.
 #
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -13,11 +14,6 @@ oneTimeSetUp() {
 	MANPAGE_GENERATOR="$ZXFER_ROOT/tests/generate_solaris_manpage.sh"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_solaris_manpage_generator_changes_only_the_rendering_contract() {
 	canonical="$TEST_TMPDIR/canonical.8"
 	cat >"$canonical" <<'EOF'
@@ -40,7 +36,6 @@ EOF
 		"$output" 'zxfer \- fixture'
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_checked_in_solaris_manpage_matches_the_canonical_rendering() {
 	"$MANPAGE_GENERATOR" --check
 
@@ -48,7 +43,6 @@ test_checked_in_solaris_manpage_matches_the_canonical_rendering() {
 		0 "$?"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_solaris_manpage_write_publishes_a_world_readable_file() {
 	canonical="$TEST_TMPDIR/write-canonical.8"
 	destination="$TEST_TMPDIR/write-generated.1m"

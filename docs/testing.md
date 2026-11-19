@@ -74,7 +74,7 @@ neither it nor `tests/validation_map.tsv` is evaluated as shell.
   never runs integration, performance and documentation follow-ups. A change
   to `src/zxfer_NAME.sh` selects `tests/test_zxfer_NAME.sh` and every
   contract suite by name; a `tests/suites/*` fragment selects the entry suite
-  whose `# zxfer-test-fragment:` marker names it. Every path must also match
+  whose literal source statement names it. Every path must also match
   a row of `tests/validation_map.tsv` (first match wins; an unmatched path
   stops `quick`), which adds exception suites (`@contract` means every
   contract suite, `@self` the changed suite), integration groups, perf cases
@@ -165,17 +165,22 @@ fragments it runs from `tests/suites/zxfer_NAME_TOPIC_tests.sh`.
 `test_zxfer_mock_toolchain.sh` tests the canned zfs and
 `test_zxfer_microbench_budgets.sh` the spawn budgets.
 
-A fragment takes three lines in its entry, in order: a
-`# zxfer-test-fragment: suites/NAME` marker (read by `--list-tests` and
-`validate.sh quick`), a `.` source line, and its path in
-`suite() { zxfer_test_register_fragment_tests ...; }`, which registers every
-`test*()` function in file order. A fragment keeps the fixture its cases were
+A fragment's literal `. "$TESTS_DIR/suites/NAME.sh"` source statement is its
+single membership declaration. Quote the entire path and keep the ShellCheck
+source annotation above it. `tests/helpers/test_catalog.sh` reads the statements
+for registration, `--list-tests`, and `validate.sh quick` without evaluating the
+entry script.
+`suite() { zxfer_test_register_suite_tests "$0"; }` registers the entry's tests
+followed by each fragment's tests in source order. A fragment keeps the fixture its cases were
 written for: the entry's `setUp` asks `zxfer_test_running_test_is_in FILE`
 (`tests/helpers/loader.sh`) and applies it to that fragment's cases only.
 
 `tests/test_helper.sh` loads every module in `src/zxfer_modules.sh` order, so
 every suite sees the whole function set, and provides the lifecycle and
-capture helpers. A suite that needs clean module state calls
+capture helpers. Call `zxfer_test_create_tmpdir` from `oneTimeSetUp` for a
+suite-owned directory. The default `oneTimeTearDown` removes it. A suite
+with a custom teardown calls `zxfer_test_cleanup_tmpdir` after its other cleanup.
+A suite that needs clean module state calls
 `zxfer_test_reset_all_owner_state` (`tests/helpers/lifecycle.sh`) from
 `setUp`, directly or through its domain fixture; it runs the production owner
 resets without creating a run root or narrowing PATH. Stub `src/` functions
@@ -183,10 +188,16 @@ inside a subshell. Domain fixtures are opt-in files in
 `tests/helpers/*_fixtures.sh` (`exec`, `remote_host`, `runtime`, `send_job`,
 `property`, `replication`, `snapshot_discovery`, `fake_tool`, `backup`);
 contract suites share `tests/helpers/blackbox.sh` (the fixture tree, canned
-zfs wrappers, and mock ssh, parallel, zstd and `svcadm`). The legacy
-string-capture helpers `zxfer_test_capture_subshell` and
-`zxfer_test_capture_subshell_split` evaluate their script; the lint shellcheck
-target rejects any other `eval` in the shared helpers.
+zfs wrappers, and mock ssh, parallel, zstd and `svcadm`). Use
+`planning_run_recursive STATE_DIR [OPTION...]` to replicate between the
+fixture roots. Use `planning_run_zxfer` for explicit source and destination arguments.
+`zxfer_test_capture_subshell COMMAND [ARG...]` and
+`zxfer_test_capture_subshell_split OUT ERR COMMAND [ARG...]` run ordinary commands
+or scenario functions inside a subshell and preserve their status. Scenario
+functions keep stubs and temporary shell options isolated without quoted shell
+programs; shared helpers contain no `eval`. An intentional reload after stubbing
+uses `zxfer_source_modules_for_tests "$ZXFER_ROOT"`; partial-load test aliases
+have been removed.
 
 The vendored `tests/shunit2/shunit2` (2.1.8) carries two local changes:
 `_shunit_escapeCharInStr` escapes with `awk` (BSD `sed` rejects upstream's
@@ -279,9 +290,11 @@ tests/test_contract_*.sh` reports black-box coverage. It writes
 `coverage/bash-xtrace/summary.tsv` (with a `TOTAL` row) and `missing.txt`,
 discounts syntax xtrace cannot attribute (case labels, heredoc bodies,
 grouping delimiters, multi-line strings), and counts the `./zxfer` entry point
-unless `ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=0`. Coverage is report-only: the
-exit status reflects only the suites; `--report-only` is accepted and
-ignored.
+unless `ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=0`. An unreadable coverage input
+fails report generation and names the path. An empty trace records zero hits.
+Coverage percentages are informational. The runner returns nonzero for a
+failed suite or report generation error and accepts `--report-only` for
+compatibility.
 
 ## Lint
 
@@ -325,7 +338,9 @@ sequenceDiagram
   `ci` (plus OmniOS r151058). Automated runs use `smoke` or `local` only.
   `--list-profiles` and `--list-guests` print the choices;
   `tests/vm/guest_manifest.tsv` holds the guest metadata, validated before
-  use and pinned by `tests/test_run_vm_matrix.sh`.
+  use and pinned by `tests/test_run_vm_matrix.sh`. Each profile named in a
+  guest’s comma-separated `strict_qemu_profiles` field requires hardware
+  virtualization for that guest.
 - Options: `--guest NAME`, `--jobs N` (guests in parallel), `--test-layer`,
   `--backend auto|qemu|ci-managed`, `--artifacts-dir`, `--cache-dir`,
   `--only-test NAME[,NAME]` and `--failed-tests-only` (integration layer
@@ -376,7 +391,11 @@ ZFS host; without `--yes` it asks once before creating pools.
   `fanout_local_j4_props_noop`, `chain_remote_mock`,
   `chain_remote_mock_noop`, `chain_remote_mock_pull_noop` (`-O` only) and
   `chain_remote_mock_compressed`. No-op cases seed the destination and time
-  the second run; incremental cases time sending one new snapshot.
+  the second run; incremental cases time sending one new snapshot. Before
+  timing starts, the progress line reports the estimated bytes for that
+  transfer. A no-op reports zero without a send-size probe. Elapsed time uses
+  Perl's monotonic clock when available. The fallback uses the system clock
+  and rejects a sample if the clock moves backward during measurement.
 - Artifacts: `run-info.tsv`, `samples.tsv` (every warmup and sample, with the
   `-V` counters; counters an older binary lacks stay empty), `summary.tsv`
   and `summary.md` (measured samples only), `raw/`, and with a baseline
@@ -422,8 +441,11 @@ or directory, an empty directory, and any fragment that is not
 definition-only: outside a function only comments and `name() {` headers may
 appear, a function ends at a lone `}` in column 0 (the shfmt layout lint
 enforces), and a `name()` pattern inside a body fails as a nested
-definition. Every registry name needs exactly one top-level definition and
-every fragment function a registry row. `tests/integration/hostile_names_tests.sh`
+definition. Startup reads the registry once for both ordered test lists. It
+checks every fragment and collects its function names in the same scan.
+Each registered name must have exactly one definition, and every definition
+must be registered. The harness then sources the files it checked and verifies
+that each registered function is callable. `tests/integration/hostile_names_tests.sh`
 holds the hostile dataset-name and property-value cases.
 
 The harness uses file-backed pools only, sparse vdevs under its work tree,

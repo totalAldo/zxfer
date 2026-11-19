@@ -2,6 +2,10 @@
 # Shared shunit lifecycle, temporary-directory, and default-state helpers.
 # shellcheck disable=SC2034,SC2317,SC2329
 
+# Suites can inherit TEST_TMPDIR from their caller. Only the directory this
+# suite successfully created belongs to its teardown.
+zxfer_test_owned_tmpdir=""
+
 zxfer_test_create_tmpdir() {
 	l_prefix=$1
 
@@ -9,11 +13,13 @@ zxfer_test_create_tmpdir() {
 		echo "Unable to create test temp directory with prefix ${l_prefix}." >&2
 		exit 1
 	}
+	zxfer_test_owned_tmpdir=$TEST_TMPDIR
 }
 
 zxfer_test_cleanup_tmpdir() {
-	if [ -n "${TEST_TMPDIR:-}" ]; then
-		rm -rf "$TEST_TMPDIR"
+	if [ -n "$zxfer_test_owned_tmpdir" ]; then
+		rm -rf "$zxfer_test_owned_tmpdir" || return "$?"
+		zxfer_test_owned_tmpdir=""
 	fi
 }
 
@@ -126,7 +132,7 @@ oneTimeSetUp() {
 }
 
 oneTimeTearDown() {
-	:
+	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {

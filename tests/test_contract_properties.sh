@@ -237,34 +237,6 @@ get -Hpo property,value,source -- com.x:note $ZXFER_MOCKBIN_SOURCE_ROOT" \
 		"$(grep '^get .*com.x:note' "$ZFS_LOG")"
 }
 
-# Purpose: Fail unless every zfs get naming the remote side (-O: the source,
-# -T: the destination) crossed ssh, the live and lone reads included, and no
-# get naming the other side did. Remote argv reaches SSH_LOG as quoted
-# tokens, so quotes are stripped before matching.
-# Usage: blackbox_properties_assert_reads_routed O|T
-blackbox_properties_assert_reads_routed() {
-	l_routed_remote=$ZXFER_MOCKBIN_DEST_ROOT
-	l_routed_local=$ZXFER_MOCKBIN_SOURCE_ROOT
-	if [ "$1" = O ]; then
-		l_routed_remote=$ZXFER_MOCKBIN_SOURCE_ROOT
-		l_routed_local=$ZXFER_MOCKBIN_DEST_ROOT
-	fi
-	l_routed_ssh=$(tr -d "'" <"$SSH_LOG")
-	l_routed_gets=$(grep '^get ' "$ZFS_LOG" | grep -F -e " $l_routed_remote" || :)
-	assertNotNull "-$1: the remote side's properties must be read" "$l_routed_gets"
-	while IFS= read -r l_routed_get; do
-		[ -n "$l_routed_get" ] || continue
-		case $l_routed_ssh in
-		*"$l_routed_get"*) ;;
-		*) fail "-$1: this read ran locally: $l_routed_get" ;;
-		esac
-	done <<EOF
-$l_routed_gets
-EOF
-	assertEquals "-$1: no read of the local side may cross ssh" 0 \
-		"$(printf '%s\n' "$l_routed_ssh" | grep -c -e "get .* $l_routed_local" || :)"
-}
-
 # Purpose: Seed STATE_DIR so both roots hold hn:desc (two lines), then -x:y
 # (one line) and -x:m (two lines), printed raw as zfs get prints them, and
 # answer their lone reads as zfs's getopt does: a property operand that
@@ -319,7 +291,7 @@ test_dash_named_properties_are_read_alone_after_end_of_options() {
 			PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
 				planning_run_property_pass "-$l_dash_mode" localhost -P
 			unset MOCK_SSH_LOG
-			blackbox_properties_assert_reads_routed "$l_dash_mode"
+			planning_assert_property_reads_routed_by_side "$l_dash_mode"
 			;;
 		esac
 		for l_dash_root in "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT"; do
@@ -534,8 +506,7 @@ test_repeated_override_property_is_a_usage_error_before_any_zfs_call() {
 	planning_add_property_transfer_fixtures
 	for l_repeated in compression=lz4,compression=gzip compression=gzip,atime=off,compression=gzip; do
 		rm -f "$ZFS_LOG"
-		planning_run_zxfer "$STATE_DIR" -P -o "$l_repeated" -R \
-			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$STATE_DIR" -P -o "$l_repeated"
 		assertEquals "-o $l_repeated must exit 2" 2 "$?"
 		blackbox_properties_assert_usage_report "cli validation" \
 			"Duplicate property for -o override: compression."
@@ -549,8 +520,7 @@ test_override_missing_on_the_source_fails_before_the_destination_is_touched() {
 	planning_clone_state "$FIXTURE_DIR/noop" missing_override
 	planning_add_property_transfer_fixtures
 
-	planning_run_zxfer "$STATE_DIR" -o compression=gzip,copies=2 -R \
-		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	planning_run_recursive "$STATE_DIR" -o compression=gzip,copies=2
 	assertEquals "an -o property the source lacks must exit 2" 2 "$?"
 	blackbox_properties_assert_usage_report "property transfer" \
 		"Missing source property for -o override: copies."
@@ -708,8 +678,7 @@ test_property_pass_applies_each_plan_rule_with_one_set_and_one_inherit_per_prope
 		ZXFER_AWK_UNSUPPORTED_LIST=compression,checksum,quota
 		ZXFER_AWK_REMOVE_LIST=atime,readonly
 		export ZXFER_AWK_UNSUPPORTED_LIST ZXFER_AWK_REMOVE_LIST
-		planning_run_zxfer "$STATE_DIR" -P -R \
-			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$STATE_DIR" -P
 	)
 	assertEquals "the -P pass must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$?"
 	l_expected="MUTATE set compression=lz4 checksum=sha256 com.x:path=D:\\temp $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
@@ -865,8 +834,7 @@ test_missing_children_are_created_with_their_creation_properties_and_recorded() 
 	(
 		ZXFER_BACKUP_DIR=$l_backup_root
 		export ZXFER_BACKUP_DIR
-		planning_run_zxfer "$STATE_DIR" -k -P -o compression=gzip,atime=off -R \
-			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$STATE_DIR" -k -P -o compression=gzip,atime=off
 	)
 	assertEquals "the -k -P -o pass must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$?"
 	l_root=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT
@@ -984,8 +952,7 @@ test_missing_destination_root_is_created_with_its_whole_list_after_its_parent() 
 		MOCK_FAIL_MATCH="list -t filesystem,volume -Hr -o name $ZXFER_MOCKBIN_DEST_ROOT"
 		MOCK_FAIL_STDERR="cannot open '$ZXFER_MOCKBIN_DEST_ROOT': dataset does not exist"
 		export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH MOCK_FAIL_STDERR
-		planning_run_zxfer "$STATE_DIR" -P -o casesensitivity=insensitive -R \
-			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$STATE_DIR" -P -o casesensitivity=insensitive
 	)
 	assertEquals "the pass must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$?"
 	l_root=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT
@@ -1015,8 +982,7 @@ blackbox_properties_run_failing() {
 		MOCK_FAIL_MATCH=$l_failing_match
 		MOCK_FAIL_STDERR=$l_failing_stderr
 		export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH MOCK_FAIL_STDERR
-		planning_run_zxfer "$STATE_DIR" "$@" -R \
-			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$STATE_DIR" "$@"
 	) </dev/null || BLACKBOX_PROPERTIES_STATUS=$?
 }
 
@@ -1081,12 +1047,14 @@ test_missing_creation_time_properties_are_read_back_and_enforced() {
 	done
 	blackbox_properties_run_failing \
 		"get -Hpo property,value,source -- utf8only $ZXFER_MOCKBIN_SOURCE_ROOT" \
-		"bad property list: property 'utf8only' does not apply to datasets of this type" -P
+		"bad property list: property 'utf8only' does not apply to datasets of this type" -V -P
 	assertEquals "an inapplicable property is left out; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
 		0 "$BLACKBOX_PROPERTIES_STATUS"
 	planning_assert_no_mutations
 	assertEquals "after a failed comma-list get, each property is read alone after --" 9 \
-		"$(grep -c '^get -Hpo property,value,source -- [a-z0-9]* ' "$ZFS_LOG")"
+		"$(grep -Ec '^(FAIL 1 zfs )?get -Hpo property,value,source -- [a-z0-9]* ' "$ZFS_LOG")"
+	assertEquals "an inapplicable source property is probed only once per pass" 1 \
+		"$(grep -cx 'zxfer profile: required_property_backfill_gets=12' "$CASE_DIR/zxfer.stderr")"
 
 	blackbox_properties_add_backfill_fixture backfill_refused creation_rows.list 0
 	sed 's/^casesensitivity	sensitive/casesensitivity	insensitive/' \
@@ -1094,7 +1062,7 @@ test_missing_creation_time_properties_are_read_back_and_enforced() {
 		fail "Unable to write the insensitive rows."
 	blackbox_properties_prepend_rules \
 		"get -Hpo property,value,source casesensitivity,normalization,utf8only $ZXFER_MOCKBIN_SOURCE_ROOT	insensitive_rows.list	0"
-	planning_run_zxfer "$STATE_DIR" -P -R "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+	planning_run_recursive "$STATE_DIR" -P
 	blackbox_properties_assert_stopped "creation-time mismatch" 1 "$?" "property transfer" \
 		'The property "casesensitivity" may only be set\nat filesystem creation time. To modify this property\nyou will need to first destroy target filesystem.'
 	planning_assert_no_send_receive

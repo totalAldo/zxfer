@@ -24,10 +24,6 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_mock_toolchain"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	unset MOCK_ZFS_LOG MOCK_ZFS_FIXTURE_DIR MOCK_ZFS_DEFAULT_STATUS \
 		MOCK_ZFS_STRICT_RECEIVE MOCK_SPAWN_LOG MOCK_SSH_LOG MOCK_FAIL_TOOL \
@@ -107,8 +103,7 @@ test_prepare_dir_symlinks_real_tools() {
 }
 
 test_prepare_dir_rejects_missing_tool() {
-	zxfer_test_capture_subshell \
-		"zxfer_mockbin_prepare_dir '$CASE_DIR/bin' zxfer_no_such_tool_xyz"
+	zxfer_test_capture_subshell zxfer_mockbin_prepare_dir "$CASE_DIR/bin" zxfer_no_such_tool_xyz
 	assertEquals "missing tool should fail" 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertTrue "missing tool should be named in the error" \
 		"printf '%s\n' \"\$ZXFER_TEST_CAPTURE_OUTPUT\" | grep -q 'zxfer_no_such_tool_xyz'"
@@ -141,8 +136,7 @@ test_counting_wrapper_logs_and_execs_real_tool() {
 }
 
 test_counting_wrapper_rejects_relative_real_tool() {
-	zxfer_test_capture_subshell \
-		"zxfer_mockbin_write_counting_wrapper '$CASE_DIR/awk' awk"
+	zxfer_test_capture_subshell zxfer_mockbin_write_counting_wrapper "$CASE_DIR/awk" awk
 	assertEquals "relative real-tool path should fail" 1 \
 		"$ZXFER_TEST_CAPTURE_STATUS"
 }
@@ -551,20 +545,18 @@ test_build_fixture_tree_layout_and_guids() {
 	assertTrue "incremental destination must miss the last snapshot" \
 		"! grep -q '@snap3' '$CASE_DIR/fixtures/incremental/dst_snapshots.list'"
 
-	zxfer_test_capture_subshell \
-		"zxfer_mockbin_build_fixture_tree '$CASE_DIR/fixtures2' 2 1"
+	zxfer_test_capture_subshell zxfer_mockbin_build_fixture_tree "$CASE_DIR/fixtures2" 2 1
 	assertEquals "snaps-per-dataset below 2 should be rejected" 1 \
 		"$ZXFER_TEST_CAPTURE_STATUS"
-	zxfer_test_capture_subshell \
-		"zxfer_mockbin_build_fixture_tree '$CASE_DIR/fixtures3' x 3"
+	zxfer_test_capture_subshell zxfer_mockbin_build_fixture_tree "$CASE_DIR/fixtures3" x 3
 	assertEquals "non-numeric dataset count should be rejected" 1 \
 		"$ZXFER_TEST_CAPTURE_STATUS"
 }
 
 test_run_zxfer_refuses_without_canned_zfs() {
 	mkdir -p "$CASE_DIR/emptybin"
-	zxfer_test_capture_subshell \
-		"zxfer_mockbin_run_zxfer '$CASE_DIR/emptybin' '$CASE_DIR/fix' '$CASE_DIR/zfs.log' -R srcpool/data dstpool/back"
+	zxfer_test_capture_subshell zxfer_mockbin_run_zxfer "$CASE_DIR/emptybin" \
+		"$CASE_DIR/fix" "$CASE_DIR/zfs.log" -R srcpool/data dstpool/back
 	assertEquals "runner must refuse when the canned zfs is missing" 1 \
 		"$ZXFER_TEST_CAPTURE_STATUS"
 	assertTrue "runner should explain the refusal" \

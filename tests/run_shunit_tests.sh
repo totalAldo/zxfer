@@ -27,6 +27,8 @@ set -eu
 
 ZXFER_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TEST_DIR="$ZXFER_ROOT/tests"
+# shellcheck source=tests/helpers/test_catalog.sh
+. "$TEST_DIR/helpers/test_catalog.sh"
 TAB=$(printf '\t')
 
 RUNNER_REQUESTED_JOBS=
@@ -160,7 +162,7 @@ EOF
 
 append_suite_selection() {
 	l_selection_input=$1
-	l_selection_suite=$(resolve_suite_path "$l_selection_input")
+	l_selection_suite=$(zxfer_test_resolve_suite_path "$ZXFER_ROOT" "$l_selection_input")
 	case "$l_selection_suite" in
 	*"$TAB"* | *'
 '*)
@@ -261,24 +263,6 @@ suite_count_availability_clause() {
 	esac
 }
 
-resolve_suite_path() {
-	l_suite=$1
-	case "$l_suite" in
-	/*)
-		printf '%s\n' "$l_suite"
-		;;
-	"$TEST_DIR"/*)
-		printf '%s\n' "$l_suite"
-		;;
-	tests/*)
-		printf '%s\n' "$ZXFER_ROOT/$l_suite"
-		;;
-	*)
-		printf '%s\n' "$TEST_DIR/$l_suite"
-		;;
-	esac
-}
-
 resolve_test_shell_runner() {
 	l_test_shell=${ZXFER_TEST_SHELL:-}
 
@@ -324,7 +308,7 @@ count_runnable_suites() {
 	l_count=0
 
 	for l_suite in "$@"; do
-		l_suite_path=$(resolve_suite_path "$l_suite")
+		l_suite_path=$(zxfer_test_resolve_suite_path "$ZXFER_ROOT" "$l_suite")
 
 		[ -f "$l_suite_path" ] || continue
 
@@ -356,7 +340,7 @@ list_selected_suites() {
 	l_list_status=0
 
 	for l_suite in "$@"; do
-		l_suite_path=$(resolve_suite_path "$l_suite")
+		l_suite_path=$(zxfer_test_resolve_suite_path "$ZXFER_ROOT" "$l_suite")
 		if [ ! -f "$l_suite_path" ]; then
 			echo "Missing suite: $l_suite_path" >&2
 			l_list_status=1
@@ -373,25 +357,11 @@ list_selected_suites() {
 	return "$l_list_status"
 }
 
-# Print the shunit test definitions from one suite or sourced behavior fragment.
-list_test_names_in_definition_file() {
-	l_definition_file=$1
-	l_definition_suite=$2
-
-	awk -v suite="$l_definition_suite" '
-		/^test[A-Za-z0-9_]*\(\)[[:space:]]*\{/ {
-			name = $0
-			sub(/\(.*/, "", name)
-			printf "%s\t%s\n", suite, name
-		}
-	' "$l_definition_file"
-}
-
 list_selected_test_names() {
 	l_list_status=0
 
 	for l_suite in "$@"; do
-		l_suite_path=$(resolve_suite_path "$l_suite")
+		l_suite_path=$(zxfer_test_resolve_suite_path "$ZXFER_ROOT" "$l_suite")
 		if [ ! -f "$l_suite_path" ]; then
 			echo "Missing suite: $l_suite_path" >&2
 			l_list_status=1
@@ -403,33 +373,13 @@ list_selected_test_names() {
 			;;
 		esac
 		l_display_path=$(display_suite_path "$l_suite_path")
-		list_test_names_in_definition_file "$l_suite_path" "$l_display_path"
-		l_suite_dir=$(dirname "$l_suite_path")
-		l_fragment_paths=$(awk '
-			/^# zxfer-test-fragment: / {
-				fragment = $0
-				sub(/^# zxfer-test-fragment: /, "", fragment)
-				print fragment
-			}
-		' "$l_suite_path")
-		for l_fragment_path in $l_fragment_paths; do
-			case "$l_fragment_path" in
-			'' | /* | ../* | */../* | */.. | \
-				*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-]*)
-				echo "Invalid suite test fragment path: $l_fragment_path" >&2
-				l_list_status=1
-				continue
-				;;
-			*) ;;
-			esac
-			l_fragment_file=$l_suite_dir/$l_fragment_path
-			if [ ! -f "$l_fragment_file" ]; then
-				echo "Missing suite test fragment: $l_fragment_file" >&2
-				l_list_status=1
-				continue
-			fi
-			list_test_names_in_definition_file "$l_fragment_file" "$l_display_path"
-		done
+		if l_test_names=$(zxfer_test_suite_names "$l_suite_path"); then
+			for l_test_name in $l_test_names; do
+				printf '%s\t%s\n' "$l_display_path" "$l_test_name"
+			done
+		else
+			l_list_status=1
+		fi
 	done
 
 	return "$l_list_status"
@@ -447,7 +397,7 @@ EOF
 }
 
 bind_positional_tests_to_suite() {
-	l_positional_suite=$(resolve_suite_path "$1")
+	l_positional_suite=$(zxfer_test_resolve_suite_path "$ZXFER_ROOT" "$1")
 	while IFS= read -r l_positional_test_name; do
 		[ -n "$l_positional_test_name" ] || continue
 		append_suite_test_selection \
@@ -462,7 +412,7 @@ validate_named_test_selections() {
 	l_validation_status=0
 
 	for l_validation_suite in "$@"; do
-		l_validation_suite_path=$(resolve_suite_path "$l_validation_suite")
+		l_validation_suite_path=$(zxfer_test_resolve_suite_path "$ZXFER_ROOT" "$l_validation_suite")
 		l_validation_test_names=$(selected_test_names_for_suite \
 			"$l_validation_suite_path")
 		[ -n "$l_validation_test_names" ] || continue
@@ -1160,7 +1110,7 @@ RUNNER_TOTAL=$#
 for suite_id in $(runner_launch_order "$@"); do
 	suite_path=$(
 		shift "$((suite_id - 1))"
-		resolve_suite_path "$1"
+		zxfer_test_resolve_suite_path "$ZXFER_ROOT" "$1"
 	)
 	suite_test_names=$(selected_test_names_for_suite "$suite_path")
 	while [ "$RUNNER_INFLIGHT" -ge "$RUNNER_PARALLEL_JOBS" ]; do

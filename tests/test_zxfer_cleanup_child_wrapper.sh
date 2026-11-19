@@ -13,10 +13,6 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_cleanup_child_wrapper"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	ZXFER_CLEANUP_CHILD_WRAPPER_SOURCE_ONLY=1 \
 		. "$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh"
@@ -26,7 +22,7 @@ setUp() {
 test_cleanup_child_wrapper_start_token_validates_inputs_and_preserves_shell_state() {
 	token_file="$TEST_TMPDIR/cleanup_child_wrapper.start_token"
 	glob_token_file="$TEST_TMPDIR/cleanup_child_wrapper.glob_token"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		ps() {
 			printf "%s\n" "  Wed * Jul 15   12:34:56 2026 "
 		}
@@ -38,9 +34,9 @@ test_cleanup_child_wrapper_start_token_validates_inputs_and_preserves_shell_stat
 
 		unset IFS
 		set -f
-		zxfer_cleanup_child_wrapper_get_process_start_token 701 lstart >"'"$token_file"'"
+		zxfer_cleanup_child_wrapper_get_process_start_token 701 lstart >"$token_file"
 		printf "token_status=%s\n" "$?"
-		printf "token=<%s>\n" "$(cat "'"$token_file"'")"
+		printf "token=<%s>\n" "$(cat "$token_file")"
 		case $- in
 		*f*) printf "globbing=disabled\n" ;;
 		*) printf "globbing=enabled\n" ;;
@@ -53,13 +49,14 @@ test_cleanup_child_wrapper_start_token_validates_inputs_and_preserves_shell_stat
 
 		IFS="|"
 		set +f
-		zxfer_cleanup_child_wrapper_get_process_start_token 701 >"'"$glob_token_file"'"
+		zxfer_cleanup_child_wrapper_get_process_start_token 701 >"$glob_token_file"
 		printf "custom_ifs=<%s>\n" "$IFS"
 		case $- in
 		*f*) printf "custom_globbing=disabled\n" ;;
 		*) printf "custom_globbing=enabled\n" ;;
 		esac
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Start-token lookup should reject an empty PID." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "invalid_pid_status=1"
@@ -80,7 +77,7 @@ test_cleanup_child_wrapper_start_token_validates_inputs_and_preserves_shell_stat
 }
 
 test_cleanup_child_wrapper_start_token_reads_the_line_after_a_header() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		ps() {
 			[ "$2" = "stime" ] || return 1
 			printf "%s\n" "STIME" "  Jul 18   12:34  " "ignored"
@@ -88,7 +85,8 @@ test_cleanup_child_wrapper_start_token_reads_the_line_after_a_header() {
 
 		zxfer_cleanup_child_wrapper_get_process_start_token 701 stime
 		printf "status=%s\n" "$?"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Header-form ps output should yield the squeezed second line." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "stime:Jul 18 12:34
@@ -96,13 +94,14 @@ status=0"
 }
 
 test_cleanup_child_wrapper_start_token_fails_closed_when_ps_has_no_record() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		ps() {
 			return 37
 		}
 
 		zxfer_cleanup_child_wrapper_get_process_start_token 701 stime
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Start-token lookup should fail closed after both ps forms return no record." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -111,7 +110,7 @@ test_cleanup_child_wrapper_start_token_fails_closed_when_ps_has_no_record() {
 }
 
 test_cleanup_child_wrapper_helpers_cover_current_shell_paths() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		set +e
 		ps() {
 			case "$*" in
@@ -133,7 +132,8 @@ test_cleanup_child_wrapper_helpers_cover_current_shell_paths() {
 		printf "descendants=<%s>\n" "$(printf "%s\n" "$descendants" | cut -f1 | tr "\n" " " | sed "s/[[:space:]]*$//")"
 		zxfer_cleanup_child_wrapper_signal_descendant_records "$descendants" TERM
 		printf "signal=%s\n" "$?"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Cleanup child wrapper should enumerate descendant pids in descending order." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "descendants=<702 701>"
@@ -148,10 +148,10 @@ test_cleanup_child_wrapper_helpers_cover_current_shell_paths() {
 test_cleanup_child_wrapper_snapshot_and_getter_share_stime_header_fallback() {
 	ps_log="$TEST_TMPDIR/cleanup_child_wrapper.stime_ps"
 	signal_log="$TEST_TMPDIR/cleanup_child_wrapper.stime_signal"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		LC_ALL=fr_FR
 		ps() {
-			printf "LC_ALL=%s args=%s\n" "$LC_ALL" "$*" >>"'"$ps_log"'"
+			printf "LC_ALL=%s args=%s\n" "$LC_ALL" "$*" >>"$ps_log"
 			if [ "$1" = "-A" ]; then
 				[ "${7:-}" = "stime" ] || return 1
 				printf "PID PPID STIME\n%s 1 root-stime\n701 %s child-stime\n" "$$" "$$"
@@ -161,14 +161,15 @@ test_cleanup_child_wrapper_snapshot_and_getter_share_stime_header_fallback() {
 			printf "STIME\nchild-stime\n"
 		}
 		kill() {
-			printf "signal:%s\n" "$*" >>"'"$signal_log"'"
+			printf "signal:%s\n" "$*" >>"$signal_log"
 			return 0
 		}
 		records=$(zxfer_cleanup_child_wrapper_list_descendants)
 		printf "records=<%s>\n" "$records"
 		zxfer_cleanup_child_wrapper_signal_descendant_records "$records" TERM
 		printf "status=%s\n" "$?"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Header-form stime fallback should retain the same selector in the snapshot record." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "701	stime:child-stime"
@@ -179,7 +180,7 @@ test_cleanup_child_wrapper_snapshot_and_getter_share_stime_header_fallback() {
 }
 
 test_cleanup_child_wrapper_snapshot_accepts_header_lstart_fallback() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		ps() {
 			case "$*" in
 			*"lstart="*) return 1 ;;
@@ -192,7 +193,8 @@ test_cleanup_child_wrapper_snapshot_accepts_header_lstart_fallback() {
 		}
 
 		zxfer_cleanup_child_wrapper_list_descendants
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Header-form lstart discovery should succeed before the stime fallback is needed." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -201,7 +203,7 @@ test_cleanup_child_wrapper_snapshot_accepts_header_lstart_fallback() {
 }
 
 test_cleanup_child_wrapper_validated_roots_retain_matches_and_fail_closed_on_live_unknowns() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_cleanup_child_wrapper_get_process_start_token() {
 			case "$1" in
 			701) printf "%s\n" "lstart:matching-token" ;;
@@ -216,7 +218,8 @@ test_cleanup_child_wrapper_validated_roots_retain_matches_and_fail_closed_on_liv
 		zxfer_cleanup_child_wrapper_build_validated_descendant_roots \
 			"701	lstart:matching-token
 702	lstart:unavailable-token"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "A live descendant with an unreadable identity should make root refresh fail closed." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -226,7 +229,7 @@ test_cleanup_child_wrapper_validated_roots_retain_matches_and_fail_closed_on_liv
 }
 
 test_cleanup_child_wrapper_signal_treats_exited_signal_race_as_success() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_cleanup_child_wrapper_get_process_start_token() {
 			printf "%s\n" "lstart:matching-token"
 		}
@@ -236,7 +239,8 @@ test_cleanup_child_wrapper_signal_treats_exited_signal_race_as_success() {
 		zxfer_cleanup_child_wrapper_signal_descendant_records \
 			"701	lstart:matching-token" TERM
 		printf "status=%s\n" "$?"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "A descendant that exits between identity validation and signal delivery should be treated as gone." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=0"
@@ -244,7 +248,7 @@ test_cleanup_child_wrapper_signal_treats_exited_signal_race_as_success() {
 
 test_cleanup_child_wrapper_signal_fails_closed_for_live_unverifiable_or_unsignallable_descendants() {
 	signal_log="$TEST_TMPDIR/cleanup_child_wrapper.signal_failures"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_cleanup_child_wrapper_get_process_start_token() {
 			case "$1" in
 			702) printf "%s\n" "lstart:matching-token" ;;
@@ -256,7 +260,7 @@ test_cleanup_child_wrapper_signal_fails_closed_for_live_unverifiable_or_unsignal
 			if [ "$2" = "0" ]; then
 				return 0
 			fi
-			printf "%s\n" "$*" >>"'"$signal_log"'"
+			printf "%s\n" "$*" >>"$signal_log"
 			return 1
 		}
 		ps() { printf "%s\n" " S"; }
@@ -275,7 +279,8 @@ test_cleanup_child_wrapper_signal_fails_closed_for_live_unverifiable_or_unsignal
 		roots=$(zxfer_cleanup_child_wrapper_build_validated_descendant_roots \
 			"$empty_token_record")
 		printf "roots=<%s> roots_status=%s\n" "$roots" "$?"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Live descendants that cannot be verified or signalled should each fail teardown closed." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "701=1
@@ -295,7 +300,7 @@ test_cleanup_child_wrapper_signal_fails_closed_for_live_unverifiable_or_unsignal
 }
 
 test_cleanup_child_wrapper_extend_stopped_records_publishes_validated_work_after_failures() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_cleanup_child_wrapper_build_validated_descendant_roots() {
 			printf "%s\n" "$$"
 			return 37
@@ -318,7 +323,8 @@ test_cleanup_child_wrapper_extend_stopped_records_publishes_validated_work_after
 			"700	lstart:retained-token"
 		printf "second_status=%s\n" "$?"
 		printf "second_records=<%s>\n" "$g_zxfer_cleanup_wrapper_extended_records"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Refresh should preserve the first identity-validation failure." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "first_status=37"
@@ -333,7 +339,7 @@ test_cleanup_child_wrapper_extend_stopped_records_publishes_validated_work_after
 
 test_cleanup_child_wrapper_on_signal_terms_kills_and_reaps_before_exiting_143() {
 	marker_file="$TEST_TMPDIR/cleanup_child_wrapper.on_signal"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_cleanup_child_wrapper_list_descendants() {
 			return 0
 		}
@@ -341,18 +347,19 @@ test_cleanup_child_wrapper_on_signal_terms_kills_and_reaps_before_exiting_143() 
 		# own test.
 		zxfer_cleanup_child_wrapper_signal_descendant_records() {
 			[ "$2" = STOP ] ||
-				printf "%s\n" "signalled:$2" >>"'"$marker_file"'"
+				printf "%s\n" "signalled:$2" >>"$marker_file"
 		}
 		zxfer_cleanup_child_wrapper_abort_grace_wait() { :; }
 		# The stand-in direct child 4242 must never be a real process.
 		kill() { :; }
 		wait() {
-			printf "%s\n" "waited:$1" >>"'"$marker_file"'"
+			printf "%s\n" "waited:$1" >>"$marker_file"
 			return 0
 		}
 		l_cleanup_wrapper_child_pid=4242
 		zxfer_cleanup_child_wrapper_on_signal
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Cleanup child wrapper signal handling should use the documented 143 exit status." \
 		143 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -363,7 +370,7 @@ waited:4242" "$(cat "$marker_file")"
 }
 
 test_cleanup_child_wrapper_list_descendants_preserves_awk_failures() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		ps() {
 			printf "%s\n" "$$ 1 wrapper-token" "701 $$ child-token"
 		}
@@ -373,7 +380,8 @@ test_cleanup_child_wrapper_list_descendants_preserves_awk_failures() {
 
 		zxfer_cleanup_child_wrapper_list_descendants >/dev/null
 		printf "status=%s\n" "$?"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertContains "Cleanup child wrapper descendant discovery must not let sort mask an awk failure." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=41"
@@ -386,13 +394,13 @@ test_cleanup_child_wrapper_treats_an_exited_descendant_with_a_changed_token_as_s
 	signal_log="$TEST_TMPDIR/cleanup_child_wrapper.zombie-signals"
 	for exit_state in reaped zombie; do
 		: >"$signal_log"
-		zxfer_test_capture_subshell '
+		capture_case() {
 			zxfer_cleanup_child_wrapper_get_process_start_token() {
 				printf "%s\n" "stime:Jan_01"
 			}
 			kill() {
-				printf "kill:%s\n" "$*" >>"'"$signal_log"'"
-				[ "'"$exit_state"'" = zombie ] && [ "$2" = "0" ]
+				printf "kill:%s\n" "$*" >>"$signal_log"
+				[ "$exit_state" = zombie ] && [ "$2" = "0" ]
 			}
 			# illumos ps has no stat column; its s column says Z.
 			ps() {
@@ -405,7 +413,8 @@ test_cleanup_child_wrapper_treats_an_exited_descendant_with_a_changed_token_as_s
 			roots=$(zxfer_cleanup_child_wrapper_build_validated_descendant_roots \
 				"701	stime:17:19:22")
 			printf "roots=<%s> roots_status=%s\n" "$roots" "$?"
-		'
+		}
+		zxfer_test_capture_subshell capture_case
 
 		assertContains "A $exit_state descendant with a changed token should not fail teardown." \
 			"$ZXFER_TEST_CAPTURE_OUTPUT" "signal_status=0"
@@ -456,22 +465,23 @@ test_cleanup_child_wrapper_pid_is_running_tells_a_real_zombie_from_a_live_proces
 
 test_cleanup_child_wrapper_on_signal_aborts_known_child_when_discovery_fails() {
 	marker_file="$TEST_TMPDIR/cleanup_child_wrapper.discovery_failure"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_cleanup_child_wrapper_list_descendants() {
 			return 37
 		}
 		zxfer_cleanup_child_wrapper_abort_grace_wait() { :; }
 		kill() {
-			printf "kill:%s:%s:%s\n" "$1" "$2" "$3" >>"'"$marker_file"'"
+			printf "kill:%s:%s:%s\n" "$1" "$2" "$3" >>"$marker_file"
 			return 0
 		}
 		wait() {
-			printf "wait:%s\n" "$1" >>"'"$marker_file"'"
+			printf "wait:%s\n" "$1" >>"$marker_file"
 			return 0
 		}
 		l_cleanup_wrapper_child_pid=4242
 		zxfer_cleanup_child_wrapper_on_signal
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Cleanup child wrapper signal handling should fail closed when descendant discovery remains unproven." \
 		125 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -483,7 +493,7 @@ test_cleanup_child_wrapper_on_signal_aborts_known_child_when_discovery_fails() {
 
 test_cleanup_child_wrapper_on_signal_fails_closed_on_recycled_descendant() {
 	marker_file="$TEST_TMPDIR/cleanup_child_wrapper.recycled-signal"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_cleanup_child_wrapper_list_descendants() {
 			printf "701\tlstart:original-token\n"
 		}
@@ -493,12 +503,13 @@ test_cleanup_child_wrapper_on_signal_fails_closed_on_recycled_descendant() {
 		zxfer_cleanup_child_wrapper_abort_grace_wait() { :; }
 		kill() {
 			[ "$2" = "0" ] && return 0
-			printf "signal:%s\n" "$*" >"'"$marker_file"'"
+			printf "signal:%s\n" "$*" >"$marker_file"
 			return 0
 		}
 		ps() { printf "%s\n" " S"; }
 		zxfer_cleanup_child_wrapper_on_signal
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Unproven descendant identity during KILL escalation should fail wrapper teardown closed." \
 		125 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -508,22 +519,23 @@ test_cleanup_child_wrapper_on_signal_fails_closed_on_recycled_descendant() {
 
 test_cleanup_child_wrapper_on_signal_fails_when_known_child_cannot_be_signalled() {
 	marker_file="$TEST_TMPDIR/cleanup_child_wrapper.signal-failure"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		zxfer_cleanup_child_wrapper_list_descendants() {
 			return 37
 		}
 		zxfer_cleanup_child_wrapper_abort_grace_wait() { :; }
 		kill() {
-			printf "kill:%s\n" "$*" >>"'"$marker_file"'"
+			printf "kill:%s\n" "$*" >>"$marker_file"
 			[ "$2" = "0" ]
 		}
 		wait() {
-			printf "wait:%s\n" "$1" >>"'"$marker_file"'"
+			printf "wait:%s\n" "$1" >>"$marker_file"
 			return 0
 		}
 		l_cleanup_wrapper_child_pid=4242
 		zxfer_cleanup_child_wrapper_on_signal
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Discovery failure should report teardown failure when the owned direct child remains live after a failed TERM." \
 		125 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -534,7 +546,7 @@ test_cleanup_child_wrapper_on_signal_fails_when_known_child_cannot_be_signalled(
 }
 
 test_cleanup_child_wrapper_main_requires_command() {
-	zxfer_test_capture_subshell "sh '$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh'"
+	zxfer_test_capture_subshell sh "$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh"
 
 	assertEquals "Cleanup child wrapper should fail closed when no command is supplied." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -546,7 +558,10 @@ test_cleanup_child_wrapper_main_reports_stdin_duplication_failures() {
 	assertNotEquals "Closed-stdin duplication should fail in the active test shell." \
 		0 "$expected_status"
 
-	zxfer_test_capture_subshell "sh '$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh' 'exit 0' <&-"
+	capture_case() {
+		sh "$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh" 'exit 0' <&-
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Cleanup child wrapper should preserve stdin-duplication failures before launching the worker." \
 		"$expected_status" "$ZXFER_TEST_CAPTURE_STATUS"
@@ -555,18 +570,19 @@ test_cleanup_child_wrapper_main_reports_stdin_duplication_failures() {
 # The script-run tests pin the same entry, but coverage cannot trace a
 # separate script, so this one sources the wrapper.
 test_cleanup_child_wrapper_source_executes_main_when_not_source_only() {
-	zxfer_test_capture_subshell '
+	capture_case() {
 		unset ZXFER_CLEANUP_CHILD_WRAPPER_SOURCE_ONLY
 		set -- "exit 7"
-		. "'"$ZXFER_ROOT"'/src/zxfer_cleanup_child_wrapper.sh"
-	'
+		. "$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Sourcing the cleanup child wrapper without the source-only guard should run main and exit with the command's status." \
 		7 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
 test_cleanup_child_wrapper_main_preserves_worker_exit_status() {
-	zxfer_test_capture_subshell "sh '$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh' 'exit 7'"
+	zxfer_test_capture_subshell sh "$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh" 'exit 7'
 
 	assertEquals "Cleanup child wrapper should preserve the wrapped command's exit status." \
 		7 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -574,13 +590,14 @@ test_cleanup_child_wrapper_main_preserves_worker_exit_status() {
 
 test_cleanup_child_wrapper_main_success_does_not_inspect_process_table() {
 	marker_file="$TEST_TMPDIR/cleanup_child_wrapper.normal_ps"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		ps() {
-			: >"'"$marker_file"'"
+			: >"$marker_file"
 			return 1
 		}
 		zxfer_cleanup_child_wrapper_main "exit 0"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "A clean wrapped command should complete successfully." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -592,8 +609,8 @@ test_cleanup_child_wrapper_main_uses_absolute_shell_with_restricted_path() {
 	no_sh_path="$TEST_TMPDIR/no-sh-path"
 	mkdir -p "$no_sh_path"
 
-	zxfer_test_capture_subshell \
-		"PATH='$no_sh_path' /bin/sh '$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh' 'printf \"%s\\n\" wrapped'"
+	zxfer_test_capture_subshell env PATH="$no_sh_path" /bin/sh \
+		"$ZXFER_ROOT/src/zxfer_cleanup_child_wrapper.sh" 'printf "%s\n" wrapped'
 
 	assertEquals "Cleanup child wrapper should not depend on PATH to launch the command shell." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"

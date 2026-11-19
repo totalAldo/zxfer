@@ -375,6 +375,19 @@ inherit checksum backup/dst/child" "$result"
 	assertEquals "," "$l_ifs_after"
 }
 
+test_empty_property_plan_is_silent_on_apply_and_still_creates_a_dataset() {
+	zxfer_property_test_write_actions set ''
+	output=$(
+		g_option_v_verbose=1
+		g_option_n_dryrun=0
+		zxfer_run_destination_zfs_cmd() { printf '%s\n' "$*"; }
+		zxfer_execute_property_plan apply "$g_zxfer_property_plan_file" "" "" backup/dst &&
+			zxfer_execute_property_plan create "$g_zxfer_property_plan_file" filesystem "" backup/dst
+	)
+	assertEquals 0 "$?"
+	assertEquals "Only creation needs a ZFS command for an empty plan." "create backup/dst" "$output"
+}
+
 # No mutation may precede detection of a short or malformed action file.
 test_property_executor_refuses_partial_or_wrong_mode_plans_before_mutation() {
 	zxfer_property_test_write_actions set 'compression=lz4'

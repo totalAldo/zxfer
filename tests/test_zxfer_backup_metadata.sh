@@ -70,26 +70,17 @@ tearDown() {
 
 # Behavior-focused fragments keep this stable suite entry point while
 # bounding the amount of test code a contributor must load at once.
-# zxfer-test-fragment: suites/zxfer_backup_metadata_records_tests.sh
 # shellcheck source=tests/suites/zxfer_backup_metadata_records_tests.sh
 . "$TESTS_DIR/suites/zxfer_backup_metadata_records_tests.sh"
-# zxfer-test-fragment: suites/zxfer_backup_metadata_restore_tests.sh
 # shellcheck source=tests/suites/zxfer_backup_metadata_restore_tests.sh
 . "$TESTS_DIR/suites/zxfer_backup_metadata_restore_tests.sh"
-# zxfer-test-fragment: suites/zxfer_backup_metadata_storage_io_tests.sh
 # shellcheck source=tests/suites/zxfer_backup_metadata_storage_io_tests.sh
 . "$TESTS_DIR/suites/zxfer_backup_metadata_storage_io_tests.sh"
-# zxfer-test-fragment: suites/zxfer_backup_metadata_paths_tests.sh
 # shellcheck source=tests/suites/zxfer_backup_metadata_paths_tests.sh
 . "$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_backup_metadata.sh" \
-		"$TESTS_DIR/suites/zxfer_backup_metadata_records_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_backup_metadata_restore_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_backup_metadata_storage_io_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_backup_metadata_paths_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

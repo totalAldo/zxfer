@@ -721,8 +721,7 @@ test_backup_mode_ignores_hostile_inherited_backup_state() {
 		g_zxfer_backup_forwarded_rows="$ZXFER_MOCKBIN_SOURCE_ROOT/child1${l_tab}$ZXFER_MOCKBIN_SOURCE_ROOT/child1${l_tab}compression=forged=local"
 		export g_backup_storage_root g_backup_file_contents \
 			g_zxfer_backup_forwarded_roots g_zxfer_backup_forwarded_rows
-		planning_run_zxfer "$STATE_DIR" -n -v -k -P -R \
-			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$STATE_DIR" -n -v -k -P
 		printf '%s\n' "$?" >"$CASE_DIR/dry_run.status"
 		cp "$CASE_DIR/zxfer.stdout" "$CASE_DIR/dry_run.stdout"
 		planning_run_backup_zxfer -k -P

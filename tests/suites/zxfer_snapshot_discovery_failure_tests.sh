@@ -8,10 +8,10 @@
 
 test_snapshot_dataset_lists_extract_sort_and_deduplicate_each_role() {
 	snapshot_records_file="$TEST_TMPDIR/recursive_snapshot_file.txt"
-	printf '%s\n' "tank/src/child@snap2" "tank/src@snap1" "tank/src/child@snap3" "tank/src/space name@snap4" \
+	printf '%s\n' "tank/src/child@snap2" "tank/src/child@snap3" "tank/src/space name@snap4" "tank/src@snap1" \
 		>"$snapshot_records_file"
 	extra_records_file="$TEST_TMPDIR/extra_snapshot_file.txt"
-	printf '%s\n' "tank/src/child@snap5" "tank/src/extra@snap1" "tank/src/child@snap6" >"$extra_records_file"
+	printf '%s\n' "tank/src@snap5" "tank/src@snap6" "tank/srcmore@snap7" >"$extra_records_file"
 
 	zxfer_capture_snapshot_dataset_lists "$snapshot_records_file" "$extra_records_file" \
 		"$TEST_TMPDIR/recursive_snapshot_file.scratch" "$snapshot_records_file"
@@ -23,8 +23,10 @@ tank/src/space name" "$g_recursive_source_list"
 	assertEquals "The inventory includes the full source, independently of the transfer list." \
 		"$g_recursive_source_list" "$g_recursive_source_dataset_list"
 	assertEquals "A dataset present on both sides stays in each independently sorted list." \
-		"tank/src/child
-tank/src/extra" "$g_recursive_destination_extra_dataset_list"
+		"tank/src
+tank/srcmore" "$g_recursive_destination_extra_dataset_list"
+	assertEquals "Only one row per adjacent dataset in each role is staged for the sort." \
+		8 "$(grep -c '^' "$TEST_TMPDIR/recursive_snapshot_file.scratch")"
 }
 
 test_recursive_dataset_list_filter_keeps_existing_exclusion_semantics() {
@@ -117,31 +119,18 @@ test_capture_snapshot_dataset_lists_skips_empty_work_and_omits_unneeded_inventor
 	assertEquals "No optional source file means no retained source inventory." "" "$g_recursive_source_dataset_list"
 }
 
-test_set_g_recursive_source_list_reports_source_sort_failures() {
-	source_tmp="$TEST_TMPDIR/source_sort_failure_source.txt"
-	dest_tmp="$TEST_TMPDIR/source_sort_failure_dest.txt"
+test_recursive_delta_workspace_allocates_filter_files_only_for_exclusions() {
+	source_tmp="$TEST_TMPDIR/sorted_source.txt"
 	printf '%s\n' "tank/src@snap1" >"$source_tmp"
-	printf '%s\n' "tank/src@snap1" >"$dest_tmp"
 
-	set +e
-	output=$(
-		(
-			sort() {
-				return 1
-			}
-			zxfer_throw_error() {
-				printf '%s\n' "$1"
-				exit 1
-			}
-			zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
-		)
-	)
-	status=$?
-
-	assertEquals "Recursive delta planning should fail closed when the source snapshot sort fails." \
-		1 "$status"
-	assertContains "Recursive delta planning should report the source snapshot sort failure context." \
-		"$output" "Failed to sort source snapshots for recursive delta planning."
+	for g_option_x_exclude_datasets in '' 'excluded$'; do
+		before_files=${g_zxfer_profile_runtime_artifact_files_created:-0}
+		zxfer_set_g_recursive_source_list "$source_tmp" "$source_tmp"
+		expected_files=3
+		[ -z "$g_option_x_exclude_datasets" ] || expected_files=5
+		assertEquals "Delta workspace allocation with exclude [$g_option_x_exclude_datasets]." \
+			"$expected_files" "$((g_zxfer_profile_runtime_artifact_files_created - before_files))"
+	done
 }
 
 test_set_g_recursive_source_list_reports_destination_snapshot_exclude_filter_failures() {
@@ -209,10 +198,11 @@ test_set_g_recursive_source_list_reports_snapshot_compare_failures() {
 # discovery with its own status wherever it happens. zxfer_get_temp_file
 # throws on its own failures, so only a stub reaches these ladders.
 test_get_zfs_list_keeps_the_status_of_each_failed_temp_file_allocation() {
-	# call:status for all five workspace files, six delta files, two inventory
+	# call:status for all five workspace files, five delta files with -x, two inventory
 	# files and the source record cache. No failed sibling can be ignored.
-	for l_temp_case in 1:9 2:11 3:12 4:13 5:23 6:24 7:25 8:26 9:27 10:28 11:29 12:37 13:38 14:39; do
+	for l_temp_case in 1:9 2:11 3:12 4:13 5:23 6:24 7:25 8:26 9:27 10:28 11:29 12:37 13:38; do
 		(
+			g_option_x_exclude_datasets='excluded$'
 			FAIL_AT=${l_temp_case%:*}
 			FAIL_STATUS=${l_temp_case#*:}
 			temp_calls=0

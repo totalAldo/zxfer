@@ -36,10 +36,6 @@ oneTimeSetUp() {
 	MICROBENCH_SMALL_STATUS=$?
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 # Purpose: Print one line per budget row that a bench TSV breaks, lacks or
 # reports as non-numeric, or a note when no row was checked.
 # Usage: microbench_budget_violations <bench-tsv>; each <scenario>_small row

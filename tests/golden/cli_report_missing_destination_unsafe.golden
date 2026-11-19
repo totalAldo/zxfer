@@ -28,5 +28,5 @@ message: Need a destination.
 dry_run: 0
 mode: recursive
 yield_iterations: 1
-invocation: '[zxfer-path]' '-R' 'tank/src'
+invocation: '[zxfer-path]' '-x' 'old\n\n' '-R' 'tank/src'
 zxfer: failure report end

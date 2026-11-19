@@ -2,7 +2,7 @@
 #
 # shunit2 tests for the lint runner script.
 #
-# shellcheck disable=SC2317,SC2329
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -12,10 +12,6 @@ TESTS_DIR=$(dirname "$0")
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_run_lint"
 	RUN_LINT_BIN="$ZXFER_ROOT/tests/run_lint.sh"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 write_fake_lint_toolchain() {
@@ -76,7 +72,6 @@ lint_capture_path_count() {
 		"$l_capture_path"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_lint_budget_skips_download_toolchain_preflight() {
 	l_fake_root="$TEST_TMPDIR/fake-root"
 	l_blocked_parent="$TEST_TMPDIR/not-a-directory"
@@ -107,7 +102,6 @@ EOF
 		"$output" "not a directory"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_lint_shell_targets_include_existing_sources_once_and_skip_deletions() {
 	l_fake_root="$TEST_TMPDIR/source-list-root"
 	l_tool_root="$TEST_TMPDIR/source-list-tools"
@@ -150,7 +144,6 @@ test_run_lint_shell_targets_include_existing_sources_once_and_skip_deletions() {
 		0 "$(lint_capture_path_count "$l_capture_log" ignored.sh)"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_lint_shell_targets_skip_tool_invocation_for_an_empty_source_list() {
 	l_fake_root="$TEST_TMPDIR/empty-source-root"
 	l_tool_root="$TEST_TMPDIR/empty-source-tools"
@@ -171,7 +164,6 @@ test_run_lint_shell_targets_skip_tool_invocation_for_an_empty_source_list() {
 		"" "$(cat "$l_capture_log")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_codespell_skips_generated_coverage_trees() {
 	l_codespell_skip=$(awk -F '=' '
 		$1 ~ /^[[:space:]]*skip[[:space:]]*$/ {
@@ -212,24 +204,22 @@ run_eval_policy_fixture() {
 		"$l_fake_root/tests/run_lint.sh" shellcheck 2>&1) || EVAL_POLICY_STATUS=$?
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
-test_test_helper_eval_policy_accepts_the_two_legacy_captures() {
+test_test_helper_eval_policy_accepts_command_captures_and_comments() {
 	tab=$(printf '\t')
 	run_eval_policy_fixture eval-accept <<EOF
 tests/helpers/process_capture.sh${tab}zxfer_test_capture_subshell() {
-tests/helpers/process_capture.sh${tab}	eval "\$1"
+tests/helpers/process_capture.sh${tab}	"\$@"
 tests/helpers/process_capture.sh${tab}}
-tests/helpers/process_capture.sh${tab}zxfer_test_capture_subshell_split() { eval "\$3"; }
+tests/helpers/process_capture.sh${tab}zxfer_test_capture_subshell_split() { shift 2; "\$@"; }
 tests/helpers/process_capture.sh${tab}# a comment may say eval
 EOF
 
-	assertEquals "The two legacy capture helpers should pass. Output: $EVAL_POLICY_OUTPUT" \
+	assertEquals "Literal command execution and comments should pass. Output: $EVAL_POLICY_OUTPUT" \
 		0 "$EVAL_POLICY_STATUS"
 	assertNotContains "A passing policy should report nothing." \
 		"$EVAL_POLICY_OUTPUT" "eval in a shared test helper"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_test_helper_eval_policy_rejects_a_new_eval_in_a_shared_helper() {
 	tab=$(printf '\t')
 	run_eval_policy_fixture eval-reject <<EOF
@@ -248,9 +238,9 @@ EOF
 		0 "$EVAL_POLICY_STATUS"
 	assertContains "An eval above the legacy helpers must be named, not counted as one of them." \
 		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:1: eval in a shared test helper"
-	assertNotContains "The legacy capture helper keeps its one eval." \
+	assertContains "The former legacy capture helper has no exemption." \
 		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:2: eval in a shared test helper"
-	assertNotContains "The legacy split helper keeps its first eval." \
+	assertContains "The former legacy split helper has no exemption." \
 		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:4: eval in a shared test helper"
 	assertContains "A second eval in a legacy helper should be named." \
 		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:5: eval in a shared test helper"

@@ -2,6 +2,7 @@
 #
 # shunit2 tests for the direct integration harness control flow.
 #
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -31,10 +32,6 @@ oneTimeSetUp() {
 		return 1
 	fi
 	zxfer_test_create_tmpdir "zxfer_run_integration"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
@@ -81,7 +78,6 @@ make_integration_fixture_dir() {
 	ln -s "$ZXFER_ROOT/tests/helpers" "$1/helpers"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_parse_args_accepts_failed_tests_only() {
 	parse_args --failed-tests-only
 
@@ -89,7 +85,6 @@ test_integration_parse_args_accepts_failed_tests_only() {
 		"1" "$ZXFER_LIST_FAILED_TESTS_ONLY"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_parse_args_accepts_only_test_lists() {
 	parse_args --only-test basic_replication_test,force_rollback_test --only-test usage_error_tests
 
@@ -97,7 +92,6 @@ test_integration_parse_args_accepts_only_test_lists() {
 		"basic_replication_test force_rollback_test usage_error_tests" "$ZXFER_ONLY_TESTS"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_parse_args_preserves_confirmation_default_and_yes_override() {
 	assertEquals "Direct integration runs should confirm each wrapped modifying command by default." \
 		1 "$ZXFER_CONFIRM_EACH_COMMAND"
@@ -108,7 +102,6 @@ test_integration_parse_args_preserves_confirmation_default_and_yes_override() {
 		0 "$ZXFER_CONFIRM_EACH_COMMAND"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_help_returns_before_fragment_or_registry_loading() {
 	fixture_dir="$TEST_TMPDIR/help-invalid-fragments"
 	make_integration_fixture_dir "$fixture_dir"
@@ -125,7 +118,6 @@ test_integration_help_returns_before_fragment_or_registry_loading() {
 		"$output" "Invalid integration fragments"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_source_only_loading_preserves_caller_options_and_positionals() {
 	status=0
 	output=$(
@@ -166,7 +158,6 @@ test_integration_source_only_loading_preserves_caller_options_and_positionals() 
 		"$output" "argument=<>"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_build_requested_test_sequence_filters_to_named_tests() {
 	TEST_SEQUENCE="usage_error_tests basic_replication_test force_rollback_test"
 	ZXFER_ONLY_TESTS="force_rollback_test,usage_error_tests"
@@ -175,7 +166,6 @@ test_integration_build_requested_test_sequence_filters_to_named_tests() {
 		"usage_error_tests force_rollback_test" "$(build_requested_test_sequence)"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_build_requested_test_sequence_accepts_multiline_declared_test_lists() {
 	TEST_SEQUENCE="usage_error_tests \
 basic_replication_test \
@@ -186,15 +176,16 @@ force_rollback_test"
 		"usage_error_tests force_rollback_test" "$(build_requested_test_sequence)"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_build_requested_test_sequence_rejects_unknown_test_names() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1
-		. \"$INTEGRATION_HARNESS\"
+		# shellcheck source=tests/run_integration_zxfer.sh
+		. "$INTEGRATION_HARNESS"
 		TEST_SEQUENCE='usage_error_tests basic_replication_test'
 		ZXFER_ONLY_TESTS='nosuchtest'
 		build_requested_test_sequence
-	"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Unknown --only-test names should fail closed." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -202,7 +193,6 @@ test_integration_build_requested_test_sequence_rejects_unknown_test_names() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "Unknown integration test requested via --only-test: nosuchtest"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_registry_preserves_exact_existing_test_and_group_order() {
 	actual=$(zxfer_integration_registry_names)
 	expected='usage_error_tests
@@ -317,7 +307,6 @@ hostile_property_dash_name_test'
 		"$(cat "$INTEGRATION_REGISTRY_HELPER")" "eval"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_fragments_load_in_sorted_order_with_complete_registry_coverage() {
 	expected_paths='integration/cli_reporting_tests.sh
 integration/hostile_names_tests.sh
@@ -360,7 +349,6 @@ integration/snapshot_replication_tests.sh'
 		"$(command -v basic_replication_test)" "basic_replication_test"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_shell_function_check_accepts_loaded_function_and_rejects_external_sort() {
 	function_path="$TEST_TMPDIR/function-tools"
 	function_path_command="$function_path/collision_probe"
@@ -390,7 +378,6 @@ test_integration_shell_function_check_accepts_loaded_function_and_rejects_extern
 		1 "$path_collision_status"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_fragments_reject_bad_names_symlinks_and_an_empty_directory() {
 	fixture_dir="$TEST_TMPDIR/integration-fragment-checks"
 
@@ -452,7 +439,6 @@ test_integration_fragments_reject_bad_names_symlinks_and_an_empty_directory() {
 		"$empty_output" "no NAME_tests.sh fragment found"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_registry_rejects_duplicate_and_unlisted_fragment_definitions() {
 	fixture_root="$TEST_TMPDIR/integration-definition-root"
 	fixture_registry="$fixture_root/registry.tsv"
@@ -465,7 +451,11 @@ test_integration_registry_rejects_duplicate_and_unlisted_fragment_definitions() 
 	duplicate_output=$(
 		(
 			INTEGRATION_TESTS_DIR=$fixture_root
-			zxfer_validate_integration_registry_definitions "$fixture_registry"
+			ZXFER_INTEGRATION_REGISTRY_FILE=$fixture_registry
+			if zxfer_load_integration_test_fragments; then exit 0; fi
+			# A bad later fragment must leave even the first definition unloaded.
+			command -v registered_test >/dev/null && exit 2
+			exit 1
 		) 2>&1
 	) || duplicate_status=$?
 
@@ -478,7 +468,7 @@ test_integration_registry_rejects_duplicate_and_unlisted_fragment_definitions() 
 		) 2>&1
 	) || unlisted_status=$?
 
-	assertEquals "Definitions duplicated across fragments should fail closed." 1 "$duplicate_status"
+	assertEquals "Duplicated definitions should fail before sourcing either fragment." 1 "$duplicate_status"
 	assertContains "Duplicate-definition failures should name the collision." \
 		"$duplicate_output" "function [registered_test] is defined by multiple integration fragments"
 	assertEquals "Fragments must not define functions absent from the registry." 1 "$unlisted_status"
@@ -488,7 +478,6 @@ test_integration_registry_rejects_duplicate_and_unlisted_fragment_definitions() 
 
 # The definition-only scan relies on the shfmt layout, so any other spelling
 # of a function header, and function-shaped text inside a body, fails closed.
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_definition_scan_rejects_other_header_spellings_and_function_shaped_bodies() {
 	fixture_file="$TEST_TMPDIR/integration-definition-syntax.sh"
 
@@ -529,7 +518,6 @@ EOF
 		"$heredoc_output" "nested function definition at line 3."
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_fragments_reject_top_level_execution_and_nested_definitions() {
 	fixture_root="$TEST_TMPDIR/integration-definition-only-root"
 	fixture_registry="$fixture_root/registry.tsv"
@@ -575,7 +563,6 @@ test_integration_fragments_reject_top_level_execution_and_nested_definitions() {
 	done
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_fragment_scanner_accepts_inner_groups_and_rejects_hidden_definitions() {
 	grouped_fragment="$TEST_TMPDIR/scanner-grouped.sh"
 	hash_fragment="$TEST_TMPDIR/scanner-hashes.sh"
@@ -625,7 +612,6 @@ EOF
 		"$unterminated_output" "unterminated function at line 1."
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_fragment_scanner_is_quiet_under_gnu_awk() {
 	gawk_bin=$(command -v gawk 2>/dev/null) || {
 		startSkipping
@@ -656,7 +642,6 @@ EOF
 		"$(printf '%s\theredoc_test\t1' "$heredoc_fragment")" "$gawk_output"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_harness_declares_remote_parallel_rendered_failure_case() {
 	fragment_contents=$(zxfer_test_integration_fragment_corpus)
 	registry_contents=$(cat "$INTEGRATION_REGISTRY")
@@ -667,7 +652,6 @@ test_integration_harness_declares_remote_parallel_rendered_failure_case() {
 		"$registry_contents" "remote_parallel_rendered_failure_origin_test"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_get_os_detection_probe_loads_the_remote_host_owner_module() {
 	status=0
 	output=$(
@@ -683,7 +667,6 @@ test_get_os_detection_probe_loads_the_remote_host_owner_module() {
 		"$output" "Get_os detection test passed"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_registry_rejects_bad_schema_duplicates_and_undefined_functions() {
 	bad_header="$TEST_TMPDIR/integration-registry-bad-header.tsv"
 	duplicate="$TEST_TMPDIR/integration-registry-duplicate.tsv"
@@ -729,7 +712,6 @@ test_integration_registry_rejects_bad_schema_duplicates_and_undefined_functions(
 		"$external_collision_output" "function [sort] is not defined"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_main_rejects_invalid_registry_before_any_zpool_lookup() {
 	bad_registry="$TEST_TMPDIR/integration-registry-main-invalid.tsv"
 	tool_lookup_log="$TEST_TMPDIR/tool-lookups-for-invalid-registry"
@@ -757,7 +739,7 @@ test_integration_main_rejects_invalid_registry_before_any_zpool_lookup() {
 		0 "$tool_lookup_status"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+# shellcheck disable=SC2030,SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_main_rejects_invalid_fragments_before_any_zpool_lookup() {
 	fixture_dir="$TEST_TMPDIR/integration-fragment-main-invalid"
 	tool_lookup_log="$TEST_TMPDIR/tool-lookups-for-invalid-fragment"
@@ -787,7 +769,6 @@ test_integration_main_rejects_invalid_fragments_before_any_zpool_lookup() {
 		0 "$tool_lookup_status"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_pool_fixture_destroy_guard_refuses_unowned_pool_without_destroying() {
 	status=0
 	output=$(
@@ -814,7 +795,6 @@ test_pool_fixture_destroy_guard_refuses_unowned_pool_without_destroying() {
 		"$output" "unexpected destroy"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_pool_fixture_workdir_guard_rejects_traversal_and_symlink_escape() {
 	escape_root="$TEST_TMPDIR/outside-workdir"
 	mkdir -p "$escape_root"
@@ -829,7 +809,6 @@ test_pool_fixture_workdir_guard_rejects_traversal_and_symlink_escape() {
 	assertEquals "A symlinked parent outside WORKDIR should remain outside the removable boundary." 1 "$symlink_status"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_harness_does_not_skip_child_property_assertions_on_darwin() {
 	fragment_contents=$(zxfer_test_integration_fragment_corpus)
 
@@ -841,7 +820,6 @@ test_integration_harness_does_not_skip_child_property_assertions_on_darwin() {
 		"$fragment_contents" "Skipping child atime assertion on Darwin"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_find_backup_metadata_file_for_exact_pair_matches_v2_root_headers_and_row() {
 	backup_root="$WORKDIR/v2_lookup"
 	backup_dir="$backup_root/tank/src"
@@ -863,7 +841,6 @@ test_find_backup_metadata_file_for_exact_pair_matches_v2_root_headers_and_row() 
 		"" "$wrong_destination_result"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_find_backup_metadata_file_for_exact_pair_ignores_v1_body_rows() {
 	backup_root="$WORKDIR/v1_lookup"
 	backup_dir="$backup_root/tank/src"
@@ -880,7 +857,6 @@ test_find_backup_metadata_file_for_exact_pair_ignores_v1_body_rows() {
 		"" "$result"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_mock_ssh_fixture_matches_controls_across_transport_chunk_boundaries() {
 	mock_dir="$WORKDIR/chunked-mock-ssh"
 	mock_ssh="$mock_dir/ssh"
@@ -905,8 +881,10 @@ test_mock_ssh_fixture_matches_controls_across_transport_chunk_boundaries() {
 	capability_script="#$prefix ZXFER_REMOTE_CAPS_V2 '$suffix'"
 	capability_command=$(
 		(
-			zxfer_source_runtime_modules_through "zxfer_ssh_transport.sh"
+			zxfer_source_modules_for_tests "$ZXFER_ROOT"
 			zxfer_build_remote_sh_c_command "$capability_script"
+			# shellcheck disable=SC2154 # Published by the dynamically loaded renderer.
+			printf '%s' "$g_zxfer_shell_command_result"
 		)
 	)
 	capability_output=$(
@@ -931,8 +909,10 @@ test_mock_ssh_fixture_matches_controls_across_transport_chunk_boundaries() {
 	missing_probe_script="#$prefix command -v zfs '$suffix'"
 	missing_probe_command=$(
 		(
-			zxfer_source_runtime_modules_through "zxfer_ssh_transport.sh"
+			zxfer_source_modules_for_tests "$ZXFER_ROOT"
 			zxfer_build_remote_sh_c_command "$missing_probe_script"
+			# shellcheck disable=SC2154 # Published by the dynamically loaded renderer.
+			printf '%s' "$g_zxfer_shell_command_result"
 		)
 	)
 	if MOCK_SSH_MISSING_TOOL=zfs \
@@ -959,16 +939,16 @@ test_mock_ssh_fixture_matches_controls_across_transport_chunk_boundaries() {
 		10 "$wrapped_missing_probe_status"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_run_test_suppresses_passing_output_in_failed_tests_only_mode() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1
-		. \"$INTEGRATION_HARNESS\"
+		# shellcheck source=tests/run_integration_zxfer.sh
+		. "$INTEGRATION_HARNESS"
 		ZXFER_LIST_FAILED_TESTS_ONLY=1
 		ZXFER_KEEP_GOING=1
-		WORKDIR=\"$TEST_TMPDIR/workdir-pass\"
-		rm -rf \"\$WORKDIR\"
-		mkdir -p \"\$WORKDIR\"
+		WORKDIR="$TEST_TMPDIR/workdir-pass"
+		rm -rf "$WORKDIR"
+		mkdir -p "$WORKDIR"
 		passing_test() {
 			log 'starting synthetic pass'
 			printf '%s\n' 'pass-stdout'
@@ -976,7 +956,8 @@ test_integration_run_test_suppresses_passing_output_in_failed_tests_only_mode() 
 			return 0
 		}
 		run_test 1 1 passing_test
-	"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Passing tests should still succeed in failure-only mode." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -984,16 +965,16 @@ test_integration_run_test_suppresses_passing_output_in_failed_tests_only_mode() 
 		"[1/1] PASS passing_test" "$ZXFER_TEST_CAPTURE_OUTPUT"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_integration_run_test_replays_failing_output_in_failed_tests_only_mode() {
-	zxfer_test_capture_subshell "
+	capture_case() {
 		ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1
-		. \"$INTEGRATION_HARNESS\"
+		# shellcheck source=tests/run_integration_zxfer.sh
+		. "$INTEGRATION_HARNESS"
 		ZXFER_LIST_FAILED_TESTS_ONLY=1
 		ZXFER_KEEP_GOING=1
-		WORKDIR=\"$TEST_TMPDIR/workdir-fail\"
-		rm -rf \"\$WORKDIR\"
-		mkdir -p \"\$WORKDIR\"
+		WORKDIR="$TEST_TMPDIR/workdir-fail"
+		rm -rf "$WORKDIR"
+		mkdir -p "$WORKDIR"
 		failing_test() {
 			log 'starting synthetic failure'
 			printf '%s\n' 'fail-stdout'
@@ -1001,8 +982,9 @@ test_integration_run_test_replays_failing_output_in_failed_tests_only_mode() {
 			return 7
 		}
 		run_test 2 3 failing_test
-		printf 'failed=%s\n' \"\$ZXFER_FAILED_TESTS\"
-	"
+		printf 'failed=%s\n' "$ZXFER_FAILED_TESTS"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Failure-only mode should still let keep-going runs return success from run_test itself." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"

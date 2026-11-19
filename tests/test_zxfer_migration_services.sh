@@ -17,10 +17,6 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_migration_services"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	zxfer_test_reset_all_owner_state
 }

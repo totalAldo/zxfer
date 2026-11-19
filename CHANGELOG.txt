@@ -1,6 +1,19 @@
 CHANGELOG
 =========
 
+2026.11.19
+-Use the completed source listing to check recursive snapshot presence and wait for a free send slot before rescanning a full queue. The small local no-op and incremental fixtures each use one fewer helper and two fewer temporary files. Lower their TOTAL budgets to 22 and 69.
+-Reduce memory use when normalizing recursive properties and finish synchronized property applies as soon as the action plan has been validated.
+-Preserve suite paths with spaces in both coverage collectors, report unreadable inputs, and cache trace path lookups. The performance harness estimates bytes only for the measured transfer, prefers a monotonic clock, and rejects negative sample durations.
+-Reduce recursive discovery scratch files and dataset sort input, retain only destination identities when planning snapshot transfers, and defer destination mapping while all send slots are occupied. Write validated backup metadata rows in their original key order without rebuilding the complete output string.
+-Stop snapshot discovery if sorting a large source listing fails. Compare completed recursive no-op listings directly and share the decision to build a replication queue.
+-Escape each trailing newline exactly once in structured reports and verbose property values. Reuse the completed source property list in ordinary transfers, with separate backfill for restored properties under -e.
+-Read each selected VM guest's settings from one manifest row. The QEMU runner now enforces hardware acceleration for each profile in a comma-separated strict_qemu_profiles field.
+
+2026.10.29
+-Simplify test maintenance: literal fragment source statements now drive registration, listing and change mapping through one shared catalog; remove obsolete partial-load aliases and redundant reloads. Capture helpers run commands or scenario functions directly instead of evaluating quoted shell programs, and property transport assertions share one helper. Preserve test selection, order and isolation. Fix two performance-suite assumptions exposed by FreeBSD VM validation: explicitly export the mock runner's log path, and skip a Git-baseline scenario when a source archive has no Git history.
+-Consolidate local backup-file and failure-log metadata checks on the existing owner/mode/inode parser, including its link count; retain a fresh permission check after securing a newly created log. Remote shell rendering now publishes only its existing result variable, and source discovery calls its shared producer directly instead of forwarding through two argument-reordering adapters. CLI behavior, replication, backup formats, remote command bytes and platform support are unchanged.
+
 2026.10.12
 -Rename the verbose recursive delta summary fields source_missing_snapshots and destination_extra_snapshots to snapshots_missing_on_destination and snapshots_missing_on_source so each missing side is explicit. Preserve both counts, other summary fields, GUID comparison, exclusions and all replication/safety decisions; log parsers must use the new field names. Update operator documentation, man pages and verbose/very-verbose regression expectations.
 -Combine the two verbose discovery no-send lines into one: "No new snapshots to transfer during discovery for [SOURCE]." Name the source pool or primary dataset while retaining dataset-specific skip reasons and all replication and safety decisions. Update no-op/exclusion regression expectations and operator documentation.

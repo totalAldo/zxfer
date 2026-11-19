@@ -142,7 +142,9 @@ refused. The octal mode keeps the set-user-ID, set-group-ID and sticky bits
 on every platform, so a backup metadata file or `ZXFER_ERROR_LOG` that is
 0600 plus one of them is refused on FreeBSD and macOS as on Linux, and a run
 root under a set-group-ID `TMPDIR` (mode 2700) is accepted. The
-`ZXFER_ERROR_LOG` link-count check reads field 2 of `ls -ldn`, and the
+`ZXFER_ERROR_LOG` link-count check uses field 3 of the same `ls -ldin` record
+as its owner and mode checks; newly created logs get a fresh mode read after
+`chmod`. Local backup files likewise share one owner/mode read. The
 remote backup programs read the owner from field 3 of `ls -ldn` on the
 remote host.
 

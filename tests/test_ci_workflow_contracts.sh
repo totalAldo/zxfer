@@ -2,6 +2,7 @@
 #
 # Contract tests for developer-facing GitHub Actions validation wiring.
 #
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -16,7 +17,6 @@ PACKAGING_WORKFLOW_FILE="$ZXFER_ROOT/.github/workflows/packaging.yml"
 RUN_LINT_BIN="$ZXFER_ROOT/tests/run_lint.sh"
 CHECKOUT_PIN="actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 lint_workflow_matrix_targets() {
 	awk '
 		/^[[:space:]]+matrix:[[:space:]]*$/ {
@@ -43,7 +43,6 @@ lint_workflow_matrix_targets() {
 # Purpose: Print one job of a workflow, from its "  JOB:" line up to the
 # next job.
 # Usage: workflow_job_body WORKFLOW_FILE JOB
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 workflow_job_body() {
 	awk -v job_name="$2" '
 		$0 == "  " job_name ":" {
@@ -61,7 +60,6 @@ workflow_job_body() {
 # Purpose: Print the top-level block that starts at KEY (such as "on" or
 # "concurrency") up to the next top-level key.
 # Usage: workflow_top_level_block WORKFLOW_FILE KEY
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 workflow_top_level_block() {
 	awk -v key="$2" '
 		$0 == key ":" {
@@ -76,7 +74,6 @@ workflow_top_level_block() {
 	' "$1"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_lint_workflow_runs_every_public_lint_target() {
 	runner_targets=$("$RUN_LINT_BIN" --list | sort)
 	workflow_targets=$(lint_workflow_matrix_targets | sort)
@@ -97,7 +94,6 @@ test_lint_workflow_dispatches_through_the_shared_runner() {
 		"$workflow" './tests/run_lint.sh "${{ matrix.target }}"'
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_coverage_workflow_runs_report_only_bash_xtrace_coverage() {
 	coverage_job=$(workflow_job_body "$COVERAGE_WORKFLOW_FILE" coverage-bash-xtrace)
 	coverage_runner_commands=$(printf '%s\n' "$coverage_job" | awk '
@@ -116,7 +112,6 @@ test_coverage_workflow_runs_report_only_bash_xtrace_coverage() {
 		"$coverage_job" "continue-on-error: true"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_coverage_workflow_bounds_advisory_kcov_to_production_suites() {
 	workflow=$(cat "$COVERAGE_WORKFLOW_FILE")
 
@@ -126,7 +121,6 @@ test_coverage_workflow_bounds_advisory_kcov_to_production_suites() {
 		"$workflow" "continue-on-error: true"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_unit_workflow_installs_platform_test_prerequisites() {
 	workflow=$(cat "$UNIT_WORKFLOW_FILE")
 
@@ -252,7 +246,6 @@ test_packaging_workflow_builds_and_runs_the_rpm() {
 		"$(workflow_top_level_block "$PACKAGING_WORKFLOW_FILE" concurrency)"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_workflows_use_the_pinned_checkout_action() {
 	unpinned=$(grep -h 'uses: actions/checkout@' "$ZXFER_ROOT"/.github/workflows/*.yml |
 		sed 's/^[[:space:]-]*uses: //' | grep -v -x -F "$CHECKOUT_PIN")

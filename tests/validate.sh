@@ -6,6 +6,8 @@
 set -eu
 
 ZXFER_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=tests/helpers/test_catalog.sh
+. "$ZXFER_ROOT/tests/helpers/test_catalog.sh"
 VALIDATION_MAP=${ZXFER_VALIDATION_MAP:-"$ZXFER_ROOT/tests/validation_map.tsv"}
 VALIDATION_PROFILES=${ZXFER_VALIDATION_PROFILES:-"$ZXFER_ROOT/tests/validation_profiles.tsv"}
 ZXFER_VALIDATE_JOBS=${ZXFER_VALIDATE_JOBS:-4}
@@ -286,19 +288,16 @@ print_mapping_field() {
 	fi
 }
 
-# Purpose: Print the entry suite whose "# zxfer-test-fragment:" marker names a
-# tests/suites path; the runner reads the same markers.
-# Usage: fragment_entry_suite tests/suites/NAME; prints tests/test_*.sh, or
-# nothing when no entry suite marks the path as a fragment.
+# Purpose: Print the entry suite that sources a tests/suites fragment.
+# Usage: fragment_entry_suite tests/suites/NAME; prints nothing if unowned.
 fragment_entry_suite() {
-	l_marker="# zxfer-test-fragment: ${1#tests/}"
+	l_fragment_path=${1#tests/}
 	set -- "$ZXFER_ROOT"/tests/test_*.sh
 	[ -f "$1" ] || return 0
-	l_marker_entry=$(awk -v marker="$l_marker" '
-		$0 == marker { print FILENAME; exit }
-	' "$@") || return 1
-	[ -n "$l_marker_entry" ] || return 0
-	printf 'tests/%s\n' "${l_marker_entry##*/}"
+	l_fragment_rows=$(zxfer_test_fragment_rows "$@") || return 1
+	printf '%s\n' "$l_fragment_rows" | awk -F '\t' -v path="$l_fragment_path" '
+		$2 == path { sub(/.*\//, "", $1); print "tests/" $1; exit }
+	'
 }
 
 map_changed_path() {
@@ -311,7 +310,7 @@ map_changed_path() {
 	case "$l_changed_path" in
 	tests/suites/*)
 		l_fragment_entry=$(fragment_entry_suite "$l_changed_path") ||
-			die "Failed to read the fragment markers for: $l_changed_path"
+			die "Failed to read the fragment sources for: $l_changed_path"
 		[ -z "$l_fragment_entry" ] || l_map_path=$l_fragment_entry
 		;;
 	esac

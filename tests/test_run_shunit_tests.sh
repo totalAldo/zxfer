@@ -3,6 +3,7 @@
 # shunit2 tests for tests/run_shunit_tests.sh, the shared test helper, and the
 # local changes to the vendored shunit2.
 #
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -12,10 +13,6 @@ TESTS_DIR=$(dirname "$0")
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_run_shunit_tests"
 	RUN_SHUNIT_TESTS_BIN="$ZXFER_ROOT/tests/run_shunit_tests.sh"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {
@@ -29,7 +26,24 @@ setUp() {
 	rm -f "$FAKE_SUITE_STARTED" "$FAKE_SUITE_RELEASE"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+test_suite_teardown_removes_only_its_own_temp_directory() {
+	l_caller_tmpdir="$TEST_TMPDIR/caller"
+	mkdir -p "$l_caller_tmpdir" || fail "Unable to create caller fixture."
+	env TMPDIR="$TEST_TMPDIR" TEST_TMPDIR="$l_caller_tmpdir" /bin/sh -s "$ZXFER_ROOT/tests/helpers/lifecycle.sh" <<'SH'
+. "$1"
+caller=$TEST_TMPDIR
+oneTimeTearDown || exit 1
+[ -d "$caller" ] || exit 1
+zxfer_test_create_tmpdir zxfer_nested_suite
+created=$TEST_TMPDIR
+[ -d "$created" ] || exit 1
+TEST_TMPDIR=$caller
+oneTimeTearDown || exit 1
+[ -d "$caller" ] && [ ! -d "$created" ]
+SH
+	assertEquals "Teardown should remove only the directory created by this suite." 0 "$?"
+}
+
 write_fake_suite() {
 	l_fake_suite_path=$1
 	l_fake_suite_marker=$2
@@ -40,7 +54,6 @@ exit 0
 EOF
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 write_fake_suite_with_body() {
 	l_fake_suite_path=$1
 	cat >"$l_fake_suite_path"
@@ -81,7 +94,6 @@ write_fake_named_suite() {
 	chmod +x "$l_fake_suite_path"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 write_fake_test_shell() {
 	l_fake_shell_path=$1
 	cat >"$l_fake_shell_path" <<'EOF'
@@ -92,7 +104,6 @@ EOF
 	chmod +x "$l_fake_shell_path"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_runs_explicit_suite_directly_by_default() {
 	l_suite_path="$TEST_TMPDIR/default-suite.sh"
 	write_fake_suite "$l_suite_path" "direct-default"
@@ -116,7 +127,6 @@ test_run_shunit_tests_runs_explicit_suite_directly_by_default() {
 		"" "$(cat "$FAKE_TEST_SHELL_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_lists_suites_and_named_tests_without_running_them() {
 	l_suite_path="$TEST_TMPDIR/listable-suite.sh"
 	{
@@ -151,39 +161,66 @@ test_run_shunit_tests_lists_suites_and_named_tests_without_running_them() {
 		"" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+# shellcheck disable=SC2016,SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_lists_named_tests_from_declared_behavior_fragments() {
-	l_suite_path="$TEST_TMPDIR/fragmented-suite.sh"
-	l_fragment_path="$TEST_TMPDIR/fragmented-suite-cases.sh"
+	l_suite_dir="$TEST_TMPDIR/catalog with spaces"
+	l_suite_path="$l_suite_dir/fragmented-suite.sh"
+	mkdir -p "$l_suite_dir/suites"
 	{
-		printf '%s\n' '#!/bin/sh'
-		printf '%s\n' '# zxfer-test-fragment: fragmented-suite-cases.sh'
-		printf '%s\n' 'test_main_case() {'
-		printf '\t:\n'
-		printf '%s\n' '}'
+		printf '%s\n' '#!/bin/sh' 'exit 37' 'test_main_case() {' ':' '}'
+		printf '%s\n' '  .  "$TESTS_DIR/suites/z_last.sh" # first fragment' '. "${TESTS_DIR}/suites/a_first.sh"'
 	} >"$l_suite_path"
-	{
-		printf '%s\n' '#!/bin/sh'
-		printf '%s\n' 'test_fragment_case() {'
-		printf '\t:\n'
-		printf '%s\n' '}'
-		printf '%s\n' 'fragment_helper() {'
-		printf '\t:\n'
-		printf '%s\n' '}'
-	} >"$l_fragment_path"
-	chmod +x "$l_suite_path"
+	printf '%s\n' 'test_z_case() {' ':' '}' 'fragment_helper() {' ':' '}' >"$l_suite_dir/suites/z_last.sh"
+	printf '%s\n' 'test_a_case() {' ':' '}' >"$l_suite_dir/suites/a_first.sh"
 
 	test_output=$("$RUN_SHUNIT_TESTS_BIN" --list-tests "$l_suite_path")
-
-	assertContains "Fragment-aware listing should preserve tests defined in the stable suite entry point." \
-		"$test_output" "$l_suite_path	test_main_case"
-	assertContains "Fragment-aware listing should include tests from every declared behavior fragment." \
-		"$test_output" "$l_suite_path	test_fragment_case"
-	assertNotContains "Fragment-aware listing should continue to exclude non-test helpers." \
-		"$test_output" "fragment_helper"
+	assertEquals "Discovery must read entry tests first, then literal source order without executing the suite." \
+		"$(printf '%s\t%s\n' "$l_suite_path" test_main_case "$l_suite_path" test_z_case "$l_suite_path" test_a_case)" \
+		"$test_output"
+	registered=$(
+		cd "$l_suite_dir" || exit 1
+		suite_addTest() { printf '%s\n' "$1"; }
+		zxfer_test_register_suite_tests fragmented-suite.sh
+	)
+	assertEquals "Registration must agree with listing, including a basename entry in a path with spaces." \
+		"$(printf '%s\n' test_main_case test_z_case test_a_case)" "$registered"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+# shellcheck disable=SC2016,SC2317,SC2329 # Invoked indirectly by shunit2.
+test_run_shunit_tests_rejects_unsafe_or_missing_fragment_sources() {
+	l_suite_path="$TEST_TMPDIR/invalid-fragment-suite.sh"
+	for l_fragment in '../outside.sh' 'missing.sh' unquoted split_quote; do
+		case "$l_fragment" in
+		unquoted) printf '%s\n' '. $TESTS_DIR/suites/cases.sh' >"$l_suite_path" ;;
+		split_quote) printf '%s\n' '. "$TESTS_DIR"/suites/cases.sh' >"$l_suite_path" ;;
+		*) printf '. "$TESTS_DIR/suites/%s"\n' "$l_fragment" >"$l_suite_path" ;;
+		esac
+		test_output=$("$RUN_SHUNIT_TESTS_BIN" --list-tests "$l_suite_path" 2>&1)
+		status=$?
+		assertEquals "An unsafe or missing fragment must fail discovery [$l_fragment]." 1 "$status"
+		case "$l_fragment" in
+		../*) assertContains "$test_output" 'Invalid suite test fragment path' ;;
+		unquoted | split_quote) assertContains "$test_output" 'Invalid suite test fragment source' ;;
+		*) assertContains "$test_output" 'Missing suite test fragment' ;;
+		esac
+	done
+	# shunit2 ignores its suite hook status: rejected source syntax must exit,
+	# even when the shell successfully loaded that fragment before registration.
+	mkdir -p "$TEST_TMPDIR/suites"
+	printf ':\n' >"$TEST_TMPDIR/suites/existing.sh"
+	printf '%s\n' 'TESTS_DIR=$(dirname "$0")' \
+		'. "$ZXFER_ROOT/tests/helpers/loader.sh"' \
+		'. "$TESTS_DIR"/suites/existing.sh' \
+		'test_entry_case() { : >"$REACHED_FILE"; }' \
+		'suite() { zxfer_test_register_suite_tests "$0"; }' \
+		'. "$ZXFER_ROOT/tests/shunit2/shunit2"' >"$l_suite_path"
+	test_output=$(ZXFER_ROOT="$ZXFER_ROOT" REACHED_FILE="$TEST_TMPDIR/catalog-fell-through" \
+		/bin/sh "$l_suite_path" 2>&1)
+	status=$?
+	assertNotEquals "Failed registration must stop shunit2: $test_output" 0 "$status"
+	assertFalse "No entry test may run after failed registration." "[ -e '$TEST_TMPDIR/catalog-fell-through' ]"
+}
+
 test_run_shunit_tests_list_tests_requires_one_explicit_suite() {
 	l_first_suite="$TEST_TMPDIR/list-first-suite.sh"
 	l_second_suite="$TEST_TMPDIR/list-second-suite.sh"
@@ -191,21 +228,23 @@ test_run_shunit_tests_list_tests_requires_one_explicit_suite() {
 	write_fake_suite "$l_second_suite" "list-second"
 	chmod +x "$l_first_suite" "$l_second_suite"
 
-	zxfer_test_capture_subshell "
-		FAKE_SUITE_LOG=\"$FAKE_SUITE_LOG\" \\
-		\"$RUN_SHUNIT_TESTS_BIN\" --list-tests
-	"
+	capture_case() {
+		FAKE_SUITE_LOG="$FAKE_SUITE_LOG" \
+			"$RUN_SHUNIT_TESTS_BIN" --list-tests
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Named-test listing should reject an omitted suite instead of expanding to the full suite set." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "The missing-suite error should explain the single-suite contract." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "--list-tests requires exactly one explicit suite; found 0."
 
-	zxfer_test_capture_subshell "
-		FAKE_SUITE_LOG=\"$FAKE_SUITE_LOG\" \\
-		\"$RUN_SHUNIT_TESTS_BIN\" --list-tests \\
-		\"$l_first_suite\" \"$l_second_suite\"
-	"
+	capture_case() {
+		FAKE_SUITE_LOG="$FAKE_SUITE_LOG" \
+			"$RUN_SHUNIT_TESTS_BIN" --list-tests \
+			"$l_first_suite" "$l_second_suite"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Named-test listing should reject ambiguous multi-suite selection." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -215,7 +254,6 @@ test_run_shunit_tests_list_tests_requires_one_explicit_suite() {
 		"" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_forwards_named_tests_to_one_suite() {
 	l_suite_path="$TEST_TMPDIR/named-suite.sh"
 	write_fake_named_suite "$l_suite_path" named \
@@ -236,7 +274,6 @@ test_run_shunit_tests_forwards_named_tests_to_one_suite() {
 		"$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_preserves_positional_suite_named_test_selection() {
 	l_suite_path="$TEST_TMPDIR/named-positional-suite.sh"
 	write_fake_named_suite "$l_suite_path" positional \
@@ -257,7 +294,6 @@ test_run_shunit_tests_preserves_positional_suite_named_test_selection() {
 		"$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_runs_cross_suite_named_selections_in_first_suite_order() {
 	l_first_suite="$TEST_TMPDIR/named-cross-first.sh"
 	l_second_suite="$TEST_TMPDIR/named-cross-second.sh"
@@ -282,7 +318,6 @@ test_run_shunit_tests_runs_cross_suite_named_selections_in_first_suite_order() {
 second:--:test_second_one" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_merges_duplicate_suite_selectors_without_reordering_tests() {
 	l_suite_path="$TEST_TMPDIR/named-duplicate-suite.sh"
 	write_fake_named_suite "$l_suite_path" duplicate \
@@ -302,7 +337,6 @@ test_run_shunit_tests_merges_duplicate_suite_selectors_without_reordering_tests(
 		"$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_rejects_unknown_named_test_before_starting_any_suite() {
 	l_first_suite="$TEST_TMPDIR/named-known-suite.sh"
 	l_second_suite="$TEST_TMPDIR/named-unknown-suite.sh"
@@ -324,7 +358,6 @@ test_run_shunit_tests_rejects_unknown_named_test_before_starting_any_suite() {
 		"" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_rejects_test_option_before_its_suite() {
 	l_suite_path="$TEST_TMPDIR/named-orphan-suite.sh"
 	write_fake_named_suite "$l_suite_path" orphan test_orphan
@@ -344,7 +377,6 @@ test_run_shunit_tests_rejects_test_option_before_its_suite() {
 		"" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_rejects_named_tests_without_one_suite() {
 	l_first_suite="$TEST_TMPDIR/named-first-suite.sh"
 	l_second_suite="$TEST_TMPDIR/named-second-suite.sh"
@@ -352,11 +384,7 @@ test_run_shunit_tests_rejects_named_tests_without_one_suite() {
 	write_fake_suite "$l_second_suite" "named-second"
 	chmod +x "$l_first_suite" "$l_second_suite"
 
-	zxfer_test_capture_subshell "
-		FAKE_SUITE_LOG=\"$FAKE_SUITE_LOG\" \
-		\"$RUN_SHUNIT_TESTS_BIN\" --test test_case \
-		\"$l_first_suite\" \"$l_second_suite\"
-	"
+	zxfer_test_capture_subshell env FAKE_SUITE_LOG="$FAKE_SUITE_LOG" "$RUN_SHUNIT_TESTS_BIN" --test test_case "$l_first_suite" "$l_second_suite"
 
 	assertEquals "Named test selection should fail before launching an ambiguous multi-suite run." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -366,24 +394,19 @@ test_run_shunit_tests_rejects_named_tests_without_one_suite() {
 		"" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_rejects_non_positive_and_nonnumeric_jobs() {
 	l_suite_path="$TEST_TMPDIR/jobs-suite.sh"
 	write_fake_suite "$l_suite_path" "jobs"
 	chmod +x "$l_suite_path"
 
-	zxfer_test_capture_subshell "
-		\"$RUN_SHUNIT_TESTS_BIN\" --jobs 0 \"$l_suite_path\"
-	"
+	zxfer_test_capture_subshell "$RUN_SHUNIT_TESTS_BIN" --jobs 0 "$l_suite_path"
 
 	assertEquals "A zero job count should fail before any suites are launched." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "A zero job count should report the positive-integer requirement." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "--jobs must be a positive integer"
 
-	zxfer_test_capture_subshell "
-		\"$RUN_SHUNIT_TESTS_BIN\" --jobs nope \"$l_suite_path\"
-	"
+	zxfer_test_capture_subshell "$RUN_SHUNIT_TESTS_BIN" --jobs nope "$l_suite_path"
 
 	assertEquals "A nonnumeric job count should fail before any suites are launched." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -393,7 +416,6 @@ test_run_shunit_tests_rejects_non_positive_and_nonnumeric_jobs() {
 		"" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_limits_explicit_jobs_to_runnable_suite_count() {
 	l_suite_path="$TEST_TMPDIR/clamped-jobs-suite.sh"
 	write_fake_suite "$l_suite_path" "clamped"
@@ -412,7 +434,6 @@ test_run_shunit_tests_limits_explicit_jobs_to_runnable_suite_count() {
 		"clamped" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_replays_parallel_output_in_suite_order() {
 	l_slow_suite="$TEST_TMPDIR/slow-suite.sh"
 	l_fast_suite="$TEST_TMPDIR/fast-suite.sh"
@@ -476,7 +497,6 @@ EOF
 		"$(cat "$FAKE_SUITE_LOG")" "fast-sees-slow"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_reuses_parallel_slots_when_newer_suite_finishes_first() {
 	l_first_suite="$TEST_TMPDIR/slot-reuse-one.sh"
 	l_second_suite="$TEST_TMPDIR/slot-reuse-two.sh"
@@ -535,7 +555,6 @@ EOF
 		"$output" "slot-three-done"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_streams_serial_output_when_jobs_is_one() {
 	l_suite_path="$TEST_TMPDIR/serial-stream-suite.sh"
 	l_output_path="$TEST_TMPDIR/serial-stream.output"
@@ -595,7 +614,6 @@ EOF
 		"$(cat "$l_output_path")" "serial-end"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_preserves_last_failed_suite_status_in_parallel() {
 	l_first_suite="$TEST_TMPDIR/first-fail-suite.sh"
 	l_second_suite="$TEST_TMPDIR/second-fail-suite.sh"
@@ -614,9 +632,7 @@ EOF
 EOF
 	chmod +x "$l_second_suite"
 
-	zxfer_test_capture_subshell "
-		\"$RUN_SHUNIT_TESTS_BIN\" --jobs 2 \"$l_first_suite\" \"$l_second_suite\"
-	"
+	zxfer_test_capture_subshell "$RUN_SHUNIT_TESTS_BIN" --jobs 2 "$l_first_suite" "$l_second_suite"
 
 	assertEquals "Parallel execution should preserve the exit status from the last failed suite in input order." \
 		7 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -628,7 +644,6 @@ EOF
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "==> shunit2 summary: 0 passed, 2 failed"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_uses_zxfer_test_shell_for_non_executable_suites_in_parallel() {
 	l_first_suite="$TEST_TMPDIR/nonexec-suite-one.sh"
 	l_second_suite="$TEST_TMPDIR/nonexec-suite-two.sh"
@@ -659,17 +674,12 @@ test_run_shunit_tests_uses_zxfer_test_shell_for_non_executable_suites_in_paralle
 		"$(cat "$FAKE_TEST_SHELL_LOG")" "$l_second_suite"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_rejects_missing_zxfer_test_shell() {
 	l_suite_path="$TEST_TMPDIR/missing-shell-suite.sh"
 	write_fake_suite "$l_suite_path" "missing-shell"
 	chmod +x "$l_suite_path"
 
-	zxfer_test_capture_subshell "
-		ZXFER_TEST_SHELL=\"$TEST_TMPDIR/does-not-exist\" \
-			FAKE_SUITE_LOG=\"$FAKE_SUITE_LOG\" \
-			\"$RUN_SHUNIT_TESTS_BIN\" \"$l_suite_path\"
-	"
+	zxfer_test_capture_subshell env ZXFER_TEST_SHELL="$TEST_TMPDIR/does-not-exist" FAKE_SUITE_LOG="$FAKE_SUITE_LOG" "$RUN_SHUNIT_TESTS_BIN" "$l_suite_path"
 
 	assertEquals "A missing alternate shell should fail before any suites are run." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "The runner should surface a clear error when ZXFER_TEST_SHELL cannot be executed." \
@@ -678,7 +688,6 @@ test_run_shunit_tests_rejects_missing_zxfer_test_shell() {
 		"" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vendored_shunit_escape_characters_handles_bsd_userland() {
 	actual=$(_shunit_escapeCharactersInString "has'quote\`and\$dollar")
 	expected="has\\'quote\\\`and\\\$dollar"
@@ -687,43 +696,36 @@ test_vendored_shunit_escape_characters_handles_bsd_userland() {
 		"$expected" "$actual"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+# shellcheck disable=SC2016,SC2317,SC2329  # Invoked indirectly by shunit2.
 test_test_helper_clears_unsafe_failure_report_commands_from_ambient_env() {
-	zxfer_test_capture_subshell "
-		TESTS_DIR=\"$TESTS_DIR\" \
-		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 \
-		PATH=\"${PATH:-/usr/bin:/bin}\" \
-		/bin/sh -c '
-			. \"\$1/test_helper.sh\"
-			if [ -n \"\${ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS+x}\" ]; then
+	zxfer_test_capture_subshell env ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 \
+		PATH="${PATH:-/usr/bin:/bin}" /bin/sh -c '
+			TESTS_DIR=$1
+			. "$1/test_helper.sh"
+			if [ -n "${ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS+x}" ]; then
 				exit 1
 			fi
-		' sh \"$TESTS_DIR\"
-	"
+		' sh "$TESTS_DIR"
 
 	assertEquals "Sourcing the shared test helper should clear ambient unsafe failure-report command overrides so unrelated suites stay deterministic." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+# shellcheck disable=SC2016,SC2317,SC2329  # Invoked indirectly by shunit2.
 test_test_helper_clears_ambient_runner_test_shell() {
-	zxfer_test_capture_subshell "
-		TESTS_DIR=\"$TESTS_DIR\" \
-		ZXFER_TEST_SHELL=/bin/dash \
-		PATH=\"${PATH:-/usr/bin:/bin}\" \
-		/bin/sh -c '
-			. \"\$1/test_helper.sh\"
-			if [ -n \"\${ZXFER_TEST_SHELL+x}\" ]; then
+	zxfer_test_capture_subshell env ZXFER_TEST_SHELL=/bin/dash \
+		PATH="${PATH:-/usr/bin:/bin}" /bin/sh -c '
+			TESTS_DIR=$1
+			. "$1/test_helper.sh"
+			if [ -n "${ZXFER_TEST_SHELL+x}" ]; then
 				exit 1
 			fi
-		' sh \"$TESTS_DIR\"
-	"
+		' sh "$TESTS_DIR"
 
 	assertEquals "Sourcing the shared test helper should clear ambient runner-shell overrides so nested runner tests use their own explicit shell selection." \
 		0 "$ZXFER_TEST_CAPTURE_STATUS"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_test_helper_keeps_domain_fixtures_opt_in() {
 	/bin/sh -c '
 		TESTS_DIR=$1
@@ -743,7 +745,6 @@ test_test_helper_keeps_domain_fixtures_opt_in() {
 		0 "$l_status"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_fake_tool_fixture_returns_write_failure_before_chmod() {
 	l_fake_chmod_log="$TEST_TMPDIR/fake-tool-chmod.log"
 	l_fake_ssh_path="$TEST_TMPDIR/fake-tool-ssh"
@@ -778,7 +779,6 @@ test_fake_tool_fixture_returns_write_failure_before_chmod() {
 # substring. Upstream piped the container into grep -F, which matched any one
 # line of a multi-line expectation, and illumos grep rejected the empty
 # pattern a trailing newline made.
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 zxfer_test_contains_literal_status() {
 	if _shunit_containsLiteral "$1" "$2"; then
 		printf '%s\n' 0
@@ -787,7 +787,6 @@ zxfer_test_contains_literal_status() {
 	fi
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_vendored_shunit2_contains_matches_literal_text() {
 	l_text='inventory=
 snapshot=tank@a*
@@ -818,7 +817,6 @@ status=0'
 # Purpose: Wait up to RUN_SHUNIT_TESTS_WAIT_LIMIT seconds for FILE to hold
 # data.
 # Usage: wait_for_nonempty_file FILE; returns 1 on timeout.
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 wait_for_nonempty_file() {
 	l_wait_remaining=$RUN_SHUNIT_TESTS_WAIT_LIMIT
 	while [ ! -s "$1" ]; do
@@ -831,7 +829,6 @@ wait_for_nonempty_file() {
 # Purpose: Print the PIDs from the given files that are still alive, after
 # giving killed processes a few seconds to be reaped.
 # Usage: live_pids_in FILE...
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 live_pids_in() {
 	l_live_pids=$(cat "$@" 2>/dev/null)
 	l_live_remaining=5
@@ -932,7 +929,6 @@ test_run_shunit_tests_starts_known_slow_suites_first_with_more_than_one_job() {
 		"aaa bbb slow " "$serial_starts"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_watchdog_stops_a_stalled_suite_and_continues() {
 	l_stalled_suite="$TEST_TMPDIR/stalled-suite.sh"
 	l_next_suite="$TEST_TMPDIR/after-stall-suite.sh"
@@ -977,7 +973,6 @@ EOS
 # The one real teardown test: a TERM stops every running suite, including one
 # that ignores TERM (as does its child), and the runner exits 143 without
 # leaving its state behind.
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_term_stops_running_suites_and_exits_143() {
 	l_stubborn_suite="$TEST_TMPDIR/term-stubborn-suite.sh"
 	l_plain_suite="$TEST_TMPDIR/term-plain-suite.sh"
@@ -1033,7 +1028,6 @@ EOS
 		"" "$(ls "$l_runner_tmpdir")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_skip_tool_suites_runs_only_product_suites() {
 	l_skip_dir="$TEST_TMPDIR/skip-tool-suites"
 	rm -rf "$l_skip_dir"
@@ -1058,7 +1052,6 @@ test_run_shunit_tests_skip_tool_suites_runs_only_product_suites() {
 		"test_zxfer_fake" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_rejects_a_non_numeric_suite_timeout() {
 	l_suite_path="$TEST_TMPDIR/timeout-option-suite.sh"
 	write_fake_suite "$l_suite_path" "timeout-option"
@@ -1078,7 +1071,7 @@ test_run_shunit_tests_rejects_a_non_numeric_suite_timeout() {
 	assertEquals "No suite should run." "" "$(cat "$FAKE_SUITE_LOG")"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
+# shellcheck disable=SC2016,SC2317,SC2329  # Invoked indirectly by shunit2.
 test_run_shunit_tests_checks_names_and_numbers_as_ascii_in_a_utf8_locale() {
 	# In a UTF-8 locale bash 3.2 (macOS /bin/sh) matches a range by
 	# collation: [0-9] also takes U+2185 and [A-Za-z] takes accented letters.
@@ -1088,12 +1081,13 @@ test_run_shunit_tests_checks_names_and_numbers_as_ascii_in_a_utf8_locale() {
 	write_fake_suite "$l_suite_path" "utf8"
 	chmod +x "$l_suite_path"
 	l_fragment_suite_path="$TEST_TMPDIR/utf8-fragment-suite.sh"
+	mkdir -p "$TEST_TMPDIR/suites"
 	{
 		printf '%s\n' '#!/bin/sh'
-		printf '# zxfer-test-fragment: name%s.sh\n' "$l_e_acute"
+		printf '. "$TESTS_DIR/suites/name%s.sh"\n' "$l_e_acute"
 	} >"$l_fragment_suite_path"
 	chmod +x "$l_fragment_suite_path"
-	printf '%s\n' 'test_fragment_case() {' ':' '}' >"$TEST_TMPDIR/name$l_e_acute.sh"
+	printf '%s\n' 'test_fragment_case() {' ':' '}' >"$TEST_TMPDIR/suites/name$l_e_acute.sh"
 
 	jobs_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
 		"$RUN_SHUNIT_TESTS_BIN" --jobs "$l_roman_six" "$l_suite_path" 2>&1)
@@ -1124,6 +1118,73 @@ test_run_shunit_tests_checks_names_and_numbers_as_ascii_in_a_utf8_locale() {
 	assertContains "The fragment failure should be the path check." \
 		"$fragment_output" "Invalid suite test fragment path"
 	assertEquals "No suite should run." "" "$(cat "$FAKE_SUITE_LOG")"
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Literal argv and shunit2 entry.
+test_command_capture_preserves_argv_status_and_subshell_isolation() {
+	capture_case() {
+		CAPTURE_MARKER=child
+		printf '<%s>\n' "$@"
+		printf '%s\n' stderr-line >&2
+		return 37
+	}
+	CAPTURE_MARKER=parent
+	zxfer_test_capture_subshell capture_case 'two words' '$(exit 9)' 'a"b' ''
+	assertEquals 37 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals '<two words>
+<$(exit 9)>
+<a"b>
+<>
+stderr-line' "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "The scenario must not change parent state." parent "$CAPTURE_MARKER"
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Literal argv and shunit2 entry.
+test_command_capture_restores_errexit_without_suppressing_scenario_failures() {
+	capture_errexit_case() {
+		set -e
+		zxfer_test_capture_subshell false
+		printf 'enabled status=%s ' "$ZXFER_TEST_CAPTURE_STATUS"
+		case $- in *e*) printf 'errexit=on\n' ;; esac
+		set +e
+		zxfer_test_capture_subshell false
+		printf 'disabled status=%s ' "$ZXFER_TEST_CAPTURE_STATUS"
+		case $- in *e*) ;; *) printf 'errexit=off\n' ;; esac
+	}
+	zxfer_test_capture_subshell capture_errexit_case
+	assertEquals 0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals 'enabled status=1 errexit=on
+disabled status=1 errexit=off' "$ZXFER_TEST_CAPTURE_OUTPUT"
+	capture_case() {
+		set -e
+		false
+		printf '%s\n' unexpected-continuation
+	}
+	zxfer_test_capture_subshell capture_case
+	assertEquals "A scenario may explicitly enable errexit." 1 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "An enabled errexit must stop the scenario." '' "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
+# shellcheck disable=SC2016,SC2317,SC2329  # Literal argv and shunit2 entry.
+test_command_capture_split_keeps_streams_separate_and_restores_errexit() {
+	capture_split_case() {
+		printf '%s\n' "$1"
+		printf '%s\n' "$2" >&2
+		exit 29
+	}
+	capture_case() {
+		set -e
+		ZXFER_TEST_CAPTURE_OUTPUT=retained
+		zxfer_test_capture_subshell_split "$TEST_TMPDIR/capture.stdout" \
+			"$TEST_TMPDIR/capture.stderr" capture_split_case 'output value' 'error value'
+		printf 'status=%s output=%s ' "$ZXFER_TEST_CAPTURE_STATUS" "$ZXFER_TEST_CAPTURE_OUTPUT"
+		case $- in *e*) printf 'errexit=on\n' ;; esac
+	}
+	zxfer_test_capture_subshell capture_case
+	assertEquals 0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals 'status=29 output=retained errexit=on' "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals 'output value' "$(cat "$TEST_TMPDIR/capture.stdout")"
+	assertEquals 'error value' "$(cat "$TEST_TMPDIR/capture.stderr")"
 }
 
 # shellcheck source=tests/shunit2/shunit2

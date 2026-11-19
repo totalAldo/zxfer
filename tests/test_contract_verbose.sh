@@ -137,8 +137,7 @@ test_very_verbose_profile_zeroes_hostile_inherited_counters() {
 		for l_key in $l_keys; do
 			export "g_zxfer_profile_$l_key=x[\$(: >$l_marker)]"
 		done
-		planning_run_zxfer "$STATE_DIR" -V -R \
-			"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+		planning_run_recursive "$STATE_DIR" -V
 	)
 	l_status=$?
 

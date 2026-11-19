@@ -38,8 +38,9 @@
 # Module contract:
 # owns globals: the effective-UID memo g_zxfer_effective_uid; the results of
 #   one metadata read (g_zxfer_path_inode_result,
-#   g_zxfer_path_owner_uid_result, g_zxfer_path_mode_result and
-#   g_zxfer_path_permissions_result); the private-directory record
+#   g_zxfer_path_owner_uid_result, g_zxfer_path_link_count_result,
+#   g_zxfer_path_mode_result and g_zxfer_path_permissions_result); the
+#   private-directory record
 #   g_zxfer_private_directory_record_result; and the validated temp root
 #   g_zxfer_temp_root_candidate_result.
 # reads globals: ZXFER_TAB/ZXFER_LF from zxfer_quoting.sh.
@@ -61,6 +62,7 @@ zxfer_reset_path_security_state() {
 	g_zxfer_effective_uid=""
 	g_zxfer_path_inode_result=""
 	g_zxfer_path_owner_uid_result=""
+	g_zxfer_path_link_count_result=""
 	g_zxfer_path_mode_result=""
 	g_zxfer_path_permissions_result=""
 	g_zxfer_private_directory_record_result=""
@@ -70,9 +72,10 @@ zxfer_reset_path_security_state() {
 # Purpose: Parse one `ls -ldin` line into the path metadata results.
 # Usage: zxfer_parse_path_metadata_line LINE; publishes
 # g_zxfer_path_inode_result, g_zxfer_path_owner_uid_result,
+# g_zxfer_path_link_count_result,
 # g_zxfer_path_permissions_result (the mode string) and
 # g_zxfer_path_mode_result (octal, as GNU `stat -c %a` prints it: 600, or
-# 2700 when the set-group-ID bit is set), or returns 1 with all four empty.
+# 2700 when the set-group-ID bit is set), or returns 1 with every result empty.
 # The line holds the fields POSIX gives `ls -l`, and GNU coreutils, FreeBSD,
 # macOS, illumos and BusyBox print them alike. Only the first four are read:
 # 1 the inode (-i; BusyBox and illumos pad it with blanks), 2 the mode string,
@@ -81,6 +84,7 @@ zxfer_reset_path_security_state() {
 zxfer_parse_path_metadata_line() {
 	g_zxfer_path_inode_result=""
 	g_zxfer_path_owner_uid_result=""
+	g_zxfer_path_link_count_result=""
 	g_zxfer_path_mode_result=""
 	g_zxfer_path_permissions_result=""
 	IFS=' 	' read -r l_metadata_inode l_metadata_permissions l_metadata_links \
@@ -134,11 +138,12 @@ EOF
 
 	g_zxfer_path_inode_result=$l_metadata_inode
 	g_zxfer_path_owner_uid_result=$l_metadata_owner
+	g_zxfer_path_link_count_result=$l_metadata_links
 	g_zxfer_path_mode_result=$l_metadata_mode
 	g_zxfer_path_permissions_result=$l_metadata_permissions
 }
 
-# Purpose: Read one path's inode, owner and mode with a single `ls -ldin`.
+# Purpose: Read one path's inode, owner, link count and mode with one `ls -ldin`.
 # Usage: zxfer_read_path_metadata PATH; publishes the results of
 # zxfer_parse_path_metadata_line, or returns 1 with them empty when ls fails
 # or prints a line that does not parse. A symlink is described, not
@@ -407,17 +412,15 @@ zxfer_check_secure_backup_file() {
 	l_check_path=$1
 	l_check_display_path=${2:-$l_check_path}
 
-	if ! l_check_owner_uid=$(zxfer_get_path_owner_uid "$l_check_path"); then
+	if ! zxfer_read_path_metadata "$l_check_path"; then
 		printf '%s\n' "Cannot determine the owner of backup metadata $l_check_display_path."
 		return 1
 	fi
+	l_check_owner_uid=$g_zxfer_path_owner_uid_result
+	l_check_mode=$g_zxfer_path_mode_result
 	if ! zxfer_backup_owner_uid_is_allowed "$l_check_owner_uid"; then
 		l_check_expected_owner_desc=$(zxfer_describe_expected_backup_owner)
 		printf '%s\n' "Refusing to use backup metadata $l_check_display_path because it is owned by UID $l_check_owner_uid instead of $l_check_expected_owner_desc."
-		return 1
-	fi
-	if ! l_check_mode=$(zxfer_get_path_mode_octal "$l_check_path"); then
-		printf '%s\n' "Cannot determine the permissions for backup metadata $l_check_display_path."
 		return 1
 	fi
 	if [ "$l_check_mode" != "600" ]; then

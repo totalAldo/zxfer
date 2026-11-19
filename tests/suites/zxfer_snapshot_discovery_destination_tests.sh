@@ -31,7 +31,7 @@ test_write_destination_snapshot_list_to_files_reports_empty_stage_failures_when_
 	DEST_LIST_LOG="$TEST_TMPDIR/dest_missing_stage_fail.log"
 	: >"$DEST_LIST_LOG"
 
-	zxfer_test_capture_subshell "
+	capture_case() {
 		zxfer_test_stub_destination_listing
 		DEST_LIST_STATUS=1
 		DEST_PROBE_OUTPUT='dataset does not exist'
@@ -39,8 +39,9 @@ test_write_destination_snapshot_list_to_files_reports_empty_stage_failures_when_
 		zxfer_write_runtime_artifact_file() {
 			return 42
 		}
-		zxfer_write_destination_snapshot_list_to_files '$full_file' '$norm_file'
-	"
+		zxfer_write_destination_snapshot_list_to_files "$full_file" "$norm_file"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Destination discovery should fail closed when staging an empty missing-destination snapshot list fails." \
 		42 "$ZXFER_TEST_CAPTURE_STATUS"

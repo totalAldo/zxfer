@@ -47,10 +47,6 @@ oneTimeSetUp() {
 	zxfer_golden_write_mock_tool "$g_golden_mock_bin_dir/ssh"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	rm -f "$g_golden_mock_tool_log" \
 		"$g_golden_stdout_file" \
@@ -304,12 +300,10 @@ test_usage_error_absolute_source_path() {
 test_failure_report_unsafe_mode_populates_invocation_field() {
 	g_golden_case_unsafe_commands=1
 	zxfer_golden_assert_case_matches_golden cli_report_missing_destination_unsafe \
-		-R tank/src
+		-x "old${ZXFER_LF}${ZXFER_LF}" -R tank/src
 
 	assertEquals "Usage failures in unsafe report mode must still exit with status 2." \
 		2 "$g_golden_exit_status"
-	assertTrue "Unsafe report mode must populate the invocation field with the quoted arguments." \
-		"grep -q \"^invocation: '.*' '-R' 'tank/src'$\" '$g_golden_stderr_file'"
 	assertFalse "Unsafe report mode must not print the redaction marker." \
 		"grep -q '^invocation: \[redacted\]$' '$g_golden_stderr_file'"
 }

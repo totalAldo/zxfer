@@ -4,7 +4,7 @@
 # tests/validate.sh quick selects unit suites by name before it reads this
 # map: a change to src/zxfer_NAME.sh runs tests/test_zxfer_NAME.sh and every
 # tests/test_contract_*.sh suite, and a change to a tests/suites fragment runs
-# the entry suite whose "# zxfer-test-fragment:" marker names it. The
+# the entry suite whose literal source statement names it. The
 # unit_suites column lists only the exceptions: suites a path needs beyond that
 # convention. Lists are comma-separated. A dash means no focused selection.
 # @self selects the changed test suite itself; @contract selects every
@@ -56,6 +56,7 @@ tests/helpers/integration_test_registry.sh	tests/test_run_integration_zxfer.sh,t
 tests/helpers/lifecycle.sh	tests/test_run_shunit_tests.sh,tests/test_zxfer_launcher.sh	-	-	docs/testing.md	Shared unit lifecycle changes need runner cleanup coverage and a representative launcher suite.
 tests/helpers/process_capture.sh	tests/test_run_shunit_tests.sh,tests/test_zxfer_launcher.sh	-	-	docs/testing.md	Shared process-capture changes need runner supervision coverage and a representative launcher suite.
 tests/helpers/loader.sh	tests/test_zxfer_launcher.sh,tests/test_zxfer_runtime.sh	-	-	docs/testing.md	Shared loader changes affect full module loading and fragment registration.
+tests/helpers/test_catalog.sh	tests/test_run_shunit_tests.sh,tests/test_run_coverage.sh,tests/test_validate.sh,tests/test_zxfer_runtime.sh	-	-	docs/testing.md	The static catalog owns suite paths, fragment membership, registration order, test listing and change mapping.
 tests/helpers/backup_fixtures.sh	tests/test_zxfer_backup_metadata.sh	-	-	docs/testing.md	Shared backup-fixture changes must run the stable backup-metadata suite entry point.
 tests/helpers/exec_fixtures.sh	tests/test_zxfer_backup_metadata.sh,tests/test_zxfer_exec.sh,tests/test_zxfer_runtime.sh,tests/test_zxfer_snapshot_discovery.sh,tests/test_zxfer_ssh_transport.sh	-	-	docs/testing.md	The exec fixture serves the exec entry and the fragments written for it in other homes.
 tests/helpers/remote_host_fixtures.sh	tests/test_zxfer_backup_metadata.sh,tests/test_zxfer_dependencies.sh,tests/test_zxfer_remote_hosts.sh,tests/test_zxfer_session.sh,tests/test_zxfer_ssh_transport.sh	-	-	docs/testing.md	The remote-host fixture serves the remote-host entry and the fragments written for it in other homes.

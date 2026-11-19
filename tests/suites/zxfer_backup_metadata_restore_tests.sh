@@ -222,7 +222,10 @@ test_read_local_backup_file_rejects_insecure_owner_mode_and_shared_directory() {
 
 	output=$(
 		(
-			zxfer_get_path_owner_uid() { printf '4321\n'; }
+			zxfer_read_path_metadata() {
+				zxfer_parse_path_metadata_line "$(command ls -ldin "$1")" || return 1
+				g_zxfer_path_owner_uid_result=4321
+			}
 			zxfer_read_local_backup_file "$backup_file" "$staging"
 		) 2>&1
 	)

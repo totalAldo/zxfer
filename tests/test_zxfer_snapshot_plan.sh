@@ -17,14 +17,8 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/helpers/replication_fixtures.sh
 . "$TESTS_DIR/helpers/replication_fixtures.sh"
 
-zxfer_source_runtime_modules_through "zxfer_snapshot_plan.sh"
-
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_snapshot_plan"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 reset_snapshot_plan_test_options() {
@@ -58,7 +52,7 @@ stage_plan_record_files() {
 }
 
 setUp() {
-	zxfer_source_runtime_modules_through "zxfer_snapshot_plan.sh"
+	zxfer_source_modules_for_tests "$ZXFER_ROOT"
 	zxfer_test_allocate_runtime_root "$TEST_TMPDIR" || return "$?"
 	reset_snapshot_plan_test_options
 	reset_snapshot_plan_test_state
@@ -531,10 +525,14 @@ test_snapshot_plan_summary_preserves_empty_and_literal_records_without_evaluatio
 test_plan_dataset_snapshots_deletes_destination_only_and_guid_mismatched_rows_in_destination_order() {
 	stage_plan_record_files "tank/fs@daily-10	10
 tank/fs@snap3	333
+tank/fs@older	321
 tank/fs@snap1	111" "backup/fs@snap1	999
 backup/fs@alpha	222
 backup/fs@daily-1	1
 backup/fs@snap3	333
+backup/fs@older	321
+backup/fs@older	321
+backup/fs@older	320
 backup/fs@zeta	444"
 
 	zxfer_plan_dataset_snapshots "tank/fs" "backup/fs"
@@ -543,6 +541,7 @@ backup/fs@zeta	444"
 		"backup/fs@snap1
 backup/fs@alpha
 backup/fs@daily-1
+backup/fs@older
 backup/fs@zeta" "$(plan_delete_records)"
 	assertEquals "The newest guid-exact match is the common snapshot." \
 		"tank/fs@snap3	333" "$g_zxfer_plan_common_snapshot"
@@ -1011,10 +1010,11 @@ tank/src@older	1" "backup/dst@anchor	2"
 }
 
 test_snapshot_transfer_skip_reporting_fails_closed_on_unreadable_plan() {
-	zxfer_test_capture_subshell_split "$TEST_TMPDIR/skip.stdout" "$TEST_TMPDIR/skip.stderr" "
+	capture_case() {
 		g_option_v_verbose=1
-		zxfer_report_snapshot_transfer_skips tank/src backup/dst '$TEST_TMPDIR/nonexistent-skip.plan' 'tank/src@common${ZXFER_TAB}123'
-	"
+		zxfer_report_snapshot_transfer_skips tank/src backup/dst "$TEST_TMPDIR/nonexistent-skip.plan" "tank/src@common${ZXFER_TAB}123"
+	}
+	zxfer_test_capture_subshell_split "$TEST_TMPDIR/skip.stdout" "$TEST_TMPDIR/skip.stderr" capture_case
 	assertEquals "Unreadable diagnostic plans must fail closed." 1 "$ZXFER_TEST_CAPTURE_STATUS"
 	assertContains "The failure must identify the affected source dataset." "$(cat "$TEST_TMPDIR/skip.stderr")" \
 		"Failed to read snapshot transfer skip reasons for [tank/src]."
@@ -1038,14 +1038,11 @@ backup/dst@extraA	9"
 backup/dst@extraA" "$(plan_delete_records)"
 }
 
-# zxfer-test-fragment: suites/zxfer_snapshot_plan_live_replan_tests.sh
 # shellcheck source=tests/suites/zxfer_snapshot_plan_live_replan_tests.sh
 . "$TESTS_DIR/suites/zxfer_snapshot_plan_live_replan_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_snapshot_plan.sh" \
-		"$TESTS_DIR/suites/zxfer_snapshot_plan_live_replan_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

@@ -302,13 +302,12 @@ BEGIN { plan_verbose = ENVIRON["ZXFER_AWK_PLAN_VERBOSE"] == "1" }
 function plan_reset(    i) {
 	for (i in destination_path) delete destination_path[i]
 	for (i in destination_id) delete destination_id[i]
-	for (i in destination_ids) delete destination_ids[i]
+	for (i in seen_on_source) delete seen_on_source[i]
 	for (i in destination_guid) delete destination_guid[i]
-	for (i in source_ids) delete source_ids[i]
 	destination_count = source_count = found_common = missing_guid = diverged_count = 0
 	first = final = ""
 }
-function plan_record(record, role,    at, tail, tab, name, guid, next_at) {
+function plan_record(record, role,    at, tail, tab, name, guid, next_at, identity, shared) {
 	if (missing_guid) return
 	at = index(record, "@")
 	tail = substr(record, at + 1)
@@ -322,16 +321,20 @@ function plan_record(record, role,    at, tail, tab, name, guid, next_at) {
 	}
 	name = substr(tail, 1, tab - 1)
 	guid = substr(tail, tab + 1)
+	identity = name "\t" guid
+	# Destination rows arrive first. Mark exact matches even past the anchor,
+	# so older shared snapshots are retained when computing deletions.
 	if (role == "destination") {
 		destination_count++
 		destination_path[destination_count] = substr(record, 1, at) name
-		destination_id[destination_count] = name "\t" guid
-		destination_ids[name "\t" guid] = 1
+		destination_id[destination_count] = identity
+		seen_on_source[identity] = 0
 		destination_guid[name] = guid
 		return
 	}
 	source_count++
-	source_ids[name "\t" guid] = 1
+	shared = (identity in seen_on_source)
+	if (shared) seen_on_source[identity] = 1
 	if ((name in destination_guid) && destination_guid[name] != guid) {
 		diverged_count++
 		if (diverged_count <= 3)
@@ -340,11 +343,11 @@ function plan_record(record, role,    at, tail, tab, name, guid, next_at) {
 	if (found_common) {
 		# Missing identities before the anchor are discovery differences, but
 		# outside the incremental send range. Retain reasons only under -v.
-		if (plan_verbose && !((name "\t" guid) in destination_ids))
+		if (plan_verbose && !shared)
 			print "skip\tbefore_common\t" record > plan_file
 		return
 	}
-	if ((name "\t" guid) in destination_ids) {
+	if (shared) {
 		found_common = 1
 		print "common\t" record > plan_file
 		return
@@ -361,12 +364,12 @@ function plan_finish(    i, target, at) {
 		return 3
 	}
 	for (i = 1; i <= destination_count; i++)
-		if (!(destination_id[i] in source_ids))
+		if (!seen_on_source[destination_id[i]])
 			print "delete\t" destination_path[i] > plan_file
 	# Preserve the old reverse delete-list order in the single destroy argv.
 	target = ""
 	for (i = destination_count; i >= 1; i--)
-		if (!(destination_id[i] in source_ids)) {
+		if (!seen_on_source[destination_id[i]]) {
 			at = index(destination_path[i], "@")
 			if (target == "") target = substr(destination_path[i], 1, at)
 			else target = target ","

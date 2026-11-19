@@ -3,7 +3,7 @@
 # shunit2 tests for the sensitive-caller budget gate
 # (tests/run_budget_check.sh).
 #
-# shellcheck disable=SC2317,SC2329
+# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 
 TESTS_DIR=$(dirname "$0")
 
@@ -13,10 +13,6 @@ TESTS_DIR=$(dirname "$0")
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_budget_check"
 	RUN_BUDGET_CHECK_BIN="$ZXFER_ROOT/tests/run_budget_check.sh"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 # Purpose: Build a fixture tree with the budget runner, a launcher that calls
@@ -41,7 +37,6 @@ example() {
 EOF
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_budget_check_passes_and_ignores_comment_only_mentions() {
 	l_fixture_root="$TEST_TMPDIR/pass-root"
 	create_budget_fixture "$l_fixture_root"
@@ -57,7 +52,6 @@ test_budget_check_passes_and_ignores_comment_only_mentions() {
 		"$output" "budget check passed: 2 policy rows within budget"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_budget_check_fails_over_budget_and_outside_allow_list() {
 	l_fixture_root="$TEST_TMPDIR/over-root"
 	create_budget_fixture "$l_fixture_root"
@@ -77,7 +71,6 @@ test_budget_check_fails_over_budget_and_outside_allow_list() {
 		"$output" "match outside allow-list: src/example.sh"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_budget_check_rejects_unknown_kinds_and_malformed_max() {
 	l_fixture_root="$TEST_TMPDIR/malformed-root"
 	create_budget_fixture "$l_fixture_root"
@@ -97,7 +90,6 @@ test_budget_check_rejects_unknown_kinds_and_malformed_max() {
 		"$output" "3 violation(s) across 3 policy rows"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_budget_check_fails_closed_when_the_scan_cannot_read_the_tree() {
 	l_fixture_root="$TEST_TMPDIR/missing-src-root"
 	create_budget_fixture "$l_fixture_root"
@@ -115,7 +107,6 @@ test_budget_check_fails_closed_when_the_scan_cannot_read_the_tree() {
 		"$output" "budget check passed"
 }
 
-# shellcheck disable=SC2317,SC2329  # Invoked indirectly by shunit2.
 test_budget_check_list_prints_measured_caller_counts() {
 	l_fixture_root="$TEST_TMPDIR/list-root"
 	create_budget_fixture "$l_fixture_root"

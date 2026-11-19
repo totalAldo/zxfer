@@ -165,29 +165,31 @@ test_build_remote_sh_c_command_pins_the_plain_and_chunked_renderings() {
 	l_x128=$l_x32$l_x32$l_x32$l_x32
 	# shellcheck disable=SC2016 # The remote bootstrap expands these.
 	l_bootstrap='l_nl=$(printf "\\nx") || exit $?; l_nl=${l_nl%x}; l_script=; for l_part do case $l_part in d*) l_script=$l_script${l_part#d} ;; n) l_script=$l_script$l_nl ;; *) exit 125 ;; esac; done; exec sh -c "$l_script"'
-	zxfer_build_remote_sh_c_command 'exit 7' >"$TEST_TMPDIR/plain-rendered"
-	printf '%s' "'sh' '-c' 'exit 7'" >"$TEST_TMPDIR/plain-expected"
+	zxfer_build_remote_sh_c_command 'exit 7' >"$TEST_TMPDIR/render-stdout"
+	l_plain_rendered=$g_zxfer_shell_command_result
 
 	zxfer_build_remote_sh_c_command "a'b
 
 ${l_x128}xx
-" >/dev/null
+" >>"$TEST_TMPDIR/render-stdout"
 
-	assertTrue "A short one-line script should keep the plain sh -c form, printed without a trailing newline." \
-		"cmp '$TEST_TMPDIR/plain-expected' '$TEST_TMPDIR/plain-rendered' >/dev/null 2>&1"
+	assertEquals "A short one-line script should keep the plain sh -c form." \
+		"'sh' '-c' 'exit 7'" "$l_plain_rendered"
 	assertEquals "A multi-line script should become quoted chunk words: a quote escaped as '\\'', one n word per newline, and at most 128 script bytes per d word." \
 		"'sh' '-c' '$l_bootstrap' 'sh' 'da'\\''b' 'n' 'n' 'd$l_x128' 'dxx' 'n'" \
 		"$g_zxfer_shell_command_result"
+	assertFalse "Both forms should publish only the result global, without stdout." \
+		"[ -s '$TEST_TMPDIR/render-stdout' ]"
 }
 
 test_build_remote_sh_c_command_restores_lc_all_and_publishes_its_result() {
 	l_lc_all_output=$(
 		LC_ALL=POSIX
-		zxfer_build_remote_sh_c_command 'exit 7' >/dev/null
+		zxfer_build_remote_sh_c_command 'exit 7'
 		printf 'set=%s result=%s\n' "${LC_ALL-unset}" "$g_zxfer_shell_command_result"
 		unset LC_ALL
 		zxfer_build_remote_sh_c_command 'a
-b' >/dev/null
+b'
 		printf 'unset=%s\n' "${LC_ALL-unset}"
 	)
 
@@ -202,7 +204,7 @@ test_build_remote_sh_c_command_retains_input_from_the_canonical_result() {
 	g_zxfer_shell_command_result='IFS= read -r l_input;
 printf "%s\n" "$l_input";
 exit 7;'
-	zxfer_build_remote_sh_c_command "$g_zxfer_shell_command_result" >/dev/null
+	zxfer_build_remote_sh_c_command "$g_zxfer_shell_command_result"
 	printf '%s\n' "kept 'quoted' input" |
 		/bin/sh -c "$g_zxfer_shell_command_result" >"$TEST_TMPDIR/canonical-input"
 	l_canonical_status=$?
@@ -230,7 +232,8 @@ test_build_remote_sh_c_command_chunks_long_scripts_that_run_intact() {
 	l_long_script=$l_long_script'printf "%s\n" reached;
 '
 	printf '%s' "$l_long_script" >"$l_expected_script"
-	l_rendered_command=$(zxfer_build_remote_sh_c_command "$l_long_script")
+	zxfer_build_remote_sh_c_command "$l_long_script"
+	l_rendered_command=$g_zxfer_shell_command_result
 	l_rendered_lines=$(printf '%s\n' "$l_rendered_command" | wc -l | tr -d '[:space:]')
 	l_max_word_bytes=$(printf '%s\n' "$l_rendered_command" |
 		zxfer_test_max_rendered_shell_word_bytes)
@@ -257,18 +260,13 @@ EOF
 		"stdin-through-bootstrap" "$(cat "$l_stdin_capture")"
 }
 
-# zxfer-test-fragment: suites/zxfer_ssh_transport_commands_tests.sh
 # shellcheck source=tests/suites/zxfer_ssh_transport_commands_tests.sh
 . "$TESTS_DIR/suites/zxfer_ssh_transport_commands_tests.sh"
-# zxfer-test-fragment: suites/zxfer_ssh_transport_connection_tests.sh
 # shellcheck source=tests/suites/zxfer_ssh_transport_connection_tests.sh
 . "$TESTS_DIR/suites/zxfer_ssh_transport_connection_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_ssh_transport.sh" \
-		"$TESTS_DIR/suites/zxfer_ssh_transport_commands_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_ssh_transport_connection_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

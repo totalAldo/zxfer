@@ -78,7 +78,7 @@ test_zxfer_find_symlink_path_component_reports_the_first_untrusted_symlink() {
 	ln -s "$physical_tmpdir/find_real" "$physical_tmpdir/find_link"
 	trusted_root_symlink=$(find_trusted_root_symlink_for_tests) || trusted_root_symlink=""
 
-	zxfer_test_capture_subshell '
+	capture_case() {
 		cd "$physical_tmpdir" || exit 1
 		for l_path in "$physical_tmpdir/find_link/subdir/file" \
 			./find_link/subdir/file ./find_plain/subdir/file; do
@@ -90,7 +90,8 @@ test_zxfer_find_symlink_path_component_reports_the_first_untrusted_symlink() {
 				"$trusted_root_symlink/zxfer-trusted-root-symlink-probe/subdir/file")
 			printf "trusted=%s <%s>\n" "$?" "$l_component"
 		fi
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 	expected="$physical_tmpdir/find_link/subdir/file=0 <$physical_tmpdir/find_link>
 ./find_link/subdir/file=0 <./find_link>
 ./find_plain/subdir/file=1 <>"
@@ -111,25 +112,26 @@ test_zxfer_is_trusted_symlink_path_component_fails_closed_on_each_metadata_check
 
 	good_link="7 lrwxrwxrwx 1 0 0 11 Jan  1 00:00 $trusted_root_symlink -> target"
 	good_root="2 drwxr-xr-x 23 0 0 736 Jan  1 00:00 /"
-	zxfer_test_capture_subshell '
+	capture_case() {
 		PATH="$TEST_TMPDIR/fake-bin:$PATH"
 		export FAKE_LS_ANSWERS
 		while IFS="|" read -r l_case l_link l_root; do
-			FAKE_LS_ANSWERS="'"$trusted_root_symlink"'|$l_link
+			FAKE_LS_ANSWERS="$trusted_root_symlink|$l_link
 /|$l_root"
-			zxfer_is_trusted_symlink_path_component "'"$trusted_root_symlink"'"
+			zxfer_is_trusted_symlink_path_component "$trusted_root_symlink"
 			printf "%s=%s\n" "$l_case" "$?"
 		done <<EOF
-trusted|'"$good_link"'|'"$good_root"'
-link_unreadable|FAIL|'"$good_root"'
-link_not_root|7 lrwxrwxrwx 1 501 0 11 Jan  1 00:00 x -> y|'"$good_root"'
-root_unreadable|'"$good_link"'|FAIL
-root_not_root|'"$good_link"'|2 drwxr-xr-x 23 501 0 736 Jan  1 00:00 /
-root_unparseable|'"$good_link"'|bad-perms
-root_world_writable|'"$good_link"'|2 drwxrwxrwx 23 0 0 736 Jan  1 00:00 /
-root_sticky|'"$good_link"'|2 drwxrwxrwt 23 0 0 736 Jan  1 00:00 /
+trusted|$good_link|$good_root
+link_unreadable|FAIL|$good_root
+link_not_root|7 lrwxrwxrwx 1 501 0 11 Jan  1 00:00 x -> y|$good_root
+root_unreadable|$good_link|FAIL
+root_not_root|$good_link|2 drwxr-xr-x 23 501 0 736 Jan  1 00:00 /
+root_unparseable|$good_link|bad-perms
+root_world_writable|$good_link|2 drwxrwxrwx 23 0 0 736 Jan  1 00:00 /
+root_sticky|$good_link|2 drwxrwxrwt 23 0 0 736 Jan  1 00:00 /
 EOF
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "A top-level symlink is trusted only when it and / are root-owned and / is not writable by others unless sticky." \
 		"trusted=0
@@ -149,18 +151,19 @@ test_zxfer_is_trusted_symlink_path_component_rejects_nested_symlinks_without_rea
 	ln -sf "$symlink_parent/target" "$symlink_parent/link"
 	rm -f "$tool_log"
 
-	zxfer_test_capture_subshell '
+	capture_case() {
 		PATH="$TEST_TMPDIR/fake-bin:$PATH"
-		FAKE_TOOL_LOG="'"$tool_log"'"
+		FAKE_TOOL_LOG="$tool_log"
 		FAKE_LS_ANSWERS="*|7 lrwxrwxrwx 1 0 0 11 Jan  1 00:00 x -> y"
 		export FAKE_TOOL_LOG FAKE_LS_ANSWERS
-		zxfer_is_trusted_symlink_path_component "'"$symlink_parent/link"'"
+		zxfer_is_trusted_symlink_path_component "$symlink_parent/link"
 		printf "nested=%s\n" "$?"
 		zxfer_is_trusted_symlink_path_component relative-link
 		printf "relative=%s\n" "$?"
 		zxfer_is_trusted_symlink_path_component /
 		printf "root=%s\n" "$?"
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Only a top-level absolute symlink can be trusted." \
 		"nested=1
@@ -176,9 +179,7 @@ test_zxfer_require_backup_metadata_path_without_symlinks_rejects_symlink_target(
 	: >"$real_file"
 	ln -s "$real_file" "$link_file"
 
-	zxfer_test_capture_subshell "
-		zxfer_require_backup_metadata_path_without_symlinks \"$link_file\"
-	"
+	zxfer_test_capture_subshell zxfer_require_backup_metadata_path_without_symlinks "$link_file"
 
 	assertEquals "Exact backup metadata symlink paths should be rejected." \
 		1 "$ZXFER_TEST_CAPTURE_STATUS"
@@ -192,7 +193,7 @@ test_zxfer_validate_temp_root_candidate_fails_closed_on_ls_owner_and_mode() {
 	candidate="$TEST_TMPDIR/validate_tmp_root_checks"
 	mkdir -p "$candidate"
 
-	zxfer_test_capture_subshell '
+	capture_case() {
 		PATH="$TEST_TMPDIR/fake-bin:$PATH"
 		export FAKE_LS_ANSWERS FAKE_ID_UID
 		g_zxfer_temp_root_candidate_result=stale
@@ -200,7 +201,7 @@ test_zxfer_validate_temp_root_candidate_fails_closed_on_ls_owner_and_mode() {
 			FAKE_ID_UID=$l_uid
 			FAKE_LS_ANSWERS=".|$l_line"
 			g_zxfer_effective_uid=""
-			zxfer_validate_temp_root_candidate "'"$candidate"'"
+			zxfer_validate_temp_root_candidate "$candidate"
 			printf "%s=%s <%s>\n" "$l_case" "$?" "$g_zxfer_temp_root_candidate_result"
 		done <<EOF
 ls_fails|1234|FAIL
@@ -209,7 +210,8 @@ other_owner|1234|2 drwx------ 2 4321 0 64 Jan  1 00:00 .
 world_writable|1234|2 drwxrwxrwx 2 0 0 64 Jan  1 00:00 .
 group_writable|1234|2 drwxrwx--- 2 1234 0 64 Jan  1 00:00 .
 EOF
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Temp-root validation must fail closed, publishing nothing, when ls fails, the effective UID is unknown for a non-root owner, another user owns it, or others can write it without the sticky bit." \
 		"ls_fails=1 <>
@@ -225,17 +227,18 @@ test_zxfer_validate_temp_root_candidate_reads_owner_and_mode_from_one_ls() {
 	mkdir -p "$candidate"
 	rm -f "$tool_log"
 
-	zxfer_test_capture_subshell '
+	capture_case() {
 		PATH="$TEST_TMPDIR/fake-bin:$PATH"
-		FAKE_TOOL_LOG="'"$tool_log"'"
+		FAKE_TOOL_LOG="$tool_log"
 		FAKE_ID_UID=4242
 		export FAKE_TOOL_LOG FAKE_ID_UID FAKE_LS_ANSWERS
 		for l_test_owner in 0 4242 4343 owner; do
 			FAKE_LS_ANSWERS=".|9 drwxrwxrwt 9 $l_test_owner 0 0 Jan  1 00:00 ."
-			zxfer_validate_temp_root_candidate "'"$candidate"'"
+			zxfer_validate_temp_root_candidate "$candidate"
 			printf "%s=%s\n" "$l_test_owner" "$?"
 		done
-	'
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "A root-owned sticky candidate and an effective-user candidate pass; another owner and a non-numeric owner fail." \
 		"0=0
@@ -254,13 +257,14 @@ test_zxfer_validate_temp_root_candidate_rejects_relative_physical_pwd_output() {
 	candidate="$TEST_TMPDIR/validate_tmp_root_relative_pwd"
 	mkdir -p "$candidate"
 
-	zxfer_test_capture_subshell "
+	capture_case() {
 		pwd() {
 			printf '%s\n' 'relative-path'
 		}
-		zxfer_validate_temp_root_candidate \"$candidate\"
-		printf 'status=%s <%s>\n' \"\$?\" \"\$g_zxfer_temp_root_candidate_result\"
-	"
+		zxfer_validate_temp_root_candidate "$candidate"
+		printf 'status=%s <%s>\n' "$?" "$g_zxfer_temp_root_candidate_result"
+	}
+	zxfer_test_capture_subshell capture_case
 
 	assertEquals "Validated temp-root selection should reject a non-absolute physical-directory result and publish nothing." \
 		"status=1 <>" "$ZXFER_TEST_CAPTURE_OUTPUT"

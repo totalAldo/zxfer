@@ -3,10 +3,8 @@
 # shunit2 entry point for src/zxfer_remote_hosts.sh: the remote capability
 # handshake and cache, helper lookup, and local/remote CLI command resolution.
 #
-# Test definitions live in the behavior fragment below, under the remote-host
-# fixture. The fragment has a "zxfer-test-fragment" marker, a source line and
-# a path in suite(); keep the three in the same order so listing and execution
-# agree.
+# Test definitions use the remote-host fixture. Literal fragment source lines
+# define loading, registration and discovery order.
 #
 # shellcheck disable=SC1090,SC2030,SC2031,SC2034,SC2154,SC2218,SC2317,SC2329
 
@@ -36,19 +34,14 @@ tearDown() {
 	zxfer_test_remote_host_fixture_teardown
 }
 
-# zxfer-test-fragment: suites/zxfer_remote_hosts_capability_probe_tests.sh
 # shellcheck source=tests/suites/zxfer_remote_hosts_capability_probe_tests.sh
 . "$TESTS_DIR/suites/zxfer_remote_hosts_capability_probe_tests.sh"
 
-# zxfer-test-fragment: suites/zxfer_remote_hosts_cli_commands_tests.sh
 # shellcheck source=tests/suites/zxfer_remote_hosts_cli_commands_tests.sh
 . "$TESTS_DIR/suites/zxfer_remote_hosts_cli_commands_tests.sh"
 
 suite() {
-	zxfer_test_register_fragment_tests \
-		"$TESTS_DIR/test_zxfer_remote_hosts.sh" \
-		"$TESTS_DIR/suites/zxfer_remote_hosts_capability_probe_tests.sh" \
-		"$TESTS_DIR/suites/zxfer_remote_hosts_cli_commands_tests.sh"
+	zxfer_test_register_suite_tests "$0"
 }
 
 # shellcheck source=tests/shunit2/shunit2

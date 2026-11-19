@@ -25,10 +25,6 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_blackbox"
 }
 
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
-}
-
 setUp() {
 	unset MOCK_ZFS_LOG MOCK_ZFS_FIXTURE_DIR MOCK_ZFS_DEFAULT_STATUS \
 		MOCK_SPAWN_LOG ZXFER_BACKUP_DIR
@@ -84,6 +80,12 @@ planning_run_zxfer() {
 		>"$CASE_DIR/zxfer.stdout" 2>"$CASE_DIR/zxfer.stderr"
 }
 
+# Purpose: Run recursive replication between the current fixture roots.
+# Usage: planning_run_recursive <state-dir> [zxfer-option...]
+planning_run_recursive() {
+	planning_run_zxfer "$@" -R "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
+}
+
 # Purpose: Copy a fixture state dir into a case-local STATE_DIR that a test may
 # rewrite without touching the generated tree.
 # Usage: planning_clone_state <source-state-dir> <name>
@@ -129,7 +131,7 @@ receive | recv)
 		delay_dataset=\$delay_arg
 	done
 	case "\$delay_dataset" in
-	$1) sleep $2 ;;
+	$1) sleep $2 || exit \$? ;;
 	esac
 	;;
 esac
@@ -683,29 +685,34 @@ planning_add_unsupported_property_fixtures() {
 		fail "Unable to append unsupported-property manifest rules."
 }
 
-# Purpose: Fail unless every `get` naming a destination dataset crossed the
-# ssh transport and no `get` naming a source dataset did. Remote argv reaches
-# SSH_LOG as single-quoted tokens, so quotes are stripped before matching.
-# Usage: planning_assert_property_reads_routed_by_side
+# Purpose: Check that property reads cross ssh only for the selected remote
+# side, including live and lone reads. SSH_LOG holds single-quoted tokens.
+# Usage: planning_assert_property_reads_routed_by_side O|T
 planning_assert_property_reads_routed_by_side() {
+	l_routed_remote=$ZXFER_MOCKBIN_DEST_ROOT
+	l_routed_local=$ZXFER_MOCKBIN_SOURCE_ROOT
+	if [ "$1" = O ]; then
+		l_routed_remote=$ZXFER_MOCKBIN_SOURCE_ROOT
+		l_routed_local=$ZXFER_MOCKBIN_DEST_ROOT
+	fi
 	l_routed_ssh_argv=$(tr -d "'" <"$SSH_LOG")
-	l_routed_dst_gets=$(grep '^get ' "$ZFS_LOG" | grep -- " $ZXFER_MOCKBIN_DEST_ROOT" || :)
-	assertNotNull "the -P pass must have read destination properties; zfs log: $(cat "$ZFS_LOG")" \
+	l_routed_dst_gets=$(grep '^get ' "$ZFS_LOG" | grep -F -e " $l_routed_remote" || :)
+	assertNotNull "-$1: the remote side's properties must be read; zfs log: $(cat "$ZFS_LOG")" \
 		"$l_routed_dst_gets"
 	while IFS= read -r l_routed_dst_get; do
 		[ -n "$l_routed_dst_get" ] || continue
 		case "$l_routed_ssh_argv" in
 		*"$l_routed_dst_get"*) ;;
 		*)
-			fail "destination property read ran locally instead of over ssh: $l_routed_dst_get
+			fail "-$1: property read ran locally instead of over ssh: $l_routed_dst_get
 ssh log: $(cat "$SSH_LOG")"
 			;;
 		esac
 	done <<EOF
 $l_routed_dst_gets
 EOF
-	assertEquals "no source-side property read may cross the destination ssh transport" \
-		0 "$(printf '%s\n' "$l_routed_ssh_argv" | grep -c "get .* $ZXFER_MOCKBIN_SOURCE_ROOT" || :)"
+	assertEquals "-$1: no read of the local side may cross ssh" \
+		0 "$(printf '%s\n' "$l_routed_ssh_argv" | grep -c -e "get .* $l_routed_local" || :)"
 }
 
 # Purpose: Run the property pass recursively against STATE_DIR and assert

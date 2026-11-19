@@ -349,7 +349,7 @@ zxfer_vm_select_guests() {
 
 	if [ -n "$ZXFER_VM_GUEST_FILTERS" ]; then
 		for l_guest in $ZXFER_VM_GUEST_FILTERS; do
-			zxfer_vm_guest_exists "$l_guest" ||
+			zxfer_vm_guest_record "$l_guest" any >/dev/null ||
 				zxfer_vm_die "Unknown guest: $l_guest"
 			zxfer_vm_list_contains "$l_profile_guests" "$l_guest" ||
 				zxfer_vm_die "Guest [$l_guest] is not part of profile [$ZXFER_VM_PROFILE]"
@@ -429,16 +429,13 @@ zxfer_vm_integration_harness_extra_args() {
 	printf '%s\n' "$l_args"
 }
 
+# Render the requested layer for the guest selected by zxfer_vm_load_guest.
 zxfer_vm_render_guest_test_script() {
-	l_guest=$1
-	l_repo_dir=$2
-	l_tmpdir=$3
-	l_test_layer=${4:-$ZXFER_VM_TEST_LAYER}
-	l_guest_shell=
-	l_guest_shell_arg=
+	l_repo_dir=$1
+	l_tmpdir=$2
+	l_test_layer=${3:-$ZXFER_VM_TEST_LAYER}
+	l_guest_shell_arg=$(zxfer_vm_shell_quote "$g_vm_guest_shell")
 	l_integration_args=
-	l_shunit_jobs=
-	l_shunit_mode=
 	l_perf_profile=${ZXFER_VM_PERF_PROFILE:-smoke}
 	l_perf_profile_arg=
 	l_perf_baseline_ref=${ZXFER_VM_PERF_BASELINE_REF:-upstream-compat-final}
@@ -458,9 +455,6 @@ zxfer_vm_render_guest_test_script() {
 
 	case "$l_test_layer" in
 	integration)
-		l_guest_shell=$(zxfer_vm_guest_qemu_shell "$l_guest") ||
-			zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
-		l_guest_shell_arg=$(zxfer_vm_shell_quote "$l_guest_shell")
 		l_integration_args=$(zxfer_vm_integration_harness_extra_args) || return 1
 		cat <<EOF
 mkdir -p $l_tmpdir_arg
@@ -471,11 +465,7 @@ env TMPDIR=$l_tmpdir_arg \\
 EOF
 		;;
 	shunit2)
-		l_shunit_jobs=$(zxfer_vm_guest_shunit_jobs "$l_guest") ||
-			zxfer_vm_die "No shunit2 guest job count is defined for guest [$l_guest]"
-		l_shunit_mode=$(zxfer_vm_guest_shunit_mode "$l_guest") ||
-			zxfer_vm_die "No shunit2 mode is defined for guest [$l_guest]"
-		case "$l_shunit_mode" in
+		case "$g_vm_guest_shunit_mode" in
 		bash-posix)
 			cat <<EOF
 mkdir -p $l_tmpdir_arg
@@ -485,25 +475,22 @@ wrapper=\$(mktemp $l_wrapper_template_arg)
 printf '%s\n' '#!/bin/sh' "exec \"\$bash_bin\" --posix \"\\\$@\"" >"\$wrapper"
 chmod 755 "\$wrapper"
 export ZXFER_TEST_SHELL="\$wrapper"
-env TMPDIR=$l_tmpdir_arg "\$bash_bin" ./tests/run_shunit_tests.sh --jobs $l_shunit_jobs
+env TMPDIR=$l_tmpdir_arg "\$bash_bin" ./tests/run_shunit_tests.sh --jobs $g_vm_guest_shunit_jobs
 EOF
 			;;
 		native)
 			cat <<EOF
 mkdir -p $l_tmpdir_arg
 cd $l_repo_dir_arg
-env TMPDIR=$l_tmpdir_arg ./tests/run_shunit_tests.sh --jobs $l_shunit_jobs
+env TMPDIR=$l_tmpdir_arg ./tests/run_shunit_tests.sh --jobs $g_vm_guest_shunit_jobs
 EOF
 			;;
 		*)
-			zxfer_vm_die "Unsupported shunit2 mode [$l_shunit_mode] for guest [$l_guest]"
+			zxfer_vm_die "Unsupported shunit2 mode [$g_vm_guest_shunit_mode] for guest [$g_vm_guest_name]"
 			;;
 		esac
 		;;
 	perf)
-		l_guest_shell=$(zxfer_vm_guest_qemu_shell "$l_guest") ||
-			zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
-		l_guest_shell_arg=$(zxfer_vm_shell_quote "$l_guest_shell")
 		zxfer_vm_validate_perf_profile_value "$l_perf_profile"
 		l_perf_profile_arg=$(zxfer_vm_shell_quote "$l_perf_profile")
 		cat <<EOF
@@ -515,9 +502,6 @@ env TMPDIR=$l_tmpdir_arg \\
 EOF
 		;;
 	perf-compare)
-		l_guest_shell=$(zxfer_vm_guest_qemu_shell "$l_guest") ||
-			zxfer_vm_die "No guest shell is defined for guest [$l_guest]"
-		l_guest_shell_arg=$(zxfer_vm_shell_quote "$l_guest_shell")
 		zxfer_vm_validate_perf_profile_value "$l_perf_profile"
 		l_perf_profile_arg=$(zxfer_vm_shell_quote "$l_perf_profile")
 		l_perf_baseline_label_arg=$(zxfer_vm_shell_quote "$l_perf_baseline_ref")
@@ -599,17 +583,6 @@ zxfer_vm_handle_signal() {
 	exit "$l_status"
 }
 
-zxfer_vm_prepare_guest_run() {
-	l_guest=$1
-
-	ZXFER_VM_CURRENT_GUEST=$l_guest
-	if zxfer_vm_guest_requires_strict_isolation "$l_guest"; then
-		ZXFER_VM_STRICT_ISOLATION_REQUIRED=1
-	else
-		ZXFER_VM_STRICT_ISOLATION_REQUIRED=0
-	fi
-}
-
 zxfer_vm_prepare_guest_artifact_dir() {
 	l_guest=$1
 	l_artifact_dir=$(zxfer_vm_join_path "$ZXFER_VM_ARTIFACT_ROOT" "$l_guest")
@@ -624,7 +597,6 @@ zxfer_vm_run_selected_guests_serial() {
 	l_status=0
 
 	for l_guest in $ZXFER_VM_SELECTED_GUESTS; do
-		zxfer_vm_prepare_guest_run "$l_guest"
 		l_artifact_dir=$(zxfer_vm_prepare_guest_artifact_dir "$l_guest")
 
 		if zxfer_vm_backend_run_guest "$l_guest" "$l_artifact_dir"; then
@@ -650,7 +622,6 @@ zxfer_vm_spawn_guest_background() {
 	ZXFER_VM_LAST_BACKGROUND_PID=
 	(
 		l_status=0
-		zxfer_vm_prepare_guest_run "$l_guest"
 		if zxfer_vm_backend_run_guest "$l_guest" "$l_artifact_dir"; then
 			l_status=0
 		else
@@ -751,16 +722,6 @@ zxfer_vm_run_selected_guests_parallel() {
 	zxfer_vm_cleanup_runner_state
 	ZXFER_VM_FAILED_GUESTS=$l_failed
 	return "$l_status"
-}
-
-zxfer_vm_guest_requires_strict_isolation() {
-	l_guest=$1
-	l_strict_profiles=
-
-	[ "$ZXFER_VM_BACKEND" = "qemu" ] || return 1
-	l_strict_profiles=$(zxfer_vm_guest_strict_qemu_profiles "$l_guest") || return 1
-	[ -n "$l_strict_profiles" ] || return 1
-	zxfer_vm_list_contains "$l_strict_profiles" "$ZXFER_VM_PROFILE"
 }
 
 zxfer_vm_run_selected_guests() {

@@ -13,14 +13,8 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/test_helper.sh
 . "$TESTS_DIR/test_helper.sh"
 
-zxfer_source_runtime_modules_through "zxfer_destination_state.sh"
-
 oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_destination_state"
-}
-
-oneTimeTearDown() {
-	zxfer_test_cleanup_tmpdir
 }
 
 setUp() {

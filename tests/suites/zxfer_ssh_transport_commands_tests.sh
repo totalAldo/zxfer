@@ -298,7 +298,8 @@ test_ssh_shell_command_render_fuzzes_wrapper_specs_and_control_socket_paths() {
 	marker_rel="control_socket_fuzz_marker"
 	marker="$TEST_TMPDIR/$marker_rel"
 	case_file="$TEST_TMPDIR/control_socket_fuzz_cases.txt"
-	safe_cmd=$(zxfer_build_remote_sh_c_command "printf ok >/dev/null")
+	zxfer_build_remote_sh_c_command "printf ok >/dev/null"
+	safe_cmd=$g_zxfer_shell_command_result
 	cat >"$case_file" <<EOF
 backup@example.com doas|$TEST_TMPDIR/socket,comma
 backup@example.com pfexec -u root|$TEST_TMPDIR/socket=equals

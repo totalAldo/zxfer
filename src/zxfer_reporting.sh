@@ -116,26 +116,10 @@ zxfer_escape_report_value() {
 		;;
 	esac
 
-	# Command substitution in the caller strips trailing newlines, so count
-	# them here and append their escaped form after awk.
-	l_report_value=$1
-	l_trailing_newlines=0
-	l_scan_value=$l_report_value
-	while :; do
-		case $l_scan_value in
-		*'
-')
-			l_trailing_newlines=$((l_trailing_newlines + 1))
-			l_scan_value=${l_scan_value%?}
-			;;
-		*)
-			break
-			;;
-		esac
-	done
-
+	# Terminate the final record, even if it is empty. Each separator
+	# between awk records then represents exactly one newline in the value.
 	# shellcheck disable=SC2016
-	printf '%s' "$l_report_value" | LC_ALL=C ${g_cmd_awk:-awk} '
+	printf '%s\n' "$1" | LC_ALL=C "${g_cmd_awk:-awk}" '
 BEGIN {
 	ORS = ""
 	for (i = 1; i < 32; i++) {
@@ -162,10 +146,6 @@ BEGIN {
 	}
 }
 '
-	while [ "$l_trailing_newlines" -gt 0 ]; do
-		printf '\\n'
-		l_trailing_newlines=$((l_trailing_newlines - 1))
-	done
 }
 
 # Purpose: Render one token as an escaped, single-quoted report word.
@@ -486,10 +466,13 @@ zxfer_validate_existing_error_log_file() {
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_validate_path\" because it is not a regular file."
 		return 1
 	fi
-	if ! l_validate_owner_uid=$(zxfer_get_path_owner_uid "$l_validate_path"); then
+	if ! zxfer_read_path_metadata "$l_validate_path"; then
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its owner could not be determined."
 		return 1
 	fi
+	l_validate_owner_uid=$g_zxfer_path_owner_uid_result
+	l_validate_links=$g_zxfer_path_link_count_result
+	l_validate_mode=$g_zxfer_path_mode_result
 	if ! zxfer_backup_owner_uid_is_allowed "$l_validate_owner_uid"; then
 		l_validate_expected_owner_desc=$(zxfer_describe_expected_backup_owner)
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because it is owned by UID $l_validate_owner_uid instead of $l_validate_expected_owner_desc."
@@ -498,11 +481,7 @@ zxfer_validate_existing_error_log_file() {
 
 	# The report would also land in every other name of this file, such as a
 	# root-owned 0600 file that another user hard-linked into a shared sticky
-	# parent. Field 2 of ls -ldn is the link count on every supported ls.
-	l_validate_ls=$(ls -ldn "$l_validate_path" 2>/dev/null) || l_validate_ls=""
-	IFS=' 	' read -r l_validate_ls_perm l_validate_links l_validate_ls_rest <<EOF
-$l_validate_ls
-EOF
+	# parent. Owner, link count and mode come from the same metadata read.
 	case $l_validate_links in
 	1) ;;
 	'' | *[!0-9]*)
@@ -519,8 +498,11 @@ EOF
 	# which other users cannot replace in a parent that passed its checks.
 	if [ "${2:-0}" = 1 ]; then
 		chmod 600 "$l_validate_path" 2>/dev/null || :
+		# A default ACL can widen creation permissions; verify the chmod's
+		# result with a fresh read rather than the pre-chmod record.
+		l_validate_mode=$(zxfer_get_path_mode_octal "$l_validate_path") || l_validate_mode=""
 	fi
-	if ! l_validate_mode=$(zxfer_get_path_mode_octal "$l_validate_path"); then
+	if [ -z "$l_validate_mode" ]; then
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its permissions could not be determined."
 		return 1
 	fi

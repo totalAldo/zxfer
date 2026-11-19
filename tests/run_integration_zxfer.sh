@@ -726,12 +726,10 @@ main() {
 	parse_args "$@"
 	zxfer_load_integration_test_fragments ||
 		fail "Unable to load integration test fragments."
-	zxfer_validate_integration_registry ||
+	zxfer_check_loaded_integration_functions ||
 		fail "Unable to load the integration test registry."
-	TEST_SEQUENCE=$(zxfer_integration_registry_names) ||
-		fail "Unable to read the integration test registry sequence."
-	PRE_POOL_TEST_SEQUENCE=$(zxfer_integration_registry_pre_pool_names) ||
-		fail "Unable to read the integration pre-pool test sequence."
+	TEST_SEQUENCE=$g_integration_registry_names
+	PRE_POOL_TEST_SEQUENCE=$g_integration_pre_pool_names
 	configure_platform_tool_paths
 	require_platform_permissions
 	require_cmd zpool

@@ -202,56 +202,45 @@ zxfer_vm_require_guest_manifest() {
 	ZXFER_VM_VALIDATED_GUEST_MANIFEST_FILE=$l_manifest
 }
 
-zxfer_vm_guest_manifest_field() {
-	l_guest=$1
-	l_arch=$2
-	l_field=$3
-	l_manifest=
-	l_field_index=
-	l_tab=$(printf '\t')
-
+# Print the validated row for GUEST [ARCH]. Without ARCH prefer the host
+# architecture, then amd64. "any" selects guest-wide metadata on any host.
+zxfer_vm_guest_record() {
 	zxfer_vm_require_guest_manifest || return 1
-	l_manifest=$ZXFER_VM_VALIDATED_GUEST_MANIFEST_FILE
-	case "$l_field" in
-	label) l_field_index=2 ;;
-	profiles) l_field_index=3 ;;
-	image_filename) l_field_index=5 ;;
-	image_url) l_field_index=6 ;;
-	checksum_url) l_field_index=7 ;;
-	archive_compression) l_field_index=8 ;;
-	base_format) l_field_index=9 ;;
-	min_disk_size) l_field_index=10 ;;
-	guest_shell) l_field_index=11 ;;
-	seed_transport) l_field_index=12 ;;
-	ssh_ready_timeout_seconds) l_field_index=13 ;;
-	ssh_ready_probe_count) l_field_index=14 ;;
-	shunit_jobs) l_field_index=15 ;;
-	shunit_mode) l_field_index=16 ;;
-	provisioner) l_field_index=17 ;;
-	cloud_init_style) l_field_index=18 ;;
-	strict_qemu_profiles) l_field_index=19 ;;
-	*) return 1 ;;
-	esac
-
-	awk -F "$l_tab" \
-		-v guest="$l_guest" \
-		-v arch="$l_arch" \
-		-v field_index="$l_field_index" '
-		NR > 1 && $1 == guest && (arch == "" || $4 == arch) {
-			value = $field_index
-			if (value == "-") {
-				value = ""
+	awk -F '\t' -v guest="$1" -v arch="${2:-}" -v host="${ZXFER_VM_HOST_ARCH:-amd64}" '
+		NR > 1 && $1 == guest {
+			if (arch == "any" || $4 == arch || (arch == "" && $4 == host)) {
+				row = $0
+				exit
 			}
-			print value
-			found = 1
-			exit
+			if (arch == "" && $4 == "amd64") row = $0
 		}
 		END {
-			if (!found) {
-				exit 1
-			}
+			if (row == "") exit 1
+			print row
 		}
-	' <"$l_manifest"
+	' <"$ZXFER_VM_VALIDATED_GUEST_MANIFEST_FILE"
+}
+
+# Load GUEST [ARCH] once for the backend and its script renderers. Every
+# validated field is nonempty, including the "-" placeholders, so splitting
+# on tabs preserves labels with spaces and all 19 field positions.
+# shellcheck disable=SC2034  # Fields are consumed by the selected backend.
+zxfer_vm_load_guest() {
+	l_guest_record=$(zxfer_vm_guest_record "$@") || return 1
+	IFS="$(printf '\t')" read -r g_vm_guest_name g_vm_guest_label g_vm_guest_profiles g_vm_guest_arch \
+		g_vm_guest_image_filename g_vm_guest_image_url g_vm_guest_checksum_url g_vm_guest_archive_compression \
+		g_vm_guest_base_format g_vm_guest_min_disk_size g_vm_guest_shell g_vm_guest_seed_transport \
+		g_vm_guest_ssh_ready_timeout_seconds g_vm_guest_ssh_ready_probe_count g_vm_guest_shunit_jobs \
+		g_vm_guest_shunit_mode g_vm_guest_provisioner g_vm_guest_cloud_init_style g_vm_guest_strict_qemu_profiles <<EOF || return 1
+$l_guest_record
+EOF
+	[ "$g_vm_guest_label" != "-" ] || g_vm_guest_label=
+	[ "$g_vm_guest_min_disk_size" != "-" ] || g_vm_guest_min_disk_size=
+	[ "$g_vm_guest_strict_qemu_profiles" != "-" ] || g_vm_guest_strict_qemu_profiles=
+	g_vm_guest_base_image_name=$g_vm_guest_image_filename
+	if [ "$g_vm_guest_archive_compression" = xz ]; then
+		g_vm_guest_base_image_name=${g_vm_guest_image_filename%.xz}
+	fi
 }
 
 zxfer_vm_guest_names() {
@@ -280,14 +269,6 @@ zxfer_vm_profile_names() {
 			}
 		}
 	' <"$l_manifest"
-}
-
-zxfer_vm_guest_exists() {
-	zxfer_vm_guest_manifest_field "$1" "" label >/dev/null
-}
-
-zxfer_vm_guest_label() {
-	zxfer_vm_guest_manifest_field "$1" "" label
 }
 
 zxfer_vm_profile_guests() {
@@ -321,133 +302,9 @@ zxfer_vm_profile_guests() {
 	' <"$l_manifest"
 }
 
-zxfer_vm_guest_qemu_supports_arch() {
-	zxfer_vm_guest_manifest_field "$1" "$2" image_filename >/dev/null
-}
-
-zxfer_vm_guest_qemu_preferred_arch() {
-	l_guest=$1
-
-	if [ "${ZXFER_VM_HOST_ARCH:-}" = "arm64" ] &&
-		zxfer_vm_guest_qemu_supports_arch "$l_guest" "arm64"; then
-		printf '%s\n' "arm64"
-		return 0
-	fi
-	if zxfer_vm_guest_qemu_supports_arch "$l_guest" "amd64"; then
-		printf '%s\n' "amd64"
-		return 0
-	fi
-
-	return 1
-}
-
-zxfer_vm_guest_qemu_image_filename() {
-	l_guest=$1
-	l_arch=${2:-$(zxfer_vm_guest_qemu_preferred_arch "$l_guest")} || return 1
-
-	zxfer_vm_guest_manifest_field "$l_guest" "$l_arch" image_filename
-}
-
-zxfer_vm_guest_qemu_image_url() {
-	l_guest=$1
-	l_arch=${2:-$(zxfer_vm_guest_qemu_preferred_arch "$l_guest")} || return 1
-
-	zxfer_vm_guest_manifest_field "$l_guest" "$l_arch" image_url
-}
-
-zxfer_vm_guest_qemu_checksum_url() {
-	l_guest=$1
-	l_arch=${2:-$(zxfer_vm_guest_qemu_preferred_arch "$l_guest")} || return 1
-
-	zxfer_vm_guest_manifest_field "$l_guest" "$l_arch" checksum_url
-}
-
-zxfer_vm_guest_qemu_archive_compression() {
-	l_guest=$1
-	l_arch=${2:-$(zxfer_vm_guest_qemu_preferred_arch "$l_guest")} || return 1
-
-	zxfer_vm_guest_manifest_field "$l_guest" "$l_arch" archive_compression
-}
-
-zxfer_vm_guest_qemu_base_image_name() {
-	l_guest=$1
-	l_arch=${2:-$(zxfer_vm_guest_qemu_preferred_arch "$l_guest")} || return 1
-	l_file_name=$(zxfer_vm_guest_qemu_image_filename "$l_guest" "$l_arch") || return 1
-	l_compression=$(zxfer_vm_guest_qemu_archive_compression "$l_guest" "$l_arch") || return 1
-
-	case "$l_compression" in
-	xz)
-		printf '%s\n' "${l_file_name%.xz}"
-		;;
-	none)
-		printf '%s\n' "$l_file_name"
-		;;
-	*)
-		return 1
-		;;
-	esac
-}
-
-zxfer_vm_guest_qemu_base_format() {
-	l_guest=$1
-	l_arch=${2:-$(zxfer_vm_guest_qemu_preferred_arch "$l_guest")} || return 1
-
-	zxfer_vm_guest_manifest_field "$l_guest" "$l_arch" base_format
-}
-
-zxfer_vm_guest_qemu_min_disk_size() {
-	l_guest=$1
-	l_arch=${2:-$(zxfer_vm_guest_qemu_preferred_arch "$l_guest")} || return 1
-
-	zxfer_vm_guest_manifest_field "$l_guest" "$l_arch" min_disk_size
-}
-
-zxfer_vm_guest_qemu_shell() {
-	zxfer_vm_guest_manifest_field "$1" "" guest_shell
-}
-
-zxfer_vm_guest_qemu_seed_transport() {
-	l_guest=$1
-	l_arch=${2:-$(zxfer_vm_guest_qemu_preferred_arch "$l_guest")} || return 1
-
-	zxfer_vm_guest_manifest_field "$l_guest" "$l_arch" seed_transport
-}
-
-zxfer_vm_guest_qemu_ssh_ready_timeout_seconds() {
-	zxfer_vm_guest_manifest_field "$1" "" ssh_ready_timeout_seconds
-}
-
-zxfer_vm_guest_qemu_ssh_ready_probe_count() {
-	zxfer_vm_guest_manifest_field "$1" "" ssh_ready_probe_count
-}
-
-zxfer_vm_guest_shunit_jobs() {
-	zxfer_vm_guest_manifest_field "$1" "" shunit_jobs
-}
-
-zxfer_vm_guest_shunit_mode() {
-	zxfer_vm_guest_manifest_field "$1" "" shunit_mode
-}
-
-zxfer_vm_guest_provisioner() {
-	zxfer_vm_guest_manifest_field "$1" "" provisioner
-}
-
-zxfer_vm_guest_cloud_init_style() {
-	zxfer_vm_guest_manifest_field "$1" "" cloud_init_style
-}
-
-zxfer_vm_guest_strict_qemu_profiles() {
-	zxfer_vm_guest_manifest_field "$1" "" strict_qemu_profiles
-}
-
+# Render preparation commands for the loaded guest, backend, and test layer.
 zxfer_vm_guest_prepare_script() {
-	l_guest=$1
-	l_backend=$2
-	l_test_layer=$3
-	l_provisioner=$(zxfer_vm_guest_provisioner "$l_guest") || return 1
-
-	case "$l_test_layer/$l_backend/$l_provisioner" in
+	case "$2/$1/$g_vm_guest_provisioner" in
 	integration/ci-managed/apt-zfs | perf/ci-managed/apt-zfs | perf-compare/ci-managed/apt-zfs)
 		cat <<'EOF'
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"

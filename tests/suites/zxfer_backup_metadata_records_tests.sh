@@ -56,7 +56,8 @@ $(zxfer_test_backup_metadata_row "." "compression=off=local")"
 $(zxfer_test_backup_metadata_row "child" "atime=off=local")" \
 		"$(zxfer_validate_backup_metadata_record_list "$buffered")"
 
-	for malformed in "no-tab-row" "$(zxfer_test_backup_metadata_row "." "")" \
+	for malformed in "$buffered
+no-tab-row" "$(zxfer_test_backup_metadata_row "." "")" \
 		"$(zxfer_test_backup_metadata_row "." "compression=lz4=local,")" \
 		"$(zxfer_test_backup_metadata_row "" "compression=lz4=local")" \
 		"$(zxfer_test_backup_metadata_row "." "compression")" \
