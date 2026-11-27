@@ -613,23 +613,35 @@ test_property_plan_refuses_late_creation_mismatches_before_emitting_any_action()
 			-v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
 			"$ZXFER_PROPERTY_INPUT_AWK$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK$ZXFER_PROPERTY_PLAN_AWK"
 	) || l_creation_guard_status=$?
-	assertEquals "The creation-time refusal retains status 3." 3 "$l_creation_guard_status"
-	assertEquals "The refused property is the original first output line." casesensitivity "$l_creation_guard_output"
-	assertEquals "No earlier set action escapes validation." "" "$(cat "$l_creation_guard_plan")"
+	assertEquals "Direct AWK writes the unified plan-file error record cleanly." 0 "$l_creation_guard_status"
+	assertEquals "Unified plan-file protocol writes no stdout header." "" "$l_creation_guard_output"
+	assertEquals "No earlier set action escapes validation before error<TAB>3." \
+		"error${ZXFER_TAB}3${ZXFER_TAB}casesensitivity${ZXFER_LF}__ZXFER_PROPERTY_ACTIONS__" \
+		"$(cat "$l_creation_guard_plan")"
+	l_validate_output=$(
+		zxfer_throw_error_with_usage() {
+			printf 'THROW_USAGE:%s\n' "$1"
+			exit 42
+		}
+		zxfer_validate_property_plan "$l_creation_guard_plan"
+	)
+	l_validate_status=$?
+	assertEquals "Validating the error<TAB>3 plan file throws the creation-time usage error." 42 "$l_validate_status"
+	assertContains "$l_validate_output" 'The property "casesensitivity" may only be set'
 }
 
 test_plan_property_changes_publishes_nothing_when_awk_fails_or_stops_short() {
 	zxfer_property_test_plan 1 'compression=lz4=local' "" 1 filesystem "" "" "" 'compression=off=local'
-	cat >"$TEST_TMPDIR/short-plan-awk" <<'EOF'
+	cat >"$TEST_TMPDIR/silent-plan-awk" <<'EOF'
 #!/bin/sh
-printf '__ZXFER_PROPERTY_PLAN__\n'
+exit 0
 EOF
-	cat >"$TEST_TMPDIR/bad-header-awk" <<'EOF'
+	cat >"$TEST_TMPDIR/partial-plan-awk" <<'EOF'
 #!/bin/sh
-printf 'unexpected producer output\n'
+printf 'set\tcompression=lz4=local=\n' >"$ZXFER_PROPERTY_PLAN_FILE"
 EOF
-	chmod 755 "$TEST_TMPDIR/short-plan-awk" "$TEST_TMPDIR/bad-header-awk"
-	for l_broken_awk in "$TEST_TMPDIR/missing-awk" "$TEST_TMPDIR/short-plan-awk" "$TEST_TMPDIR/bad-header-awk"; do
+	chmod 755 "$TEST_TMPDIR/silent-plan-awk" "$TEST_TMPDIR/partial-plan-awk"
+	for l_broken_awk in "$TEST_TMPDIR/missing-awk" "$TEST_TMPDIR/silent-plan-awk" "$TEST_TMPDIR/partial-plan-awk"; do
 		(
 			g_zxfer_property_plan_summary_result=stale
 			g_cmd_awk=$l_broken_awk
@@ -643,6 +655,34 @@ EOF
 		assertEquals 1 "$l_plan_status"
 		assertEquals "Failed to plan dataset properties.|summary=<>" "$(cat "$TEST_TMPDIR/broken-plan.out")"
 	done
+}
+
+test_property_plan_decodes_multiline_unsupported_warnings_in_single_dataset_mode() {
+	(
+		g_option_v_verbose=1
+		l_warn_calls=0
+		zxfer_warn_stderr() {
+			l_warn_calls=$((l_warn_calls + 1))
+			printf 'CALL%s[%s]\n' "$l_warn_calls" "$*" >&2
+		}
+		zxfer_property_test_plan 1 'compression=lz4=local,overlay=line1%0Aline2=default' "" \
+			1 filesystem "" "" "overlay" 'compression=lz4=local'
+		printf 'plan=%s\n' "$(cat "$g_zxfer_property_plan_file")"
+	) >"$TEST_TMPDIR/multiline_warn.stdout" 2>"$TEST_TMPDIR/multiline_warn.stderr"
+	l_warn_status=$?
+	assertEquals "Single-dataset planning with multiline -U warning must succeed." 0 "$l_warn_status"
+	assertEquals "Plan file keeps the -U warning percent-encoded on one warn<TAB> line." \
+		"plan=warn${ZXFER_TAB}overlay=line1%0Aline2${ZXFER_LF}__ZXFER_PROPERTY_ACTIONS__" \
+		"$(cat "$TEST_TMPDIR/multiline_warn.stdout")"
+	assertEquals "Multiline %0A -U warning is decoded after read into one zxfer_warn_stderr call." \
+		"CALL1[Destination does not support property overlay=line1${ZXFER_LF}line2]" \
+		"$(cat "$TEST_TMPDIR/multiline_warn.stderr")"
+
+	# Batch validation must still reject create<TAB> rows under the unified protocol.
+	zxfer_property_test_write_actions create 'compression=lz4'
+	zxfer_validate_property_plan "$g_zxfer_property_plan_file" batch
+	l_batch_create_status=$?
+	assertEquals "Batch validation must continue rejecting create<TAB> rows." 1 "$l_batch_create_status"
 }
 
 # Matching roughly 640 kB lists exceed exec-size limits; only file paths cross

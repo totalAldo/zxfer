@@ -1751,5 +1751,188 @@ EOF
 		"compression=lz4=local|compression=zstd=local" "$l_output"
 }
 
+test_backup_storage_root_and_dir_guards_strip_trailing_slashes_and_refuse_root() {
+	# zxfer_init_backup_storage_root normalizes trailing slashes and refuses /.
+	l_normalized=$(
+		ZXFER_BACKUP_DIR="/var/db/zxfer///"
+		export ZXFER_BACKUP_DIR
+		zxfer_init_backup_storage_root
+		printf '%s\n' "$g_backup_storage_root"
+	)
+	l_status=$?
+	assertEquals "Trailing slashes on a valid ZXFER_BACKUP_DIR should succeed." 0 "$l_status"
+	assertEquals "Trailing slashes must be stripped so derived paths contain no //." \
+		"/var/db/zxfer" "$l_normalized"
+
+	for l_root_bad in "/" "///"; do
+		l_output=$(
+			(
+				ZXFER_BACKUP_DIR="$l_root_bad"
+				export ZXFER_BACKUP_DIR
+				zxfer_init_backup_storage_root
+			) 2>&1
+		)
+		l_status=$?
+		assertEquals "ZXFER_BACKUP_DIR=$l_root_bad must be refused." 1 "$l_status"
+		assertContains "$l_output" "must not be the filesystem root."
+	done
+
+	# Local and remote directory guards: /, trailing-slash symlinks, and normal trailing-slash roots.
+	base="$TEST_TMPDIR_PHYSICAL/trailing_slash_guards"
+	mkdir -p "$base/real"
+	ln -s "$base/real" "$base/link"
+	chmod_log="$TEST_TMPDIR/trailing_slash_chmod.log"
+	fake_chmod_bin="$TEST_TMPDIR/trailing_slash_chmod_bin"
+	mkdir -p "$fake_chmod_bin"
+	: >"$chmod_log"
+	cat >"$fake_chmod_bin/chmod" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$chmod_log"
+exit 0
+EOF
+	chmod +x "$fake_chmod_bin/chmod"
+
+	for l_root_bad in "/" "///"; do
+		l_output=$(
+			(
+				PATH="$fake_chmod_bin:$PATH"
+				zxfer_ensure_local_backup_dir "$l_root_bad"
+			) 2>&1
+		)
+		l_status=$?
+		assertEquals "Local guard must refuse $l_root_bad." 1 "$l_status"
+		assertContains "$l_output" "must not be the filesystem root."
+		assertEquals "Local guard must never invoke chmod on $l_root_bad." "" "$(cat "$chmod_log")"
+
+		l_remote_stdout="$TEST_TMPDIR/remote_root_bad.stdout"
+		l_remote_stderr="$TEST_TMPDIR/remote_root_bad.stderr"
+		zxfer_build_remote_backup_dir_prepare_cmd "$l_root_bad" "target.example" \
+			>"$l_remote_stdout" 2>"$l_remote_stderr"
+		l_status=$?
+		assertEquals "Remote builder must refuse $l_root_bad before rendering." 1 "$l_status"
+		assertEquals "Refused remote builder must emit no script." "" "$(cat "$l_remote_stdout")"
+		assertContains "$(cat "$l_remote_stderr")" "must not be the filesystem root."
+	done
+
+	l_output=$(
+		(
+			PATH="$fake_chmod_bin:$PATH"
+			zxfer_ensure_local_backup_dir "$base/link/"
+		) 2>&1
+	)
+	l_status=$?
+	assertEquals "Local guard must refuse trailing-slash symlink." 1 "$l_status"
+	assertContains "Trailing-slash symlink must trigger the direct symlink error, not path component." \
+		"$l_output" "Refusing to use backup directory $base/link because it is a symlink."
+	assertEquals "Local guard must never invoke chmod on trailing-slash symlink." "" "$(cat "$chmod_log")"
+
+	l_remote_cmd=$(zxfer_build_remote_backup_dir_prepare_cmd "$base/link/" "target.example")
+	l_status=$?
+	assertEquals 0 "$l_status"
+	l_output=$(sh -c "$l_remote_cmd" 2>&1)
+	l_status=$?
+	assertEquals "Remote guard must refuse trailing-slash symlink with status 92." 92 "$l_status"
+	assertEquals "Remote trailing-slash symlink must emit the direct symlink refusal." \
+		"Refusing to use symlinked zxfer backup directory." "$l_output"
+
+	# On platforms with a top-level /tmp symlink (e.g. macOS /tmp -> private/tmp),
+	# /tmp/ must be stripped to /tmp and refused by [ -L ] without invoking chmod.
+	if [ -L /tmp ]; then
+		l_output=$(
+			(
+				PATH="$fake_chmod_bin:$PATH"
+				zxfer_ensure_local_backup_dir "/tmp/"
+			) 2>&1
+		)
+		l_status=$?
+		assertEquals "Local guard must refuse top-level /tmp/ symlink." 1 "$l_status"
+		assertContains "$l_output" "Refusing to use backup directory /tmp because it is a symlink."
+		assertEquals "Local guard must never chmod /tmp/." "" "$(cat "$chmod_log")"
+
+		l_remote_tmp_cmd=$(
+			g_zxfer_secure_path="$fake_chmod_bin:$ZXFER_DEFAULT_SECURE_PATH"
+			zxfer_build_remote_backup_dir_prepare_cmd "/tmp/" "target.example"
+		)
+		l_output=$(sh -c "$l_remote_tmp_cmd" 2>&1)
+		l_status=$?
+		assertEquals "Remote guard must refuse top-level /tmp/ symlink with status 92." 92 "$l_status"
+		assertEquals "Refusing to use symlinked zxfer backup directory." "$l_output"
+		assertEquals "Remote guard must never chmod /tmp/." "" "$(cat "$chmod_log")"
+	fi
+
+	# Valid roots with trailing slashes succeed locally and remotely and are secured 0700.
+	zxfer_ensure_local_backup_dir "$base/normal_local//"
+	l_status=$?
+	assertEquals "Local guard accepts normal directory with trailing slashes." 0 "$l_status"
+	assertEquals "Local normal directory with trailing slashes gets mode 700." \
+		700 "$(zxfer_get_path_mode_octal "$base/normal_local")"
+
+	l_remote_normal_cmd=$(zxfer_build_remote_backup_dir_prepare_cmd "$base/normal_remote//" "target.example")
+	l_status=$?
+	assertEquals 0 "$l_status"
+	sh -c "$l_remote_normal_cmd"
+	l_status=$?
+	assertEquals "Remote guard accepts normal directory with trailing slashes." 0 "$l_status"
+	assertEquals "Remote normal directory with trailing slashes gets mode 700." \
+		700 "$(zxfer_get_path_mode_octal "$base/normal_remote")"
+}
+
+test_read_remote_backup_file_classifies_missing_remote_cat_as_dependency_when_g_cmd_cat_is_empty() {
+	zxfer_create_runtime_artifact_file backup-no-cat
+	staging=$g_zxfer_runtime_artifact_path_result
+	dir="$TEST_TMPDIR_PHYSICAL/remote_read_no_cat"
+	mkdir -p "$dir"
+	chmod 700 "$dir"
+	file="$dir/backup.meta"
+	printf 'payload\n' >"$file"
+	chmod 600 "$file"
+
+	no_cat_bin="$TEST_TMPDIR/remote_read_no_cat_bin"
+	mkdir -p "$no_cat_bin"
+	for l_tool in id ls awk; do
+		ln -sf "$(command -v "$l_tool")" "$no_cat_bin/$l_tool"
+	done
+
+	# Under -k + -O, g_cmd_cat is unset/empty; missing remote cat must exit 99
+	# and be classified as class=dependency rather than exit 127 transport error.
+	l_script=$(
+		g_cmd_cat=""
+		g_zxfer_secure_path="$no_cat_bin"
+		zxfer_build_remote_backup_read_cmd "$file" "origin.example"
+	)
+	l_status=$?
+	assertEquals 0 "$l_status"
+	l_output=$(sh -c "$l_script" 2>&1)
+	l_status=$?
+	assertEquals "Missing remote cat with empty g_cmd_cat must exit 99." 99 "$l_status"
+	assertContains "$l_output" "Required dependency \"cat\" not found on host origin.example in secure PATH ($no_cat_bin)."
+
+	l_output=$(
+		(
+			g_cmd_cat=""
+			g_zxfer_secure_path="$no_cat_bin"
+			zxfer_backup_test_stub_local_transport
+			zxfer_throw_error() {
+				printf 'class=%s %s\n' "${g_zxfer_failure_class:-}" "$1"
+				exit 1
+			}
+			zxfer_read_remote_backup_file "origin.example" "$file" source "$staging"
+		) 2>&1
+	)
+	l_status=$?
+	assertEquals 1 "$l_status"
+	assertContains "$l_output" "Required dependency \"cat\" not found on host origin.example in secure PATH ($no_cat_bin)."
+	assertContains "$l_output" "class=dependency Required remote backup-metadata helper dependency not found on host origin.example in secure PATH ($no_cat_bin)."
+
+	# When g_cmd_cat is already resolved (e.g. -e + -O), cat is not re-added to the prelude.
+	l_resolved_first_line=$(
+		g_cmd_cat="/bin/cat"
+		g_zxfer_secure_path="/secure/bin:/usr/bin"
+		zxfer_build_remote_backup_read_cmd "$file" "origin.example" | sed -n 1p
+	)
+	assertEquals "'set' '--' '/secure/bin:/usr/bin' 'origin.example' '$file' 'metadata' '98' 'id' 'ls' 'awk';" \
+		"$l_resolved_first_line"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

@@ -219,15 +219,20 @@ END {
 # Purpose: Validate ZXFER_BACKUP_DIR (default /var/db/zxfer) once per session
 # into g_backup_storage_root, ignoring any inherited internal value.
 # Usage: zxfer_init_backup_storage_root, from session bootstrap; throws unless
-# the root is a single-line absolute path. A dataset's storage directory is
-# "$g_backup_storage_root/<dataset>".
+# the root is a single-line absolute non-root path, and strips trailing
+# slashes. A dataset's storage directory is "$g_backup_storage_root/<dataset>".
 zxfer_init_backup_storage_root() {
 	l_init_backup_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
 	zxfer_value_is_single_line "$l_init_backup_root" ||
 		zxfer_throw_error "Refusing to use ZXFER_BACKUP_DIR because the backup metadata root must be a single-line absolute path without control whitespace."
 	case $l_init_backup_root in
-	/*) g_backup_storage_root=$l_init_backup_root ;;
+	/*) ;;
 	*) zxfer_throw_error "Refusing to use backup metadata root \"$l_init_backup_root\" because ZXFER_BACKUP_DIR must be an absolute path." ;;
+	esac
+	zxfer_strip_trailing_slashes "$l_init_backup_root"
+	case $g_zxfer_stripped_path_result in
+	*[!/]*) g_backup_storage_root=$g_zxfer_stripped_path_result ;;
+	*) zxfer_throw_error "Refusing to use backup metadata root \"$l_init_backup_root\" because ZXFER_BACKUP_DIR must not be the filesystem root." ;;
 	esac
 }
 
@@ -861,11 +866,18 @@ EOF
 }
 
 # Purpose: Create or validate one local backup directory.
-# Usage: Refuses symlinked components, non-directories, and owners other
-# than root or the effective uid; creates missing directories 0700 and
-# re-applies 0700 so an operator-created directory is private too.
+# Usage: Strips trailing slashes and refuses empty paths, the filesystem
+# root, symlinked components, non-directories, and owners other than root or
+# the effective uid; creates missing directories 0700 and re-applies 0700 so
+# an operator-created directory is private too.
 zxfer_ensure_local_backup_dir() {
-	l_ensure_local_backup_dir=$1
+	zxfer_strip_trailing_slashes "$1"
+	l_ensure_local_backup_dir=$g_zxfer_stripped_path_result
+	case $l_ensure_local_backup_dir in
+	'') zxfer_throw_error "Refusing to use empty backup directory." ;;
+	*[!/]*) ;;
+	*) zxfer_throw_error "Refusing to use backup directory $1 because it must not be the filesystem root." ;;
+	esac
 	if l_ensure_local_backup_symlink=$(zxfer_find_symlink_path_component \
 		"$l_ensure_local_backup_dir"); then
 		if [ "$l_ensure_local_backup_symlink" = "$l_ensure_local_backup_dir" ]; then
@@ -1103,9 +1115,23 @@ zxfer_build_remote_backup_script_prelude() {
 # directory: symlink walk and target-symlink check, not-a-directory check,
 # mkdir -p under umask 077, root-or-ssh-user owner check, and chmod 700.
 # Usage: zxfer_build_remote_backup_dir_prepare_cmd DIR HOST [EXTRA_TOOL...];
-# the program exits 99 for a missing helper and 92 for any other refusal.
+# strips trailing slashes and refuses empty or filesystem-root DIR (status 1
+# before rendering). The rendered program exits 99 for a missing helper and
+# 92 for any other refusal.
 zxfer_build_remote_backup_dir_prepare_cmd() {
-	l_prepare_dir=$1
+	zxfer_strip_trailing_slashes "$1"
+	l_prepare_dir=$g_zxfer_stripped_path_result
+	case $l_prepare_dir in
+	'')
+		printf '%s\n' "Refusing to use empty backup directory." >&2
+		return 1
+		;;
+	*[!/]*) ;;
+	*)
+		printf '%s\n' "Refusing to use backup directory $1 because it must not be the filesystem root." >&2
+		return 1
+		;;
+	esac
 	l_prepare_host=$2
 	shift 2
 
@@ -1256,8 +1282,10 @@ zxfer_build_remote_backup_read_cmd() {
 	case $l_read_cmd_parent in
 	-*) l_read_cmd_parent=./$l_read_cmd_parent ;;
 	esac
+	set -- id ls awk
+	[ -n "${g_cmd_cat:-}" ] || set -- "$@" cat
 	zxfer_build_remote_backup_script_prelude "$l_read_cmd_host" "$l_read_cmd_path" \
-		metadata id ls awk || return "$?"
+		metadata "$@" || return "$?"
 
 	zxfer_render_shell_command_from_argv set -- "$l_read_cmd_path" \
 		"$l_read_cmd_ls_path" "$l_read_cmd_parent" "${g_cmd_cat:-cat}"
