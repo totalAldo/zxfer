@@ -722,8 +722,8 @@ EOF
 		zxfer_set_actual_dest "$l_grandfather_source"
 		zxfer_select_snapshot_plan "${l_grandfather_row%%"$ZXFER_TAB"*}" \
 			"$l_grandfather_source"
-		# DELETE=0 plans and enforces divergence only; ssh must not read the
-		# list.
+		# DELETE=0 checks divergence in row order before any -g query; the first
+		# destroy target lazily batches pass creation verdicts for later reuse.
 		zxfer_inspect_delete_snap 0 "$l_grandfather_source" </dev/null
 		[ "$g_option_d_delete_destination_snapshots" -eq 1 ] || continue
 		[ -n "$g_zxfer_plan_destroy_target" ] || continue

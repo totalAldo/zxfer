@@ -671,5 +671,235 @@ test_copy_filesystems_rethrows_post_seed_queue_dedupe_failures() {
 		"$(cat "$log")" "skip=1"
 }
 
+test_grandfather_prepass_batches_creation_checks_and_reuses_verdicts_in_delete_pass() {
+	l_now=$(date +%s)
+	l_older_epoch=$((l_now - 4 * 86400))
+	l_common_epoch=$((l_now - 2 * 86400))
+	l_newer_epoch=$((l_now - 1 * 86400))
+	l_zfs_log="$TEST_TMPDIR/g_batch_zfs.log"
+	l_date_log="$TEST_TMPDIR/g_batch_date.log"
+	l_send_log="$TEST_TMPDIR/g_batch_send.log"
+
+	(
+		: >"$l_zfs_log"
+		: >"$l_date_log"
+		: >"$l_send_log"
+		g_option_R_recursive="tank/src"
+		g_initial_source="tank/src"
+		g_initial_source_had_trailing_slash=0
+		g_destination="backup"
+		g_option_d_delete_destination_snapshots=1
+		g_option_F_force_rollback="-F"
+		g_option_g_grandfather_protection=30
+		g_recursive_source_list="tank/src
+tank/src/a
+tank/src/b"
+		g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/g_batch_src.records"
+		g_zxfer_destination_snapshot_record_cache_file="$TEST_TMPDIR/g_batch_dst.records"
+		printf '%s\n' \
+			"tank/src@snap2	12" "tank/src@snap1	11" \
+			"tank/src/a@snap2	22" "tank/src/a@snap1	21" \
+			"tank/src/b@snap2	32" "tank/src/b@snap1	31" \
+			>"$g_zxfer_source_snapshot_record_cache_file"
+		printf '%s\n' \
+			"backup/src@snap1	11" "backup/src@old	19" \
+			"backup/src/a@snap1	21" "backup/src/a@newer	29" \
+			"backup/src/b@snap1	31" "backup/src/b@old	39" \
+			>"$g_zxfer_destination_snapshot_record_cache_file"
+
+		date() {
+			printf '%s\n' "$*" >>"$l_date_log"
+			printf '%s\n' "$l_now"
+		}
+		zxfer_run_destination_zfs_cmd() {
+			printf '%s\n' "$*" >>"$l_zfs_log"
+			[ "$1" = get ] || return 0
+			printf 'backup/src@snap1\t%s\nbackup/src@old\t%s\nbackup/src/a@snap1\t%s\nbackup/src/a@newer\t%s\nbackup/src/b@snap1\t%s\nbackup/src/b@old\t%s\n' \
+				"$l_common_epoch" "$l_older_epoch" \
+				"$l_common_epoch" "$l_newer_epoch" \
+				"$l_common_epoch" "$l_older_epoch"
+		}
+		zxfer_reconcile_live_destination_snapshot_state() { :; }
+		zxfer_destination_exists() { return 0; }
+		zxfer_zfs_send_receive() {
+			printf 'send %s -> %s (%s)\n' "$1" "$2" "$3" >>"$l_send_log"
+		}
+
+		zxfer_build_replication_iteration_list 0
+		zxfer_perform_grandfather_protection_checks
+		zxfer_process_replication_ready_queue "$g_zxfer_replication_iteration_list_result" 0
+	)
+	l_run_status=$?
+	assertEquals "Multi-dataset -d -F -g pre-pass and delete pass should succeed." 0 "$l_run_status"
+	assertEquals "Pre-pass and delete pass combined should issue exactly one batched zfs get creation." \
+		1 "$(grep -c '^get -H -o name,value -p creation ' "$l_zfs_log")"
+	assertEquals "Pre-pass and delete pass combined should read date +%s once." \
+		1 "$(wc -l <"$l_date_log" | tr -d ' ')"
+	assertEquals "All three datasets should destroy their extra snapshots." \
+		3 "$(grep -c '^destroy ' "$l_zfs_log")"
+	assertEquals "Only backup/src/a (whose deleted snapshot was newer than @snap1) should roll back." \
+		"rollback -r backup/src/a@snap1" "$(grep '^rollback ' "$l_zfs_log")"
+	assertEquals "All three datasets should complete incremental send." \
+		3 "$(wc -l <"$l_send_log" | tr -d ' ')"
+}
+
+test_grandfather_prepass_preserves_turn_order_and_failure_context_on_divergence_and_refusal() {
+	l_now=$(date +%s)
+	l_young_epoch=$((l_now - 2 * 86400))
+	l_old_epoch=$((l_now - 50 * 86400))
+	l_zfs_log="$TEST_TMPDIR/g_order_zfs.log"
+	l_date_log="$TEST_TMPDIR/g_order_date.log"
+
+	# Case 1: Row 1 diverges -> fails before any -g creation query or date call.
+	: >"$l_zfs_log"
+	: >"$l_date_log"
+	l_case1_status=0
+	l_case1_out=$(
+		(
+			g_option_R_recursive="tank/src"
+			g_initial_source="tank/src"
+			g_initial_source_had_trailing_slash=0
+			g_destination="backup"
+			g_option_d_delete_destination_snapshots=1
+			g_option_F_force_rollback=""
+			g_option_g_grandfather_protection=30
+			g_recursive_source_list="tank/src
+tank/src/a"
+			g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/g_ord1_src.records"
+			g_zxfer_destination_snapshot_record_cache_file="$TEST_TMPDIR/g_ord1_dst.records"
+			printf '%s\n' "tank/src@snap1	11" "tank/src/a@snap1	21" \
+				>"$g_zxfer_source_snapshot_record_cache_file"
+			printf '%s\n' "backup/src@snap1	99" "backup/src/a@snap1	21" "backup/src/a@old	29" \
+				>"$g_zxfer_destination_snapshot_record_cache_file"
+			date() {
+				printf '%s\n' "$*" >>"$l_date_log"
+				printf '%s\n' "$l_now"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "$*" >>"$l_zfs_log"
+			}
+			zxfer_throw_error() {
+				printf 'ERR|src=%s|dst=%s|stage=%s|msg=%s\n' \
+					"$g_zxfer_failure_current_source" \
+					"$g_zxfer_failure_current_destination" \
+					"$g_zxfer_failure_stage" "$1"
+				exit "${2:-1}"
+			}
+			zxfer_build_replication_iteration_list 0
+			zxfer_perform_grandfather_protection_checks
+		) 2>&1
+	) || l_case1_status=$?
+	assertEquals "Row 1 divergence must fail closed." 1 "$l_case1_status"
+	assertContains "Row 1 divergence must report row 1 context." \
+		"$l_case1_out" "ERR|src=tank/src|dst=backup/src|stage=divergence reconciliation|"
+	assertEquals "Row 1 divergence must trigger zero zfs creation queries." "" "$(cat "$l_zfs_log")"
+	assertEquals "Row 1 divergence must trigger zero date calls." "" "$(cat "$l_date_log")"
+
+	# Case 2: Row 1 -g refusal fires with row 1 context before row 2 divergence.
+	: >"$l_zfs_log"
+	l_case2_status=0
+	l_case2_out=$(
+		(
+			g_option_R_recursive="tank/src"
+			g_initial_source="tank/src"
+			g_initial_source_had_trailing_slash=0
+			g_destination="backup"
+			g_option_d_delete_destination_snapshots=1
+			g_option_F_force_rollback=""
+			g_option_g_grandfather_protection=30
+			g_recursive_source_list="tank/src
+tank/src/a"
+			g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/g_ord2_src.records"
+			g_zxfer_destination_snapshot_record_cache_file="$TEST_TMPDIR/g_ord2_dst.records"
+			printf '%s\n' "tank/src@snap1	11" "tank/src/a@snap1	21" \
+				>"$g_zxfer_source_snapshot_record_cache_file"
+			printf '%s\n' "backup/src@snap1	11" "backup/src@old	19" "backup/src/a@snap1	99" \
+				>"$g_zxfer_destination_snapshot_record_cache_file"
+			date() {
+				[ "$1" = "+%s" ] && printf '%s\n' "$l_now" || printf 'Thu Jan 1\n'
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "$*" >>"$l_zfs_log"
+				printf 'backup/src@snap1\t%s\nbackup/src@old\t%s\n' "$l_young_epoch" "$l_old_epoch"
+			}
+			zxfer_throw_usage_error() {
+				printf 'USAGE|src=%s|dst=%s|msg=%s\n' \
+					"$g_zxfer_failure_current_source" \
+					"$g_zxfer_failure_current_destination" "$1"
+				exit 2
+			}
+			zxfer_throw_error() {
+				printf 'ERR|src=%s|dst=%s|msg=%s\n' \
+					"$g_zxfer_failure_current_source" \
+					"$g_zxfer_failure_current_destination" "$1"
+				exit "${2:-1}"
+			}
+			zxfer_build_replication_iteration_list 0
+			zxfer_perform_grandfather_protection_checks
+		) 2>&1
+	) || l_case2_status=$?
+	assertEquals "Row 1 -g refusal must stop with usage status 2." 2 "$l_case2_status"
+	assertContains "Row 1 -g refusal must carry row 1 failure context." \
+		"$l_case2_out" "USAGE|src=tank/src|dst=backup/src|"
+	assertContains "Row 1 -g refusal must name row 1's protected snapshot." \
+		"$l_case2_out" "Snapshot name: backup/src@old"
+	assertNotContains "Row 2 divergence must never fire ahead of row 1's -g refusal." \
+		"$l_case2_out" "backup/src/a"
+	assertFalse "Non-converging diverged row 2 must not be queried in the batch." \
+		"grep -Fq 'backup/src/a' '$l_zfs_log'"
+
+	# Case 3: Row 1 passes -g, row 2 diverges before row 3's -g refusal fires.
+	: >"$l_zfs_log"
+	l_case3_status=0
+	l_case3_out=$(
+		(
+			g_option_R_recursive="tank/src"
+			g_initial_source="tank/src"
+			g_initial_source_had_trailing_slash=0
+			g_destination="backup"
+			g_option_d_delete_destination_snapshots=1
+			g_option_F_force_rollback=""
+			g_option_g_grandfather_protection=30
+			g_recursive_source_list="tank/src
+tank/src/a
+tank/src/b"
+			g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/g_ord3_src.records"
+			g_zxfer_destination_snapshot_record_cache_file="$TEST_TMPDIR/g_ord3_dst.records"
+			printf '%s\n' "tank/src@snap1	11" "tank/src/a@snap1	21" "tank/src/b@snap1	31" \
+				>"$g_zxfer_source_snapshot_record_cache_file"
+			printf '%s\n' "backup/src@snap1	11" "backup/src@young	19" \
+				"backup/src/a@snap1	99" \
+				"backup/src/b@snap1	31" "backup/src/b@old	39" \
+				>"$g_zxfer_destination_snapshot_record_cache_file"
+			date() {
+				[ "$1" = "+%s" ] && printf '%s\n' "$l_now" || printf 'Thu Jan 1\n'
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "$*" >>"$l_zfs_log"
+				printf 'backup/src@snap1\t%s\nbackup/src@young\t%s\nbackup/src/b@snap1\t%s\nbackup/src/b@old\t%s\n' \
+					"$l_young_epoch" "$l_young_epoch" "$l_young_epoch" "$l_old_epoch"
+			}
+			zxfer_throw_usage_error() {
+				printf 'USAGE|src=%s|dst=%s\n' \
+					"$g_zxfer_failure_current_source" "$g_zxfer_failure_current_destination"
+				exit 2
+			}
+			zxfer_throw_error() {
+				printf 'ERR|src=%s|dst=%s|stage=%s\n' \
+					"$g_zxfer_failure_current_source" \
+					"$g_zxfer_failure_current_destination" "$g_zxfer_failure_stage"
+				exit "${2:-1}"
+			}
+			zxfer_build_replication_iteration_list 0
+			zxfer_perform_grandfather_protection_checks
+		) 2>&1
+	) || l_case3_status=$?
+	assertEquals "Row 2 divergence must fail before row 3's deferred -g refusal." 1 "$l_case3_status"
+	assertEquals "Row 2 divergence must carry row 2's failure context and stage." \
+		"ERR|src=tank/src/a|dst=backup/src/a|stage=divergence reconciliation" "$l_case3_out"
+	assertEquals "Row 1's lazy batch should have issued exactly one zfs get creation." \
+		1 "$(grep -c '^get ' "$l_zfs_log")"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

@@ -44,9 +44,10 @@
 #   g_zxfer_plan_* results of zxfer_plan_dataset_snapshots, the run-scoped
 #   scratch files g_zxfer_snapshot_plan_file, g_zxfer_snapshot_recheck_file,
 #   g_zxfer_snapshot_creation_file and g_zxfer_snapshot_slice_base, immutable
-#   pass plans and source slices, and the current dataset's selection
-#   (g_zxfer_snapshot_slice_records, _key, _source, _destination), and the
-#   divergence contract
+#   pass plans, source slices and selection (g_zxfer_snapshot_slice_records,
+#   _key, _source, _destination), pass delete manifest and creation cache
+#   (g_zxfer_snapshot_delete_plans, g_zxfer_snapshot_delete_creation_cache_key,
+#   g_zxfer_snapshot_delete_creation_verdicts), and the divergence contract
 #   (g_zxfer_diverged_snapshot_count, g_zxfer_diverged_snapshot_examples,
 #   g_zxfer_diverged_converged_datasets,
 #   g_zxfer_diverged_converged_marker_source).
@@ -55,7 +56,8 @@
 #   written), g_option_d_delete_destination_snapshots,
 #   g_option_F_force_rollback, g_option_g_grandfather_protection, verbosity, and
 #   discovery's snapshot record files.
-# mutates caches: none; after a destroy g_did_delete_dest_snapshots tells
+# mutates caches: pass-scoped delete creation verdicts (cleared with slices and
+#   on session reset); after a destroy g_did_delete_dest_snapshots tells
 #   replication to mark the pass as having done work.
 # returns via stdout: creation-date display text, divergence examples and
 #   verbose transfer skip reasons; plans and destroy targets use owned state.
@@ -66,7 +68,7 @@
 # records a seed receive as the new anchor through
 # zxfer_publish_snapshot_transfer_plan.
 
-# Purpose: Forget the prepared pass and the current dataset's selection.
+# Purpose: Forget the prepared pass, delete creation cache, and current selection.
 # Usage: zxfer_forget_snapshot_slices; the planner then reads the whole
 # record files until the next preparation.
 zxfer_forget_snapshot_slices() {
@@ -74,6 +76,9 @@ zxfer_forget_snapshot_slices() {
 	g_zxfer_snapshot_slice_key=""
 	g_zxfer_snapshot_slice_source=""
 	g_zxfer_snapshot_slice_destination=""
+	g_zxfer_snapshot_delete_plans=""
+	g_zxfer_snapshot_delete_creation_cache_key=""
+	g_zxfer_snapshot_delete_creation_verdicts=""
 }
 
 # Purpose: Reset all snapshot plan, slice, delete, divergence, and scratch
@@ -179,6 +184,8 @@ function finish_group() {
 	plan_finish()
 	if (close(plan_file) != 0) failed = 1
 	if (close(source_file) != 0) failed = 1
+	if (!failed && plan_target != "")
+		print plan_file "\t" (source_count > 0 ? 1 : 0) (diverged_count > 0 ? 1 : 0) "\t" (common_name != "" ? substr(plan_target, 1, index(plan_target, "@")) common_name : "")
 }
 {
 	tab = index($0, "\t")
@@ -248,6 +255,7 @@ EOF
 		LC_ALL=C sort -t "$ZXFER_TAB" -k1,1n -k2,2n -k3,3n \
 			-o "$g_zxfer_snapshot_slice_base" "$g_zxfer_snapshot_slice_base" ||
 		l_split_status=$?
+	l_split_delete_plans=""
 	if [ "$l_split_status" -eq 0 ]; then
 		# Never restore an empty umask: ksh reads it as 0777.
 		l_split_umask=${g_zxfer_run_umask:-}
@@ -255,15 +263,16 @@ EOF
 		'' | *[!01234567]*) l_split_umask=$(umask) ;;
 		esac
 		umask 077
-		ZXFER_AWK_SLICE_BASE=$g_zxfer_snapshot_slice_base \
+		l_split_delete_plans=$(ZXFER_AWK_SLICE_BASE=$g_zxfer_snapshot_slice_base \
 			ZXFER_AWK_PLAN_VERBOSE=${g_option_v_verbose:-0} \
 			"${g_cmd_awk:-awk}" "$ZXFER_SNAPSHOT_PLAN_AWK$ZXFER_SNAPSHOT_GROUP_PLAN_AWK" \
-			"$g_zxfer_snapshot_slice_base" || l_split_status=$?
+			"$g_zxfer_snapshot_slice_base") || l_split_status=$?
 		umask "$l_split_umask"
 	fi
 	[ "$l_split_status" -eq 0 ] || return "$l_split_status"
 	# The keyed copy is spent; a memory-backed temp root need not hold it.
 	zxfer_write_runtime_artifact_file "$g_zxfer_snapshot_slice_base" "" || :
+	g_zxfer_snapshot_delete_plans=$l_split_delete_plans
 	g_zxfer_snapshot_slice_records=$l_split_source_file$ZXFER_LF$l_split_destination_file
 }
 
@@ -301,7 +310,7 @@ function plan_reset(    i) {
 	for (i in seen_on_source) delete seen_on_source[i]
 	for (i in destination_guid) delete destination_guid[i]
 	destination_count = source_count = found_common = missing_guid = diverged_count = 0
-	first = final = ""
+	first = final = common_name = plan_target = ""
 }
 function plan_record(record, role,    at, tail, tab, name, guid, next_at, identity, shared) {
 	if (missing_guid) return
@@ -345,6 +354,7 @@ function plan_record(record, role,    at, tail, tab, name, guid, next_at, identi
 	}
 	if (shared) {
 		found_common = 1
+		common_name = name
 		print "common\t" record > plan_file
 		return
 	}
@@ -354,7 +364,7 @@ function plan_record(record, role,    at, tail, tab, name, guid, next_at, identi
 	first = record
 	print "send\t" record > plan_file
 }
-function plan_finish(    i, target, at) {
+function plan_finish(    i, at) {
 	if (missing_guid) {
 		print "error\t3" > plan_file
 		return 3
@@ -363,16 +373,16 @@ function plan_finish(    i, target, at) {
 		if (!seen_on_source[destination_id[i]])
 			print "delete\t" destination_path[i] > plan_file
 	# Preserve the old reverse delete-list order in the single destroy argv.
-	target = ""
+	plan_target = ""
 	for (i = destination_count; i >= 1; i--)
 		if (!seen_on_source[destination_id[i]]) {
 			at = index(destination_path[i], "@")
-			if (target == "") target = substr(destination_path[i], 1, at)
-			else target = target ","
-			target = target substr(destination_path[i], at + 1)
+			if (plan_target == "") plan_target = substr(destination_path[i], 1, at)
+			else plan_target = plan_target ","
+			plan_target = plan_target substr(destination_path[i], at + 1)
 		}
 	print "__ZXFER_SNAPSHOT_SUMMARY__" > plan_file
-	print first ORS final ORS target > plan_file
+	print first ORS final ORS plan_target > plan_file
 	print (destination_count > 0 ? 1 : 0) ORS (source_count + 0) ORS (diverged_count + 0) > plan_file
 	print "__ZXFER_SNAPSHOT_PLAN__" > plan_file
 	return 0
@@ -608,69 +618,66 @@ zxfer_throw_grandfather_protection_error() {
             being encountered."
 }
 
-# One awk pass answers a delete plan's creation-time questions. Operands are
-# "side=creation FILE side=delete PLAN_FILE": FILE holds the creation rows
-# from `zfs get -H -o name,value -p creation`; PLAN_FILE holds tagged deletes.
-# Inputs: ENVIRON["ZXFER_AWK_CREATION_COMMON"] (the last common snapshot's
-# destination path, or empty, via ENVIRON so backslashes stay literal), now,
-# and days (-g, or empty). Run under LC_ALL=C so /^[0-9]+$/ matches ASCII
-# digits only. A missing or non-numeric epoch is unknown. Prints:
-#   1 or 0      1 keeps rollback eligible: with a common snapshot, a deleted
-#               snapshot is newer than it or a needed epoch is unknown
-#   PROTECTED   with days only, when found: the first deleted snapshot in list
-#               order that is days old or older ("path<TAB>epoch<TAB>age_days")
-#               or whose epoch is unknown ("path")
+# Answer 1 or N delete plans' creation-time checks in one awk pass.
+# Operands: "side=creation FILE side=manifest -", where stdin carries
+# "PLAN_FILE<TAB>COMMON_DEST" rows (preserving spaces and backslashes).
+# Reads ZXFER_AWK_CREATION_{NOW,DAYS} from ENVIRON under LC_ALL=C; opens <=1
+# plan at a time with checked close(). Prints per row:
+#   PLAN<TAB>COMMON<TAB>NEWER[<TAB>PATH[<TAB>EPOCH<TAB>AGE_DAYS]]
 # shellcheck disable=SC2016  # awk program should see literal $0 and ENVIRON.
 ZXFER_SNAPSHOT_DELETE_CREATION_AWK='
-BEGIN { common = ENVIRON["ZXFER_AWK_CREATION_COMMON"] }
+BEGIN { now = ENVIRON["ZXFER_AWK_CREATION_NOW"]; days = ENVIRON["ZXFER_AWK_CREATION_DAYS"] }
 side == "creation" {
 	tab = index($0, "\t")
-	if (tab > 1)
-		epoch[substr($0, 1, tab - 1)] = substr($0, tab + 1)
+	if (tab > 1) epoch[substr($0, 1, tab - 1)] = substr($0, tab + 1)
 	next
 }
-substr($0, 1, 7) == "delete\t" {
-	path = substr($0, 8)
-	if (path == "")
-		next
-	value = (path in epoch) ? epoch[path] : ""
-	known = (value ~ /^[0-9]+$/)
-	if (common != "") {
-		common_value = (common in epoch) ? epoch[common] : ""
-		if (!known || common_value !~ /^[0-9]+$/ || value + 0 > common_value + 0)
+{
+	tab = index($0, "\t")
+	if (tab < 2) exit 1
+	plan = substr($0, 1, tab - 1); common = substr($0, tab + 1)
+	newer = found = 0; protected = ""
+	common_value = (common != "" && (common in epoch)) ? epoch[common] : ""
+	common_known = (common_value ~ /^[0-9]+$/)
+	while ((rc = (getline row < plan)) > 0) {
+		if (substr(row, 1, 7) != "delete\t") continue
+		path = substr(row, 8)
+		if (path == "") continue
+		value = (path in epoch) ? epoch[path] : ""
+		known = (value ~ /^[0-9]+$/)
+		if (common != "" && (!known || !common_known || value + 0 > common_value + 0))
 			newer = 1
+		if (days == "" || found) continue
+		if (!known) { found = 1; protected = "\t" path }
+		else if (int((now - value) / 86400) >= days + 0) {
+			found = 1; protected = "\t" path "\t" value "\t" int((now - value) / 86400)
+		}
 	}
-	if (days == "" || found)
-		next
-	if (!known) {
-		found = 1
-		protected = path
-	} else if (int((now - value) / 86400) >= days + 0) {
-		found = 1
-		protected = path "\t" value "\t" int((now - value) / 86400)
-	}
-}
-END {
-	print newer + 0
-	if (found)
-		print protected
+	if ((close(plan) != 0) || rc < 0) exit 1
+	print plan "\t" common "\t" (newer + 0) protected
 }'
 
-# Purpose: Read the creation times a delete plan needs with one batched zfs
-# get, record rollback eligibility, and enforce -g.
-# Usage: zxfer_prepare_snapshot_delete_creation_state PLAN_FILE, in the main
-# shell with g_actual_dest and g_last_common_snap set for the dataset. Sets
-# g_deleted_dest_newer_snapshots to 1 when a deleted snapshot is newer than
-# the last common snapshot or a needed creation time is unknown. With -g,
-# refuses the first delete record in PLAN_FILE that is -g days old or older, or
-# whose creation time is unknown. Aborts when the query fails.
+# Purpose: Append one zfs get creation batch (<=128 paths) with stdin isolated.
+# Usage: zxfer_query_snapshot_creation_batch PATH...; no-op when empty.
+zxfer_query_snapshot_creation_batch() {
+	[ "$#" -gt 0 ] || return 0
+	zxfer_run_destination_zfs_cmd get -H -o name,value -p creation "$@" \
+		</dev/null >>"$g_zxfer_snapshot_creation_file" ||
+		zxfer_throw_error "Failed to query destination snapshot creation times while planning snapshot deletions. Review prior stderr for the transport or query error." "$?"
+}
+
+# Purpose: Query delete-plan creation times, record rollback eligibility, and enforce -g.
+# Usage: zxfer_prepare_snapshot_delete_creation_state PLAN_FILE, with
+# g_actual_dest and g_last_common_snap set. On a prepared pass, lazily batches
+# eligible pass delete plans (skipping source_count==0 without -g and
+# non-converging diverged plans) into a pass verdict cache keyed on slice
+# records, common path and -g so later rows and zxfer_delete_snaps reuse it.
 zxfer_prepare_snapshot_delete_creation_state() {
 	l_creation_plan=$1
 	l_creation_days=${g_option_g_grandfather_protection:-}
 	g_deleted_dest_newer_snapshots=0
 
-	# Rollback compares against the destination copy of the last common
-	# snapshot.
+	# Rollback compares against the destination copy of the last common snapshot.
 	l_creation_common=""
 	if [ -n "${g_actual_dest:-}" ]; then
 		l_creation_common_source=${g_last_common_snap%%"$ZXFER_TAB"*}
@@ -678,62 +685,98 @@ zxfer_prepare_snapshot_delete_creation_state() {
 		*@?*) l_creation_common=$g_actual_dest@${l_creation_common_source#*@} ;;
 		esac
 	fi
-	if [ -z "$l_creation_common$l_creation_days" ]; then
-		return 0
+	[ -n "$l_creation_common$l_creation_days" ] || return 0
+
+	l_creation_pass_key=""
+	l_creation_table=""
+	if [ -n "${g_zxfer_snapshot_slice_records:-}" ] &&
+		[ "$g_zxfer_snapshot_slice_records" = "${g_zxfer_source_snapshot_record_cache_file:-}$ZXFER_LF${g_zxfer_destination_snapshot_record_cache_file:-}" ]; then
+		l_creation_pass_key=$g_zxfer_snapshot_slice_records$ZXFER_LF$l_creation_days
+		[ "$l_creation_pass_key" != "${g_zxfer_snapshot_delete_creation_cache_key:-}" ] ||
+			l_creation_table=$ZXFER_LF${g_zxfer_snapshot_delete_creation_verdicts:-}$ZXFER_LF
 	fi
-
-	l_creation_now=""
-	if [ -n "$l_creation_days" ]; then
-		l_creation_now=$(date +%s)
-		zxfer_is_uint "$l_creation_now" ||
-			zxfer_throw_error "Failed to read the current time for grandfather protection (-g)."
-	fi
-
-	zxfer_ensure_runtime_artifact_file "${g_zxfer_snapshot_creation_file:-}" \
-		zxfer-snapshot-creation ||
-		zxfer_throw_error "Failed to allocate the snapshot creation-time file." "$?"
-	g_zxfer_snapshot_creation_file=$g_zxfer_runtime_artifact_path_result
-	zxfer_write_runtime_artifact_file "$g_zxfer_snapshot_creation_file" "" ||
-		zxfer_throw_error "Failed to reset the snapshot creation-time file." "$?"
-
-	# One zfs get per 128 paths: the common snapshot first, then each delete.
-	# ssh must not read the delete list, so zfs gets /dev/null as stdin.
+	l_creation_lookup_key=$ZXFER_LF$l_creation_plan$ZXFER_TAB$l_creation_common$ZXFER_TAB
+	l_creation_cache_batch=0
 	l_creation_status=0
-	set --
-	[ -z "$l_creation_common" ] || set -- "$l_creation_common"
-	[ -r "$l_creation_plan" ] || zxfer_throw_error "Failed to read the snapshot delete plan."
-	while IFS= read -r l_creation_record; do
-		case $l_creation_record in
-		"delete$ZXFER_TAB"*) set -- "$@" "${l_creation_record#"delete$ZXFER_TAB"}" ;;
-		*) continue ;;
-		esac
-		[ "$#" -ge 128 ] || continue
-		zxfer_run_destination_zfs_cmd get -H -o name,value -p creation "$@" \
-			</dev/null >>"$g_zxfer_snapshot_creation_file" || {
-			l_creation_status=$?
-			break
-		}
-		set --
-	done <"$l_creation_plan"
-	if [ "$l_creation_status" -eq 0 ] && [ "$#" -gt 0 ]; then
-		zxfer_run_destination_zfs_cmd get -H -o name,value -p creation "$@" \
-			</dev/null >>"$g_zxfer_snapshot_creation_file" || l_creation_status=$?
-	fi
-	if [ "$l_creation_status" -ne 0 ]; then
-		zxfer_throw_error "Failed to query destination snapshot creation times while planning snapshot deletions. Review prior stderr for the transport or query error." \
-			"$l_creation_status"
-	fi
+	case $l_creation_plan$l_creation_common in *"$ZXFER_TAB"* | *"$ZXFER_LF"*) l_creation_status=1 ;; esac
+	case $l_creation_status:$l_creation_table in
+	1:* | 0:*"$l_creation_lookup_key"*) ;;
+	*)
+		l_creation_manifest=""
+		if [ -n "$l_creation_pass_key" ] && [ -n "${g_zxfer_snapshot_delete_plans:-}" ]; then
+			while IFS="$ZXFER_TAB" read -r l_creation_row_plan l_creation_flags l_creation_row_common; do
+				[ -n "$l_creation_row_plan" ] || continue
+				case $l_creation_flags in ?1) [ -n "${g_option_F_force_rollback:-}" ] || continue ;; esac
+				[ -n "$l_creation_days" ] || case $l_creation_flags:$l_creation_row_common in 0?:* | *:) continue ;; esac
+				l_creation_manifest=${l_creation_manifest:+$l_creation_manifest$ZXFER_LF}$l_creation_row_plan$ZXFER_TAB$l_creation_row_common
+				[ "$l_creation_row_plan$ZXFER_TAB$l_creation_row_common" != "$l_creation_plan$ZXFER_TAB$l_creation_common" ] ||
+					l_creation_cache_batch=1
+			done <<EOF
+$g_zxfer_snapshot_delete_plans
+EOF
+		fi
+		[ "$l_creation_cache_batch" -eq 1 ] ||
+			l_creation_manifest=$l_creation_plan$ZXFER_TAB$l_creation_common
 
-	l_creation_verdict=$(
-		LC_ALL=C
-		ZXFER_AWK_CREATION_COMMON=$l_creation_common
-		export LC_ALL ZXFER_AWK_CREATION_COMMON
-		"${g_cmd_awk:-awk}" \
-			-v now="$l_creation_now" -v days="$l_creation_days" \
-			"$ZXFER_SNAPSHOT_DELETE_CREATION_AWK" \
-			side=creation "$g_zxfer_snapshot_creation_file" side=delete "$l_creation_plan"
-	) || l_creation_status=$?
-	g_deleted_dest_newer_snapshots=${l_creation_verdict%%"$ZXFER_LF"*}
+		l_creation_now=""
+		if [ -n "$l_creation_days" ]; then
+			l_creation_now=$(date +%s)
+			zxfer_is_uint "$l_creation_now" ||
+				zxfer_throw_error "Failed to read the current time for grandfather protection (-g)."
+		fi
+
+		zxfer_ensure_runtime_artifact_file "${g_zxfer_snapshot_creation_file:-}" \
+			zxfer-snapshot-creation ||
+			zxfer_throw_error "Failed to allocate the snapshot creation-time file." "$?"
+		g_zxfer_snapshot_creation_file=$g_zxfer_runtime_artifact_path_result
+		zxfer_write_runtime_artifact_file "$g_zxfer_snapshot_creation_file" "" ||
+			zxfer_throw_error "Failed to reset the snapshot creation-time file." "$?"
+
+		# One zfs get per 128 paths: each plan's common snapshot then its deletes.
+		set --
+		while IFS="$ZXFER_TAB" read -r l_creation_row_plan l_creation_row_common; do
+			[ -r "$l_creation_row_plan" ] || zxfer_throw_error "Failed to read the snapshot delete plan."
+			[ -z "$l_creation_row_common" ] || set -- "$@" "$l_creation_row_common"
+			if [ "$#" -ge 128 ]; then
+				zxfer_query_snapshot_creation_batch "$@"
+				set --
+			fi
+			while IFS= read -r l_creation_record; do
+				case $l_creation_record in
+				"delete$ZXFER_TAB"*) set -- "$@" "${l_creation_record#"delete$ZXFER_TAB"}" ;;
+				*) continue ;;
+				esac
+				[ "$#" -ge 128 ] || continue
+				zxfer_query_snapshot_creation_batch "$@"
+				set --
+			done <"$l_creation_row_plan"
+		done <<EOF
+$l_creation_manifest
+EOF
+		zxfer_query_snapshot_creation_batch "$@"
+
+		l_creation_batch_output=$(
+			LC_ALL=C \
+				ZXFER_AWK_CREATION_NOW=$l_creation_now \
+				ZXFER_AWK_CREATION_DAYS=$l_creation_days \
+				"${g_cmd_awk:-awk}" "$ZXFER_SNAPSHOT_DELETE_CREATION_AWK" \
+				side=creation "$g_zxfer_snapshot_creation_file" side=manifest - <<EOF
+$l_creation_manifest
+EOF
+		) || l_creation_status=$?
+		[ "$l_creation_status" -ne 0 ] ||
+			l_creation_table=$ZXFER_LF$l_creation_batch_output$ZXFER_LF
+		;;
+	esac
+
+	l_creation_verdict=""
+	case $l_creation_table in
+	*"$l_creation_lookup_key"*)
+		l_creation_verdict=${l_creation_table#*"$l_creation_lookup_key"}
+		l_creation_verdict=${l_creation_verdict%%"$ZXFER_LF"*}
+		;;
+	esac
+	g_deleted_dest_newer_snapshots=${l_creation_verdict%%"$ZXFER_TAB"*}
 	case $l_creation_status:$g_deleted_dest_newer_snapshots in
 	0:0 | 0:1) ;;
 	*)
@@ -743,17 +786,17 @@ zxfer_prepare_snapshot_delete_creation_state() {
 			"$l_creation_status"
 		;;
 	esac
-
-	# -g: the awk printed the first protected snapshot, if any.
-	case $l_creation_verdict in
-	*"$ZXFER_LF"*) ;;
-	*) return 0 ;;
-	esac
-	l_creation_protected=${l_creation_verdict#*"$ZXFER_LF"}
-	l_creation_path=${l_creation_protected%%"$ZXFER_TAB"*}
-	if [ "$l_creation_path" = "$l_creation_protected" ]; then
-		zxfer_throw_error "Couldn't determine creation time for destination snapshot $l_creation_path."
+	if [ "$l_creation_cache_batch" -eq 1 ]; then
+		g_zxfer_snapshot_delete_creation_cache_key=$l_creation_pass_key
+		g_zxfer_snapshot_delete_creation_verdicts=$l_creation_batch_output
 	fi
+
+	# -g: the verdict appends the first protected snapshot, if any.
+	case $l_creation_verdict in *"$ZXFER_TAB"*) ;; *) return 0 ;; esac
+	l_creation_protected=${l_creation_verdict#*"$ZXFER_TAB"}
+	l_creation_path=${l_creation_protected%%"$ZXFER_TAB"*}
+	[ "$l_creation_path" != "$l_creation_protected" ] ||
+		zxfer_throw_error "Couldn't determine creation time for destination snapshot $l_creation_path."
 	l_creation_protected=${l_creation_protected#*"$ZXFER_TAB"}
 	zxfer_throw_grandfather_protection_error "$l_creation_path" \
 		"${l_creation_protected%%"$ZXFER_TAB"*}" "${l_creation_protected#*"$ZXFER_TAB"}"

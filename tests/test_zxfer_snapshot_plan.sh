@@ -1198,5 +1198,258 @@ THROW:7:Failed to re-verify source snapshots for [tank/fail] before deleting all
 		"$(cat "$TEST_TMPDIR/delete_safe_v.stderr")" "WARNING: skipping destination snapshot deletion for [tank/nonempty]"
 }
 
+test_delete_creation_batch_reuses_pass_verdicts_across_datasets_and_invalidates_on_reset() {
+	l_now=$(date +%s)
+	l_old_epoch=$((l_now - 5 * 86400))
+	l_common_epoch=$((l_now - 3 * 86400))
+	l_newer_epoch=$((l_now - 1 * 86400))
+	l_zfs_log="$TEST_TMPDIR/batch_reuse_zfs.log"
+	l_date_log="$TEST_TMPDIR/batch_reuse_date.log"
+	l_awk_log="$TEST_TMPDIR/batch_reuse_awk.log"
+	l_awk_wrap="$TEST_TMPDIR/batch_reuse_awk.sh"
+	l_real_awk=${g_cmd_awk:-awk}
+	cat >"$l_awk_wrap" <<EOF
+#!/bin/sh
+printf 'awk\n' >>"$l_awk_log"
+exec "$l_real_awk" "\$@"
+EOF
+	chmod 755 "$l_awk_wrap"
+
+	l_out=$(
+		(
+			: >"$l_zfs_log"
+			: >"$l_date_log"
+			: >"$l_awk_log"
+			g_initial_source="tank/root"
+			g_initial_source_had_trailing_slash=0
+			g_destination="backup"
+			g_option_d_delete_destination_snapshots=1
+			g_option_g_grandfather_protection=30
+			stage_plan_record_files 'tank/root/my data@common	11
+tank/root/a\tb@common	21' 'backup/root/my data@common	11
+backup/root/my data@old	19
+backup/root/a\tb@common	21
+backup/root/a\tb@newer	29'
+			zxfer_prepare_snapshot_plans '1	tank/root/my data
+2	tank/root/a\tb'
+
+			g_cmd_awk=$l_awk_wrap
+			date() {
+				printf '%s\n' "$*" >>"$l_date_log"
+				printf '%s\n' "$l_now"
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "$*" >>"$l_zfs_log"
+				[ "$1" = get ] || return 0
+				printf 'backup/root/my data@common\t%s\nbackup/root/my data@old\t%s\nbackup/root/a\\tb@common\t%s\nbackup/root/a\\tb@newer\t%s\n' \
+					"$l_common_epoch" "$l_old_epoch" "$l_common_epoch" "$l_newer_epoch"
+			}
+
+			# Pre-pass: first delete triggers the batch; second reuses cached verdict.
+			g_actual_dest="backup/root/my data"
+			zxfer_select_snapshot_plan 1 "tank/root/my data"
+			zxfer_inspect_delete_snap 0 "tank/root/my data"
+			zxfer_prepare_snapshot_delete_creation_state "$g_zxfer_plan_file"
+			printf 'pre1=%s\n' "$g_deleted_dest_newer_snapshots"
+
+			g_actual_dest='backup/root/a\tb'
+			zxfer_select_snapshot_plan 2 'tank/root/a\tb'
+			zxfer_inspect_delete_snap 0 'tank/root/a\tb'
+			zxfer_prepare_snapshot_delete_creation_state "$g_zxfer_plan_file"
+			printf 'pre2=%s\n' "$g_deleted_dest_newer_snapshots"
+
+			# Main pass: zxfer_delete_snaps reuses pre-pass verdicts with zero repeat queries.
+			g_actual_dest="backup/root/my data"
+			zxfer_select_snapshot_plan 1 "tank/root/my data"
+			zxfer_inspect_delete_snap 1 "tank/root/my data"
+			printf 'del1=%s\n' "$g_deleted_dest_newer_snapshots"
+
+			g_actual_dest='backup/root/a\tb'
+			zxfer_select_snapshot_plan 2 'tank/root/a\tb'
+			zxfer_inspect_delete_snap 1 'tank/root/a\tb'
+			printf 'del2=%s\n' "$g_deleted_dest_newer_snapshots"
+
+			printf 'counts_pass=%s|%s|%s\n' \
+				"$(grep -c '^get ' "$l_zfs_log")" \
+				"$(wc -l <"$l_date_log" | tr -d ' ')" \
+				"$(wc -l <"$l_awk_log" | tr -d ' ')"
+
+			# Changing -g invalidates the cache key and triggers one fresh batch.
+			g_option_g_grandfather_protection=10
+			zxfer_prepare_snapshot_delete_creation_state "$g_zxfer_plan_file"
+			printf 'after_g_change=%s|%s\n' \
+				"$(grep -c '^get ' "$l_zfs_log")" \
+				"$(wc -l <"$l_date_log" | tr -d ' ')"
+
+			# zxfer_forget_snapshot_slices clears manifest and verdict cache.
+			zxfer_forget_snapshot_slices
+			printf 'forgotten=<%s|%s|%s>\n' \
+				"$g_zxfer_snapshot_delete_plans" \
+				"$g_zxfer_snapshot_delete_creation_cache_key" \
+				"$g_zxfer_snapshot_delete_creation_verdicts"
+			zxfer_prepare_snapshot_delete_creation_state "$g_zxfer_plan_file"
+			printf 'after_forget=%s\n' "$(grep -c '^get ' "$l_zfs_log")"
+
+			# zxfer_reset_snapshot_plan_session_state clears cache state too.
+			g_zxfer_snapshot_delete_plans="stale"
+			g_zxfer_snapshot_delete_creation_cache_key="stale"
+			g_zxfer_snapshot_delete_creation_verdicts="stale"
+			zxfer_reset_snapshot_plan_session_state
+			printf 'reset=<%s|%s|%s>\n' \
+				"$g_zxfer_snapshot_delete_plans" \
+				"$g_zxfer_snapshot_delete_creation_cache_key" \
+				"$g_zxfer_snapshot_delete_creation_verdicts"
+		)
+	)
+	l_run_status=$?
+	assertEquals "Batched creation reuse and invalidation should succeed." 0 "$l_run_status"
+	assertEquals "Pre-pass and delete pass should share one batch and clear on -g/forget/reset." \
+		"pre1=0
+pre2=1
+del1=0
+del2=1
+counts_pass=1|1|1
+after_g_change=2|2
+forgotten=<||>
+after_forget=3
+reset=<||>" "$l_out"
+	assertTrue "Batched zfs get should carry literal spaces and backslashes across plans." \
+		"grep -Fxq 'get -H -o name,value -p creation backup/root/my data@common backup/root/my data@old backup/root/a\tb@common backup/root/a\tb@newer' '$l_zfs_log'"
+	assertEquals "Both datasets should be destroyed in the main pass." \
+		2 "$(grep -c '^destroy ' "$l_zfs_log")"
+}
+
+test_non_grandfather_delete_batch_excludes_empty_source_plans_for_live_safety_recheck() {
+	l_zfs_log="$TEST_TMPDIR/non_g_batch_zfs.log"
+	l_recheck_log="$TEST_TMPDIR/non_g_batch_recheck.log"
+
+	l_out=$(
+		(
+			: >"$l_zfs_log"
+			: >"$l_recheck_log"
+			g_initial_source="tank/src"
+			g_initial_source_had_trailing_slash=0
+			g_destination="backup"
+			g_option_d_delete_destination_snapshots=1
+			g_option_F_force_rollback="-F"
+			g_option_g_grandfather_protection=""
+			stage_plan_record_files "tank/src/a@snap2	12
+tank/src/a@snap1	11
+tank/src/b@snap2	22
+tank/src/b@snap1	21" "backup/src/a@snap2	12
+backup/src/a@extraA	19
+backup/src/empty@orphan	39
+backup/src/b@snap2	22
+backup/src/b@extraB	29"
+			zxfer_prepare_snapshot_plans "1	tank/src/a
+2	tank/src/empty
+3	tank/src/b"
+
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "$*" >>"$l_zfs_log"
+				[ "$1" = get ] || return 0
+				printf 'backup/src/a@snap2\t200\nbackup/src/a@extraA\t300\nbackup/src/b@snap2\t200\nbackup/src/b@extraB\t100\n'
+			}
+			zxfer_run_zfs_cmd_capturing_stderr() {
+				printf '%s\n' "$*" >>"$l_recheck_log"
+				printf 'tank/src/empty@live\n'
+			}
+
+			g_actual_dest="backup/src/a"
+			zxfer_select_snapshot_plan 1 "tank/src/a"
+			zxfer_inspect_delete_snap 1 "tank/src/a"
+			printf 'a=%s:%s\n' "$g_did_delete_dest_snapshots" "$g_deleted_dest_newer_snapshots"
+
+			g_actual_dest="backup/src/empty"
+			zxfer_select_snapshot_plan 2 "tank/src/empty"
+			zxfer_inspect_delete_snap 1 "tank/src/empty" 2>"$TEST_TMPDIR/non_g_empty.stderr"
+			printf 'empty=%s:%s\n' "$g_did_delete_dest_snapshots" "$g_deleted_dest_newer_snapshots"
+
+			g_actual_dest="backup/src/b"
+			zxfer_select_snapshot_plan 3 "tank/src/b"
+			zxfer_inspect_delete_snap 1 "tank/src/b"
+			printf 'b=%s:%s\n' "$g_did_delete_dest_snapshots" "$g_deleted_dest_newer_snapshots"
+		)
+	)
+	l_run_status=$?
+	assertEquals "Multi-dataset non--g delete batch should succeed." 0 "$l_run_status"
+	assertEquals "Non-empty datasets should delete with exact newer flags while empty-source skips after live recheck." \
+		"a=1:1
+empty=0:0
+b=1:0" "$l_out"
+	assertEquals "Exactly one batched creation query should cover non-empty-source plans only." \
+		"get -H -o name,value -p creation backup/src/a@snap2 backup/src/a@extraA backup/src/b@snap2 backup/src/b@extraB" \
+		"$(grep '^get ' "$l_zfs_log")"
+	assertEquals "The empty-source plan must run live source verification before any delete or creation query." \
+		"source merge list -H -d 1 -o name -t snapshot tank/src/empty" \
+		"$(cat "$l_recheck_log")"
+	assertContains "Skipping the empty-source delete must emit the stale-cache warning." \
+		"$(cat "$TEST_TMPDIR/non_g_empty.stderr")" \
+		"WARNING: skipping destination snapshot deletion for [tank/src/empty]"
+	assertFalse "The empty-source dataset's snapshot must not be destroyed when live recheck finds source snapshots." \
+		"grep -Fq 'backup/src/empty@orphan' '$l_zfs_log'"
+}
+
+test_delete_creation_batch_flushes_at_128_paths_across_multiple_plans() {
+	l_log="$TEST_TMPDIR/multi_plan_128.log"
+	l_out=$(
+		(
+			: >"$l_log"
+			g_initial_source="tank/src"
+			g_initial_source_had_trailing_slash=0
+			g_destination="backup"
+			g_option_d_delete_destination_snapshots=1
+			g_option_g_grandfather_protection=""
+			l_dest_rows=$("${g_cmd_awk:-awk}" 'BEGIN {
+				print "backup/src/p1@common\t1"
+				for (i = 1; i <= 126; i++) printf "backup/src/p1@d%d\t%d\n", i, i + 100
+				print "backup/src/p2@common\t2"
+				print "backup/src/p2@d1\t500"
+			}')
+			stage_plan_record_files "tank/src/p1@common	1
+tank/src/p2@common	2" "$l_dest_rows"
+			zxfer_prepare_snapshot_plans "1	tank/src/p1
+2	tank/src/p2"
+
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "$#" >>"$l_log"
+				shift 6
+				# Avoid case inside $(...) for macOS bash 3.2 compatibility.
+				for l_p in "$@"; do
+					if [ "$l_p" = "backup/src/p2@d1" ]; then
+						printf '%s\t300\n' "$l_p"
+					elif [ "${l_p%"@common"}" != "$l_p" ]; then
+						printf '%s\t200\n' "$l_p"
+					else
+						printf '%s\t100\n' "$l_p"
+					fi
+				done
+			}
+
+			g_actual_dest="backup/src/p1"
+			zxfer_select_snapshot_plan 1 "tank/src/p1"
+			zxfer_inspect_delete_snap 0 "tank/src/p1"
+			zxfer_prepare_snapshot_delete_creation_state "$g_zxfer_plan_file"
+			printf 'p1=%s\n' "$g_deleted_dest_newer_snapshots"
+
+			g_actual_dest="backup/src/p2"
+			zxfer_select_snapshot_plan 2 "tank/src/p2"
+			zxfer_inspect_delete_snap 0 "tank/src/p2"
+			zxfer_prepare_snapshot_delete_creation_state "$g_zxfer_plan_file"
+			printf 'p2=%s\n' "$g_deleted_dest_newer_snapshots"
+		)
+	)
+	l_run_status=$?
+	assertEquals "Cross-plan 128-path batching should succeed." 0 "$l_run_status"
+	# Plan 1 has 127 paths (common + 126 deletes); Plan 2's common completes 128,
+	# leaving Plan 2's delete as a 1-path trailing batch.
+	assertEquals "Batch sizes must cap at 128 paths (+ 6 zfs args) even when a second plan's common hits 128." \
+		"134
+7" "$(cat "$l_log")"
+	assertEquals "Both plans should get exact rollback eligibility from the split batches." \
+		"p1=0
+p2=1" "$l_out"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"
