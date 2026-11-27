@@ -645,17 +645,17 @@ EOF
 	done
 }
 
-# Matching roughly 640 kB lists exceed exec-size limits; only file paths cross
-# the environment. An ordinary no-op retains neither payload nor diagnostic rows.
+# Roughly 640 kB lists exceed exec-size limits; only file paths cross the
+# environment. A 1-property diff keeps the AWK staging path exercised.
 test_property_planners_accept_large_lists_without_exporting_values() {
 	l_large_list=$(awk 'BEGIN {
 		for (i = 0; i < 8000; i++) value = value "x"
 		for (i = 0; i < 80; i++) printf "%suser:p%d=%s=local", (i ? "," : ""), i, value
 	}')
-	zxfer_property_test_plan 1 "$l_large_list" "" 1 filesystem "" "" "" "$l_large_list"
+	zxfer_property_test_plan 1 "$l_large_list,compression=lz4=local" "" 1 filesystem "" "" "" "$l_large_list,compression=off=local"
 	l_large_input_file=$g_zxfer_property_input_file
-	assertEquals '0 0' "$g_zxfer_property_plan_summary_result"
-	assertEquals __ZXFER_PROPERTY_ACTIONS__ "$(cat "$g_zxfer_property_plan_file")"
+	assertEquals '1 0' "$g_zxfer_property_plan_summary_result"
+	assertEquals "set${ZXFER_TAB}compression=lz4=local=${ZXFER_LF}__ZXFER_PROPERTY_ACTIONS__" "$(cat "$g_zxfer_property_plan_file")"
 	zxfer_property_test_write_actions inherit "compression=lz4" "" "compression=lz4=inherited"
 	zxfer_resolve_parent_property_plan "$g_zxfer_property_plan_file" "$l_large_list,compression=lz4=local" "" apply
 	assertEquals "Large parent reconciliation reuses the staged input." "$l_large_input_file" "$g_zxfer_property_input_file"
@@ -664,7 +664,7 @@ test_property_planners_accept_large_lists_without_exporting_values() {
 
 test_property_input_allocation_and_write_failures_publish_no_plan() {
 	(
-		zxfer_get_temp_file() { return 37; }
+		zxfer_ensure_runtime_artifact_file() { return 37; }
 		zxfer_throw_error() {
 			printf '%s|%s|<%s>\n' "$1" "$2" "$g_zxfer_property_plan_summary_result"
 			exit "$2"
@@ -676,7 +676,9 @@ test_property_input_allocation_and_write_failures_publish_no_plan() {
 	assertEquals 37 "$l_plan_status"
 	assertEquals "Failed to stage property planner input.|37|<>" "$(cat "$TEST_TMPDIR/plan-allocation.out")"
 	(
-		g_zxfer_property_input_file=$TEST_TMPDIR
+		g_zxfer_property_input_file=$g_zxfer_run_tmp_root
+		# Keep this fault at the input writer rather than allocating a new path.
+		zxfer_ensure_runtime_artifact_file() { g_zxfer_runtime_artifact_path_result=$1; }
 		zxfer_throw_error() {
 			printf '%s|%s|<%s>\n' "$1" "$2" "$g_zxfer_property_plan_summary_result"
 			exit "$2"
@@ -687,6 +689,18 @@ test_property_input_allocation_and_write_failures_publish_no_plan() {
 	l_plan_status=$?
 	assertEquals 1 "$l_plan_status"
 	assertEquals "Failed to stage property planner input.|1|<>" "$(cat "$TEST_TMPDIR/plan-write.out")"
+
+	l_outside_input=$TEST_TMPDIR/outside-property-input
+	printf 'untouched\n' >"$l_outside_input"
+	g_zxfer_property_input_file=$l_outside_input
+	zxfer_stage_property_inputs "source${ZXFER_TAB}compression=lz4=local"
+	l_plan_status=$?
+	assertEquals "Outside paths are replaced with a run-root file." 0 "$l_plan_status"
+	case $g_zxfer_property_input_file in
+	"$g_zxfer_run_tmp_root"/*) ;;
+	*) fail "Input file escaped run root: $g_zxfer_property_input_file" ;;
+	esac
+	assertEquals "Outside file stays untouched." "untouched" "$(cat "$l_outside_input")"
 }
 
 test_property_planner_rejects_incomplete_or_malformed_input() {
@@ -770,7 +784,10 @@ test_property_filter_policy_control_characters_do_not_corrupt_input() {
 test_property_plan_output_allocation_and_write_failures_clear_publication() {
 	zxfer_stage_property_inputs "source${ZXFER_TAB}"
 	(
-		zxfer_ensure_runtime_artifact_file() { return 43; }
+		zxfer_ensure_runtime_artifact_file() {
+			[ "$2" != property-plan ] || return 43
+			g_zxfer_runtime_artifact_path_result=$1
+		}
 		zxfer_throw_error() {
 			printf '%s|%s|<%s>\n' "$1" "$2" "$g_zxfer_property_plan_summary_result"
 			exit "$2"
@@ -1181,6 +1198,90 @@ Failed to reconcile inherited child properties for destination [backup/dst/child
 	done
 }
 
+test_property_plan_identical_fast_path_skips_awk_and_fails_closed_on_write_errors() {
+	l_identical_list='compression=lz4=local,atime=off=inherited,quota=none=default'
+	(
+		g_cmd_awk="$TEST_TMPDIR/missing-awk"
+		g_option_P_transfer_property=1
+		g_option_o_override_property=""
+		g_zxfer_property_override_policy=""
+		g_option_e_restore_property_mode=0
+		g_option_V_very_verbose=0
+		zxfer_plan_property_changes 1 1 filesystem "$l_identical_list" "$l_identical_list" ""
+		l_fast_status=$?
+		printf 'status=%s summary=%s plan=%s\n' "$l_fast_status" \
+			"$g_zxfer_property_plan_summary_result" "$(cat "$g_zxfer_property_plan_file")"
+	) >"$TEST_TMPDIR/plan-fast-path.out"
+	assertEquals "Identical source and destination lists bypass AWK when all 7 gates hold." \
+		"status=0 summary=0 0 plan=__ZXFER_PROPERTY_ACTIONS__" "$(cat "$TEST_TMPDIR/plan-fast-path.out")"
+
+	# Turning off any of the 7 gates must still route through AWK.
+	for l_gate in missing_dest transfer_off override_opt override_policy unsupported restore very_verbose diff_lists; do
+		(
+			g_cmd_awk="$TEST_TMPDIR/missing-awk"
+			g_option_P_transfer_property=1
+			g_option_o_override_property=""
+			g_zxfer_property_override_policy=""
+			g_option_e_restore_property_mode=0
+			g_option_V_very_verbose=0
+			l_gate_exists=1
+			l_gate_dest=$l_identical_list
+			l_gate_unsupported=""
+			case $l_gate in
+			missing_dest) l_gate_exists=0 ;;
+			transfer_off) g_option_P_transfer_property=0 ;;
+			override_opt) g_option_o_override_property="compression=gzip" ;;
+			override_policy) g_zxfer_property_override_policy="compression=gzip=override" ;;
+			unsupported) l_gate_unsupported="overlay" ;;
+			restore) g_option_e_restore_property_mode=1 ;;
+			very_verbose) g_option_V_very_verbose=1 ;;
+			diff_lists) l_gate_dest='compression=off=local' ;;
+			esac
+			zxfer_throw_error() { exit 29; }
+			zxfer_plan_property_changes 1 "$l_gate_exists" filesystem "$l_identical_list" "$l_gate_dest" "$l_gate_unsupported" 2>/dev/null
+		)
+		assertEquals "Fast path must not trigger when gate [$l_gate] fails." 29 "$?"
+	done
+
+	# Allocation and write failures on the fast path still fail closed and clear summary.
+	(
+		g_cmd_awk="$TEST_TMPDIR/missing-awk"
+		g_option_P_transfer_property=1
+		g_option_o_override_property=""
+		g_zxfer_property_override_policy=""
+		g_option_e_restore_property_mode=0
+		g_option_V_very_verbose=0
+		zxfer_ensure_runtime_artifact_file() { return 41; }
+		zxfer_throw_error() {
+			printf '%s|%s|<%s>\n' "$1" "$2" "$g_zxfer_property_plan_summary_result"
+			exit "$2"
+		}
+		g_zxfer_property_plan_summary_result=stale
+		zxfer_plan_property_changes 1 1 filesystem "$l_identical_list" "$l_identical_list" ""
+	) >"$TEST_TMPDIR/plan-fast-alloc.out"
+	assertEquals 41 "$?"
+	assertEquals 'Failed to plan dataset properties.|41|<>' "$(cat "$TEST_TMPDIR/plan-fast-alloc.out")"
+
+	(
+		g_cmd_awk="$TEST_TMPDIR/missing-awk"
+		g_option_P_transfer_property=1
+		g_option_o_override_property=""
+		g_zxfer_property_override_policy=""
+		g_option_e_restore_property_mode=0
+		g_option_V_very_verbose=0
+		g_zxfer_property_plan_file=$g_zxfer_run_tmp_root
+		zxfer_ensure_runtime_artifact_file() { g_zxfer_runtime_artifact_path_result=$1; }
+		zxfer_throw_error() {
+			printf '%s|%s|<%s>\n' "$1" "$2" "$g_zxfer_property_plan_summary_result"
+			exit "$2"
+		}
+		g_zxfer_property_plan_summary_result=stale
+		zxfer_plan_property_changes 1 1 filesystem "$l_identical_list" "$l_identical_list" ""
+	) >"$TEST_TMPDIR/plan-fast-write.out"
+	assertEquals 1 "$?"
+	assertEquals 'Failed to plan dataset properties.|1|<>' "$(cat "$TEST_TMPDIR/plan-fast-write.out")"
+}
+
 # A staged-file read failure belongs to the operation: never continue into
 # capture or the next dataset when the consumer cannot read its retained file.
 test_property_owner_stops_before_capture_when_the_action_file_disappears() {
@@ -1202,6 +1303,22 @@ test_property_owner_stops_before_capture_when_the_action_file_disappears() {
 	l_owner_test_status=$?
 	assertEquals 1 "$l_owner_test_status"
 	assertEquals 'Failed to read dataset property plan.|1' "$(cat "$TEST_TMPDIR/missing-action-file.out")"
+}
+
+test_property_owner_skips_plan_execution_on_zero_actions_when_plan_file_is_readable() {
+	(
+		g_option_P_transfer_property=1
+		zxfer_property_destination_exists() { return 0; }
+		zxfer_load_normalized_dataset_properties() {
+			g_zxfer_normalized_dataset_properties='type=volume=-,volsize=8192=-,compression=lz4=local'
+		}
+		zxfer_execute_property_plan() { printf 'unexpected execute\n'; }
+		zxfer_capture_backup_metadata_for_completed_transfer() { printf 'captured=%s\n' "$1"; }
+		zxfer_transfer_properties tank/src
+	) >"$TEST_TMPDIR/skip-zero-action-exec.out"
+	l_owner_test_status=$?
+	assertEquals 0 "$l_owner_test_status"
+	assertEquals 'captured=tank/src' "$(cat "$TEST_TMPDIR/skip-zero-action-exec.out")"
 }
 
 # shellcheck source=tests/shunit2/shunit2

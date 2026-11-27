@@ -498,16 +498,22 @@ test_metadata_view_preserves_format_priority_and_clears_failed_publications() {
 		output=$(
 			(
 				g_zxfer_backup_view_result=stale
+				g_zxfer_backup_view_dir_result=stale
+				g_zxfer_backup_view_source_root_result=stale
+				g_zxfer_backup_view_destination_root_result=stale
+				g_zxfer_backup_view_index_result=stale
 				zxfer_create_private_temp_dir() { return 17; }
 				if [ "$kind" = missing-row ]; then
 					zxfer_load_backup_metadata_view "$staging" tank/src/missing backup/dst/src/missing
 				else
 					zxfer_load_backup_metadata_view "$staging" tank/src backup/dst/src
 				fi
-				printf '%s <%s>' "$?" "$g_zxfer_backup_view_result"
+				printf '%s <%s|%s|%s|%s|%s>' "$?" "$g_zxfer_backup_view_result" \
+					"$g_zxfer_backup_view_dir_result" "$g_zxfer_backup_view_source_root_result" \
+					"$g_zxfer_backup_view_destination_root_result" "$g_zxfer_backup_view_index_result"
 			)
 		)
-		assertEquals "Format failures precede row-directory allocation [$kind]." "$expected <>" "$output"
+		assertEquals "Format failures precede row-directory allocation [$kind]." "$expected <||||>" "$output"
 	done
 
 	zxfer_write_runtime_artifact_file "$staging" "$valid"
@@ -524,11 +530,69 @@ test_metadata_view_preserves_format_priority_and_clears_failed_publications() {
 				fi
 				command awk "$@"
 			}
+			g_zxfer_backup_view_result=stale
+			g_zxfer_backup_view_dir_result=stale
+			g_zxfer_backup_view_source_root_result=stale
+			g_zxfer_backup_view_destination_root_result=stale
+			g_zxfer_backup_view_index_result=stale
 			zxfer_load_backup_metadata_view "$staging" tank/src backup/dst/src
-			printf '%s <%s>' "$?" "$g_zxfer_backup_view_result"
+			printf '%s <%s|%s|%s|%s|%s>' "$?" "$g_zxfer_backup_view_result" \
+				"$g_zxfer_backup_view_dir_result" "$g_zxfer_backup_view_source_root_result" \
+				"$g_zxfer_backup_view_destination_root_result" "$g_zxfer_backup_view_index_result"
 		)
 	)
-	assertEquals "A partial row write publishes no view." '5 <>' "$output"
+	assertEquals "A partial row write publishes no view." '5 <||||>' "$output"
+}
+
+test_metadata_view_publishes_named_fields_and_preserves_backslash_roots() {
+	zxfer_prepare_property_read_files || return
+	zxfer_create_runtime_artifact_file metadata-named
+	staging=$g_zxfer_runtime_artifact_path_result
+
+	# G2: backslashes in source/destination names travel via ENVIRON, never awk -v.
+	l_bs_src='tank/a\nb'
+	l_bs_dst='backup/c\td'
+	l_bs_contents="$ZXFER_BACKUP_METADATA_HEADER_LINE
+#format_version:2
+#source_root:$l_bs_src
+#destination_root:$l_bs_dst
+$(zxfer_test_backup_metadata_row '.' 'compression=lz4=local')
+$(zxfer_test_backup_metadata_row 'sub\x' 'atime=off=local')"
+	zxfer_write_runtime_artifact_file "$staging" "$l_bs_contents"
+	zxfer_load_backup_metadata_view "$staging" "$l_bs_src/sub\\x" "$l_bs_dst/sub\\x"
+	l_status=$?
+	assertEquals "Backslash dataset roots validate cleanly via ENVIRON." 0 "$l_status"
+	assertNotNull "Named view dir is published." "$g_zxfer_backup_view_dir_result"
+	assertEquals "Named source root keeps literal backslashes." "$l_bs_src" "$g_zxfer_backup_view_source_root_result"
+	assertEquals "Named destination root keeps literal backslashes." "$l_bs_dst" "$g_zxfer_backup_view_destination_root_result"
+	assertEquals "Named index holds raw newline-joined rows without surrounding LF." \
+		"r1${ZXFER_TAB}.${ZXFER_LF}r2${ZXFER_TAB}sub\\x" "$g_zxfer_backup_view_index_result"
+	assertEquals "Combined view result stays backward-compatible." \
+		"${g_zxfer_backup_view_dir_result}${ZXFER_LF}${l_bs_src}${ZXFER_LF}${l_bs_dst}${ZXFER_LF}${g_zxfer_backup_view_index_result}${ZXFER_LF}" \
+		"$g_zxfer_backup_view_result"
+
+	# An empty alias publishes an empty index string (status 8) with no stray LF.
+	l_empty_alias="$ZXFER_BACKUP_METADATA_HEADER_LINE
+#format_version:2
+#source_root:tank/src
+#destination_root:tank/src"
+	zxfer_write_runtime_artifact_file "$staging" "$l_empty_alias"
+	zxfer_load_backup_metadata_view "$staging" tank/src tank/src tank/src
+	l_status=$?
+	assertEquals "Empty alias returns status 8 with a valid view." 8 "$l_status"
+	assertEquals "Empty alias publishes empty index string." "" "$g_zxfer_backup_view_index_result"
+	assertEquals "tank/src" "$g_zxfer_backup_view_source_root_result"
+	assertEquals "tank/src" "$g_zxfer_backup_view_destination_root_result"
+
+	zxfer_reset_backup_metadata_state
+	assertEquals "Session reset clears every backup view result global." "||||" \
+		"$g_zxfer_backup_view_result|$g_zxfer_backup_view_dir_result|$g_zxfer_backup_view_source_root_result|$g_zxfer_backup_view_destination_root_result|$g_zxfer_backup_view_index_result"
+
+	# P7b-heredoc: validating literal backslashes and shell syntax keeps bytes untouched.
+	# shellcheck disable=SC2016  # Literal shell syntax must not expand here.
+	l_literal_row=$(zxfer_test_backup_metadata_row "." 'user:note=a\nb $HOME `uname`=local')
+	assertEquals "Heredoc record validation preserves literal bytes." "$l_literal_row" \
+		"$(zxfer_validate_backup_metadata_record_list "$l_literal_row")"
 }
 
 test_candidate_discards_partial_reads_and_allocation_failures() {
@@ -546,12 +610,18 @@ test_candidate_discards_partial_reads_and_allocation_failures() {
 					zxfer_create_runtime_artifact_file "$2"
 				}
 				g_zxfer_backup_view_result=stale
+				g_zxfer_backup_view_dir_result=stale
+				g_zxfer_backup_view_source_root_result=stale
+				g_zxfer_backup_view_destination_root_result=stale
+				g_zxfer_backup_view_index_result=stale
 				zxfer_try_backup_restore_candidate "$g_backup_storage_root/tank/src" \
 					tank/src backup/dst tank/src backup/dst/src
-				printf '%s <%s>' "$?" "$g_zxfer_backup_view_result"
+				printf '%s <%s|%s|%s|%s|%s>' "$?" "$g_zxfer_backup_view_result" \
+					"$g_zxfer_backup_view_dir_result" "$g_zxfer_backup_view_source_root_result" \
+					"$g_zxfer_backup_view_destination_root_result" "$g_zxfer_backup_view_index_result"
 			)
 		)
-		assertEquals "$failure failure must not publish partial metadata." '5 <>' "$output"
+		assertEquals "$failure failure must not publish partial metadata." '5 <||||>' "$output"
 	done
 }
 

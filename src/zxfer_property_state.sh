@@ -929,6 +929,42 @@ zxfer_load_normalized_dataset_properties() {
 # REQUIRED CREATION-TIME PROPERTY BACKFILL
 ################################################################################
 
+# Purpose: Probe multiple missing required creation-time properties in one
+# comma-list `zfs get` call, falling back cleanly if the batch fails or does
+# not return one valid line per requested property in order.
+# Usage: zxfer_backfill_required_properties_batch SIDE DATASET MISSING_CSV;
+# appends encoded items to g_zxfer_required_properties_result and returns 0 on
+# an exact match, or leaves g_zxfer_required_properties_result unchanged and
+# returns 1 so the caller probes each property individually.
+zxfer_backfill_required_properties_batch() {
+	l_batch_side=$1
+	l_batch_dataset=$2
+	l_batch_missing=$3
+
+	g_zxfer_profile_required_property_backfill_gets=$((g_zxfer_profile_required_property_backfill_gets + 1))
+	l_batch_output=$(zxfer_run_zfs_cmd_for_role "$l_batch_side" get -Hpo property,value,source \
+		"$l_batch_missing" "$l_batch_dataset" 2>/dev/null </dev/null) || return 1
+
+	l_batch_result=$g_zxfer_required_properties_result
+	l_batch_names=$l_batch_missing,
+	l_batch_lines=$l_batch_output$ZXFER_LF
+	l_batch_ok=1
+	while [ -n "$l_batch_names" ]; do
+		l_batch_name=${l_batch_names%%,*}
+		l_batch_names=${l_batch_names#*,}
+		l_batch_line=${l_batch_lines%%"$ZXFER_LF"*}
+		l_batch_lines=${l_batch_lines#*"$ZXFER_LF"}
+		if ! zxfer_split_property_record "$l_batch_name" "$l_batch_line"; then
+			l_batch_ok=0
+			break
+		fi
+		zxfer_encode_property_value "$g_zxfer_property_record_value"
+		l_batch_result=${l_batch_result:+$l_batch_result,}$l_batch_name=$g_zxfer_encoded_property_value=$g_zxfer_property_record_source
+	done
+	[ "$l_batch_ok" -eq 1 ] && [ -z "$l_batch_lines" ] || return 1
+	g_zxfer_required_properties_result=$l_batch_result
+}
+
 # Purpose: Append any required creation-time property missing from a property
 # list so the diff can enforce creation-time rules on every platform (some
 # OpenZFS builds omit them from `zfs get all`).
@@ -966,29 +1002,9 @@ zxfer_backfill_required_properties() {
 
 	case $l_backfill_missing in
 	*,*)
-		g_zxfer_profile_required_property_backfill_gets=$((g_zxfer_profile_required_property_backfill_gets + 1))
-		if l_backfill_batch=$(zxfer_run_zfs_cmd_for_role "$l_backfill_side" get -Hpo property,value,source \
-			"$l_backfill_missing" "$l_backfill_dataset" 2>/dev/null </dev/null); then
-			l_append_result=$g_zxfer_required_properties_result
-			l_append_names=$l_backfill_missing,
-			l_append_lines=$l_backfill_batch$ZXFER_LF
-			l_append_ok=1
-			while [ -n "$l_append_names" ]; do
-				l_append_name=${l_append_names%%,*}
-				l_append_names=${l_append_names#*,}
-				l_append_line=${l_append_lines%%"$ZXFER_LF"*}
-				l_append_lines=${l_append_lines#*"$ZXFER_LF"}
-				if ! zxfer_split_property_record "$l_append_name" "$l_append_line"; then
-					l_append_ok=0
-					break
-				fi
-				zxfer_encode_property_value "$g_zxfer_property_record_value"
-				l_append_result=${l_append_result:+$l_append_result,}$l_append_name=$g_zxfer_encoded_property_value=$g_zxfer_property_record_source
-			done
-			if [ "$l_append_ok" -eq 1 ] && [ -z "$l_append_lines" ]; then
-				g_zxfer_required_properties_result=$l_append_result
-				return 0
-			fi
+		if zxfer_backfill_required_properties_batch \
+			"$l_backfill_side" "$l_backfill_dataset" "$l_backfill_missing"; then
+			return 0
 		fi
 		;;
 	esac

@@ -42,7 +42,9 @@
 #   <properties>" lines), g_zxfer_backup_relative_key_result, the -e roots and
 #   row index (g_zxfer_backup_restore_*), the forwarded
 #   provenance memo g_zxfer_backup_forwarded_*, reusable read staging
-#   g_zxfer_backup_read_file, and the checked g_zxfer_backup_view_result.
+#   g_zxfer_backup_read_file, ZXFER_BACKUP_METADATA_VALIDATE_AWK, and the
+#   checked view results g_zxfer_backup_view_result plus
+#   g_zxfer_backup_view_{dir,source_root,destination_root,index}_result.
 #   Row lookups publish g_zxfer_property_row_payload_result;
 #   dry-run previews publish quoting's g_zxfer_shell_command_result directly.
 # reads globals: backup options, source and destination roots, -O/-T host
@@ -106,6 +108,114 @@ function validate_properties(properties, item_count, i, field_count) {
 	return 1
 }'
 
+# First-pass metadata validator and index builder; runs behind
+# ZXFER_BACKUP_METADATA_PROPERTIES_AWK. Expected roots and optional alias
+# root arrive via ENVIRON[...] so backslashes in dataset names stay literal.
+# shellcheck disable=SC2016  # awk program should see literal field references.
+ZXFER_BACKUP_METADATA_VALIDATE_AWK='
+BEGIN {
+	expected_source = ENVIRON["ZXFER_AWK_EXPECTED_SOURCE"]
+	expected_destination = ENVIRON["ZXFER_AWK_EXPECTED_DESTINATION"]
+	alias_root = ENVIRON["ZXFER_AWK_ALIAS_ROOT"]
+}
+function relative_path(root, dataset, prefix) {
+	if (root == "" || dataset == "")
+		return ""
+	if (dataset == root)
+		return "."
+	prefix = root "/"
+	if (substr(dataset, 1, length(prefix)) == prefix)
+		return substr(dataset, length(prefix) + 1)
+	return "__ZXFER_NO_MATCH__"
+}
+# An "exit" in a rule still runs END, which reports format_status first.
+NR == 1 {
+	if ($0 != expected_header) {
+		format_status = 6
+		exit
+	}
+	next
+}
+$0 == expected_header {
+	format_status = 6
+	exit
+}
+index($0, "#format_version:") == 1 {
+	if (format_seen || substr($0, length("#format_version:") + 1) != expected_format_version) {
+		format_status = 7
+		exit
+	}
+	format_seen = 1
+	next
+}
+{
+	if (index($0, "#source_root:") == 1) {
+		source_root_count++
+		source_root = substr($0, length("#source_root:") + 1)
+		next
+	}
+	if (index($0, "#destination_root:") == 1) {
+		destination_root_count++
+		destination_root = substr($0, length("#destination_root:") + 1)
+		next
+	}
+	if ($0 == "" || substr($0, 1, 1) == "#")
+		next
+	# A row before #format_version reads as a file without the header.
+	if (!format_seen) {
+		format_status = 6
+		exit
+	}
+
+	tab = index($0, "\t")
+	if (tab <= 0) {
+		malformed_count++
+		next
+	}
+	row_key = substr($0, 1, tab - 1)
+	props = substr($0, tab + 1)
+	if (row_key == "" || row_key ~ /^\// || row_key ~ /\/$/ || !validate_properties(props)) {
+		malformed_count++
+		next
+	}
+	if (!(row_key in row_count))
+		keys[++key_count] = row_key
+	row_count[row_key]++
+}
+END {
+	if (NR == 0)
+		exit 6
+	if (format_status)
+		exit format_status
+	if (!format_seen)
+		exit 7
+	if (source_root_count != 1 || destination_root_count != 1 || source_root == "" || destination_root == "")
+		exit 4
+	expected_source_key = relative_path(source_root, expected_source)
+	expected_destination_key = relative_path(destination_root, expected_destination)
+	if (expected_source_key == "" || expected_destination_key == "" ||
+		expected_source_key == "__ZXFER_NO_MATCH__" ||
+		expected_destination_key == "__ZXFER_NO_MATCH__" ||
+		expected_source_key != expected_destination_key)
+		exit 3
+	if (malformed_count > 0)
+		exit 4
+	if (row_count[expected_source_key] > 1)
+		exit 9
+	print source_root
+	print destination_root
+	for (i = 1; i <= key_count; i++) {
+		row = (row_count[keys[i]] > 1) ? "-" : ("r" i)
+		if (alias_root == "")
+			print row "\t" keys[i]
+		else {
+			dataset = (keys[i] == ".") ? source_root : (source_root "/" keys[i])
+			print row "\t" alias_root "@" dataset
+		}
+	}
+	exit (row_count[expected_source_key] == 0) ? 8 : 0
+}'
+
 # Purpose: Validate ZXFER_BACKUP_DIR (default /var/db/zxfer) once per session
 # into g_backup_storage_root, ignoring any inherited internal value.
 # Usage: zxfer_init_backup_storage_root, from session bootstrap; throws unless
@@ -134,6 +244,10 @@ zxfer_reset_backup_metadata_state() {
 	g_zxfer_backup_read_file=""
 	g_zxfer_backup_restore_candidate_path_result=""
 	g_zxfer_backup_view_result=""
+	g_zxfer_backup_view_dir_result=""
+	g_zxfer_backup_view_source_root_result=""
+	g_zxfer_backup_view_destination_root_result=""
+	g_zxfer_backup_view_index_result=""
 	g_zxfer_backup_forwarded_roots=""
 	g_zxfer_backup_forwarded_rows=""
 	g_zxfer_backup_forwarded_alias_dir=""
@@ -197,8 +311,7 @@ END {
 # malformed row.
 zxfer_validate_backup_metadata_record_list() {
 	# shellcheck disable=SC2016  # awk program should see literal field references.
-	printf '%s\n' "$1" |
-		"${g_cmd_awk:-awk}" "$ZXFER_BACKUP_METADATA_PROPERTIES_AWK"'
+	"${g_cmd_awk:-awk}" "$ZXFER_BACKUP_METADATA_PROPERTIES_AWK"'
 {
 	if ($0 == "")
 		next
@@ -220,7 +333,9 @@ END {
 	if (!row_count) print ""
 	for (i = 1; i <= row_count; i++)
 		print row_keys[i] "\t" row_properties[row_keys[i]]
-}' || return 1
+}' <<EOF || return 1
+$1
+EOF
 }
 
 # Purpose: Map DATASET to "." or its relative path below ROOT.
@@ -247,8 +362,7 @@ zxfer_append_backup_metadata_record() {
 
 	zxfer_get_backup_relative_key "$l_append_metadata_root" "$l_append_metadata_source" ||
 		zxfer_throw_error "Backup metadata source dataset [$l_append_metadata_source] is outside source root [$l_append_metadata_root]."
-	g_backup_file_contents="${g_backup_file_contents:+$g_backup_file_contents
-}$g_zxfer_backup_relative_key_result	$l_append_metadata_properties"
+	g_backup_file_contents="${g_backup_file_contents:+$g_backup_file_contents$ZXFER_LF}$g_zxfer_backup_relative_key_result$ZXFER_TAB$l_append_metadata_properties"
 }
 
 # Purpose: Buffer the backup row of a dataset whose property pass succeeded.
@@ -348,13 +462,9 @@ zxfer_load_forwarded_backup_alias() {
 
 	# The same validated view serves -e and forwarding. Its private directory
 	# survives property-pass resets; the memo holds row names, not payloads.
-	l_alias_dir=${g_zxfer_backup_view_result%%"$ZXFER_LF"*}
-	l_alias_rows=${g_zxfer_backup_view_result#*"$ZXFER_LF"}
-	l_alias_rows=${l_alias_rows#*"$ZXFER_LF"}
-	l_alias_rows=${l_alias_rows#*"$ZXFER_LF"}
-	l_alias_rows=${l_alias_rows%"$ZXFER_LF"}
-	[ -z "$l_alias_rows" ] ||
-		g_zxfer_backup_forwarded_rows=${g_zxfer_backup_forwarded_rows:+$g_zxfer_backup_forwarded_rows$ZXFER_LF}$l_alias_rows
+	l_alias_dir=$g_zxfer_backup_view_dir_result
+	[ -z "$g_zxfer_backup_view_index_result" ] ||
+		g_zxfer_backup_forwarded_rows=${g_zxfer_backup_forwarded_rows:+$g_zxfer_backup_forwarded_rows$ZXFER_LF}$g_zxfer_backup_view_index_result
 	g_zxfer_backup_forwarded_roots=${g_zxfer_backup_forwarded_roots:+$g_zxfer_backup_forwarded_roots$ZXFER_LF}${l_alias_dir##*/}$ZXFER_CR$l_alias_path$ZXFER_TAB$1
 	g_zxfer_backup_forwarded_alias_dir=$l_alias_dir
 	g_zxfer_backup_forwarded_alias_path=$l_alias_path
@@ -389,33 +499,47 @@ zxfer_list_remote_backup_storage_dirs() {
 # Usage: zxfer_try_backup_restore_candidate DIR FILENAME_SOURCE
 # FILENAME_DESTINATION EXPECTED_SOURCE EXPECTED_DESTINATION [HOST]
 # [PROFILE_SIDE] [ALIAS_ROOT]. Returns 0 with a checked view, or 8 when the
-# pair has no row (aliases still publish a view on 8). The view is in
-# g_zxfer_backup_view_result. Returns 1 when neither file exists; the file check's 3, 4, 6, 7 or 9; 5 for a read failure or any
-# other check status; 11 when no filename can be derived. The path examined
-# last is published in g_zxfer_backup_restore_candidate_path_result for error
-# messages.
+# pair has no row (aliases still publish a view on 8). The view is published
+# in g_zxfer_backup_view_result and its named g_zxfer_backup_view_*_result
+# fields. Returns 1 when neither file exists; the file check's 3, 4, 6, 7 or
+# 9; 5 for a read failure or any other check status; 11 when no filename can
+# be derived. The path examined last is published in
+# g_zxfer_backup_restore_candidate_path_result for error messages.
 zxfer_try_backup_restore_candidate() {
+	l_candidate_dir=$1
+	l_candidate_filename_source=$2
+	l_candidate_filename_destination=$3
+	l_candidate_expected_source=$4
+	l_candidate_expected_destination=$5
+	l_candidate_host=${6:-}
+	l_candidate_profile_side=${7:-}
+	l_candidate_alias_root=${8:-}
+
 	g_zxfer_backup_restore_candidate_path_result=""
 	g_zxfer_backup_view_result=""
+	g_zxfer_backup_view_dir_result=""
+	g_zxfer_backup_view_source_root_result=""
+	g_zxfer_backup_view_destination_root_result=""
+	g_zxfer_backup_view_index_result=""
 
 	for l_candidate_kind in current legacy; do
 		if ! l_candidate_name=$(zxfer_get_backup_metadata_filename \
-			"$2" "$3" "$l_candidate_kind"); then
+			"$l_candidate_filename_source" "$l_candidate_filename_destination" "$l_candidate_kind"); then
 			[ "$l_candidate_kind" = legacy ] || return 11
 			break
 		fi
-		l_candidate_path=$1/$l_candidate_name
+		l_candidate_path=$l_candidate_dir/$l_candidate_name
 		if [ "$l_candidate_kind" = current ]; then
 			g_zxfer_backup_restore_candidate_path_result=$l_candidate_path
 			zxfer_ensure_runtime_artifact_file "$g_zxfer_backup_read_file" backup-read || return 5
 			g_zxfer_backup_read_file=$g_zxfer_runtime_artifact_path_result
 			l_candidate_file=$g_zxfer_backup_read_file
 		fi
-		if [ "${6:-}" = "" ]; then
+		if [ "$l_candidate_host" = "" ]; then
 			zxfer_read_local_backup_file "$l_candidate_path" "$l_candidate_file"
 		else
-			zxfer_read_remote_backup_file "${6:-}" "$l_candidate_path" \
-				"${7:-}" "$l_candidate_file"
+			zxfer_read_remote_backup_file "$l_candidate_host" "$l_candidate_path" \
+				"$l_candidate_profile_side" "$l_candidate_file"
 		fi
 		l_candidate_read_status=$?
 		if [ "$l_candidate_kind" = current ] || [ "$l_candidate_read_status" -ne 4 ]; then
@@ -427,7 +551,7 @@ zxfer_try_backup_restore_candidate() {
 		*) return 5 ;;
 		esac
 		zxfer_load_backup_metadata_view "$l_candidate_file" \
-			"$4" "$5" "${8:-}"
+			"$l_candidate_expected_source" "$l_candidate_expected_destination" "$l_candidate_alias_root"
 		l_candidate_match_status=$?
 		case $l_candidate_match_status in
 		0 | 3 | 4 | 6 | 7 | 8 | 9) return "$l_candidate_match_status" ;;
@@ -458,7 +582,14 @@ exists under the source-dataset-relative tree inside ZXFER_BACKUP_DIR." ;;
 	6) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path does not start with the required zxfer backup metadata header." ;;
 	7) l_candidate_failure_message="$l_candidate_failure_label $l_candidate_failure_path does not declare supported zxfer backup metadata format version #format_version:$ZXFER_BACKUP_METADATA_FORMAT_VERSION." ;;
 	11) zxfer_throw_error "Failed to derive backup metadata filename for source dataset [$l_candidate_failure_dataset]." ;;
-	*) zxfer_throw_error "Failed to read $(printf '%s' "$l_candidate_failure_label" | tr '[:upper:]' '[:lower:]') $l_candidate_failure_path." ;;
+	*)
+		case $l_candidate_failure_label in
+		"Backup property file") l_candidate_failure_lower="backup property file" ;;
+		"Forwarded backup property file") l_candidate_failure_lower="forwarded backup property file" ;;
+		*) l_candidate_failure_lower=$l_candidate_failure_label ;;
+		esac
+		zxfer_throw_error "Failed to read $l_candidate_failure_lower $l_candidate_failure_path."
+		;;
 	esac
 	if [ -n "$l_candidate_failure_usage" ]; then
 		zxfer_throw_error_with_usage "$l_candidate_failure_message"
@@ -488,12 +619,10 @@ zxfer_get_backup_properties() {
 		zxfer_cleanup_runtime_artifact_path "$g_zxfer_backup_restore_row_dir" ||
 			zxfer_throw_backup_candidate_failure 5 "$g_zxfer_backup_restore_candidate_path_result" \
 				"$g_initial_source" "Backup property file" usage
-		g_zxfer_backup_restore_row_dir=${g_zxfer_backup_view_result%%"$ZXFER_LF"*}
-		l_restore_view=${g_zxfer_backup_view_result#*"$ZXFER_LF"}
-		g_zxfer_backup_restore_source_root=${l_restore_view%%"$ZXFER_LF"*}
-		l_restore_view=${l_restore_view#*"$ZXFER_LF"}
-		g_zxfer_backup_restore_destination_root=${l_restore_view%%"$ZXFER_LF"*}
-		g_zxfer_backup_restore_index=$ZXFER_LF${l_restore_view#*"$ZXFER_LF"}$ZXFER_LF
+		g_zxfer_backup_restore_row_dir=$g_zxfer_backup_view_dir_result
+		g_zxfer_backup_restore_source_root=$g_zxfer_backup_view_source_root_result
+		g_zxfer_backup_restore_destination_root=$g_zxfer_backup_view_destination_root_result
+		g_zxfer_backup_restore_index=$ZXFER_LF$g_zxfer_backup_view_index_result$ZXFER_LF
 	fi
 	[ "$l_restore_status" -eq 0 ] ||
 		zxfer_throw_backup_candidate_failure "$l_restore_status" \
@@ -543,124 +672,40 @@ zxfer_require_restored_backup_properties() {
 # view shared by -e and forwarded aliases. The first pass retains only keys
 # and counts; the second writes one payload at a time after validation.
 # Usage: zxfer_load_backup_metadata_view FILE SOURCE DESTINATION [ALIAS_ROOT].
-# Publishes g_zxfer_backup_view_result: directory, source root, destination
-# root, then index lines, terminated by LF. Restore lines are ROW<TAB>KEY;
-# alias lines are ROW<TAB>ALIAS_ROOT@DATASET. Duplicates use "-".
-# Returns the lookup
-# status; publishes on 0, or on 8 for an alias without its requested row.
-# A read/write/allocation failure is 5.
+# Publishes g_zxfer_backup_view_dir_result,
+# g_zxfer_backup_view_source_root_result,
+# g_zxfer_backup_view_destination_root_result,
+# g_zxfer_backup_view_index_result (raw newline-joined rows, empty when none),
+# and the legacy combined g_zxfer_backup_view_result (directory, source root,
+# destination root, then index lines, terminated by LF). Restore lines are
+# ROW<TAB>KEY; alias lines are ROW<TAB>ALIAS_ROOT@DATASET. Duplicates use "-".
+# Returns the lookup status; publishes on 0, or on 8 for an alias without its
+# requested row. A read/write/allocation failure is 5.
 zxfer_load_backup_metadata_view() {
 	g_zxfer_backup_view_result=""
+	g_zxfer_backup_view_dir_result=""
+	g_zxfer_backup_view_source_root_result=""
+	g_zxfer_backup_view_destination_root_result=""
+	g_zxfer_backup_view_index_result=""
 	[ -r "$1" ] || return 5
-	# shellcheck disable=SC2016
-	l_view_index=$(ZXFER_AWK_ALIAS_ROOT=${4:-} "${g_cmd_awk:-awk}" \
-		-v expected_header="$ZXFER_BACKUP_METADATA_HEADER_LINE" \
-		-v expected_format_version="$ZXFER_BACKUP_METADATA_FORMAT_VERSION" \
-		-v expected_source="$2" \
-		-v expected_destination="$3" \
-		"$ZXFER_BACKUP_METADATA_PROPERTIES_AWK"'
-BEGIN { alias_root = ENVIRON["ZXFER_AWK_ALIAS_ROOT"] }
-function relative_path(root, dataset, prefix) {
-	if (root == "" || dataset == "")
-		return ""
-	if (dataset == root)
-		return "."
-	prefix = root "/"
-	if (substr(dataset, 1, length(prefix)) == prefix)
-		return substr(dataset, length(prefix) + 1)
-	return "__ZXFER_NO_MATCH__"
-}
-# An "exit" in a rule still runs END, which reports format_status first.
-NR == 1 {
-	if ($0 != expected_header) {
-		format_status = 6
-		exit
-	}
-	next
-}
-$0 == expected_header {
-	format_status = 6
-	exit
-}
-index($0, "#format_version:") == 1 {
-	if (format_seen || substr($0, length("#format_version:") + 1) != expected_format_version) {
-		format_status = 7
-		exit
-	}
-	format_seen = 1
-	next
-}
-{
-	if (index($0, "#source_root:") == 1) {
-		source_root_count++
-		source_root = substr($0, length("#source_root:") + 1)
-		next
-	}
-	if (index($0, "#destination_root:") == 1) {
-		destination_root_count++
-		destination_root = substr($0, length("#destination_root:") + 1)
-		next
-	}
-	if ($0 == "" || substr($0, 1, 1) == "#")
-		next
-	# A row before #format_version reads as a file without the header.
-	if (!format_seen) {
-		format_status = 6
-		exit
-	}
-
-	tab = index($0, "\t")
-	if (tab <= 0) {
-		malformed_count++
-		next
-	}
-	row_key = substr($0, 1, tab - 1)
-	props = substr($0, tab + 1)
-	if (row_key == "" || row_key ~ /^\// || row_key ~ /\/$/ || !validate_properties(props)) {
-		malformed_count++
-		next
-	}
-	if (!(row_key in row_count))
-		keys[++key_count] = row_key
-	row_count[row_key]++
-}
-END {
-	if (NR == 0)
-		exit 6
-	if (format_status)
-		exit format_status
-	if (!format_seen)
-		exit 7
-	if (source_root_count != 1 || destination_root_count != 1 || source_root == "" || destination_root == "")
-		exit 4
-	expected_source_key = relative_path(source_root, expected_source)
-	expected_destination_key = relative_path(destination_root, expected_destination)
-	if (expected_source_key == "" || expected_destination_key == "" ||
-		expected_source_key == "__ZXFER_NO_MATCH__" ||
-		expected_destination_key == "__ZXFER_NO_MATCH__" ||
-		expected_source_key != expected_destination_key)
-		exit 3
-	if (malformed_count > 0)
-		exit 4
-	if (row_count[expected_source_key] > 1)
-		exit 9
-	print source_root
-	print destination_root
-	for (i = 1; i <= key_count; i++) {
-		row = (row_count[keys[i]] > 1) ? "-" : ("r" i)
-		if (alias_root == "")
-			print row "\t" keys[i]
-		else {
-			dataset = (keys[i] == ".") ? source_root : (source_root "/" keys[i])
-			print row "\t" alias_root "@" dataset
-		}
-	}
-	exit (row_count[expected_source_key] == 0) ? 8 : 0
-}' "$1")
+	l_view_index=$(
+		ZXFER_AWK_EXPECTED_SOURCE=$2
+		ZXFER_AWK_EXPECTED_DESTINATION=$3
+		ZXFER_AWK_ALIAS_ROOT=${4:-}
+		export ZXFER_AWK_EXPECTED_SOURCE ZXFER_AWK_EXPECTED_DESTINATION ZXFER_AWK_ALIAS_ROOT
+		"${g_cmd_awk:-awk}" \
+			-v expected_header="$ZXFER_BACKUP_METADATA_HEADER_LINE" \
+			-v expected_format_version="$ZXFER_BACKUP_METADATA_FORMAT_VERSION" \
+			"$ZXFER_BACKUP_METADATA_PROPERTIES_AWK$ZXFER_BACKUP_METADATA_VALIDATE_AWK" "$1"
+	)
 	l_view_status=$?
 	case $l_view_status in
 	0 | 8) ;;
 	3 | 4 | 6 | 7 | 9) return "$l_view_status" ;;
+	*) return 5 ;;
+	esac
+	case $l_view_index in
+	*"$ZXFER_LF"*) ;;
 	*) return 5 ;;
 	esac
 	# -e rejects a missing requested row before any row-store work. Aliases
@@ -690,6 +735,22 @@ $0 == "" || substr($0, 1, 1) == "#" { next }
 	}
 }' "$1"
 	) || return 5
+	l_view_source_root=${l_view_index%%"$ZXFER_LF"*}
+	l_view_rest=${l_view_index#*"$ZXFER_LF"}
+	case $l_view_rest in
+	*"$ZXFER_LF"*)
+		l_view_destination_root=${l_view_rest%%"$ZXFER_LF"*}
+		l_view_rows=${l_view_rest#*"$ZXFER_LF"}
+		;;
+	*)
+		l_view_destination_root=$l_view_rest
+		l_view_rows=""
+		;;
+	esac
+	g_zxfer_backup_view_dir_result=$l_view_dir
+	g_zxfer_backup_view_source_root_result=$l_view_source_root
+	g_zxfer_backup_view_destination_root_result=$l_view_destination_root
+	g_zxfer_backup_view_index_result=$l_view_rows
 	g_zxfer_backup_view_result=$l_view_dir$ZXFER_LF$l_view_index$ZXFER_LF
 	return "$l_view_status"
 }
@@ -818,6 +879,8 @@ zxfer_ensure_local_backup_dir() {
 		fi
 		zxfer_throw_error "Refusing to use backup directory $l_ensure_local_backup_dir because path component $l_ensure_local_backup_symlink is a symlink."
 	fi
+	# zxfer_find_symlink_path_component trusts top-level symlinks such as /var
+	# when traversed, so still refuse them when used directly as the target dir.
 	if [ -L "$l_ensure_local_backup_dir" ]; then
 		zxfer_throw_error "Refusing to use backup directory $l_ensure_local_backup_dir because it is a symlink."
 	fi

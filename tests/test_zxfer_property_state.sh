@@ -885,6 +885,45 @@ test_prefetch_recursive_normalized_properties_prepends_fresh_rows_ahead_of_live_
 # REQUIRED-PROPERTY BACKFILL
 ################################################################################
 
+test_backfill_required_properties_uses_batch_fast_path_and_falls_back_on_batch_error() {
+	ROLE_LOG="$TEST_TMPDIR/backfill_batch_ok.log"
+	: >"$ROLE_LOG"
+	(
+		g_zxfer_profile_required_property_backfill_gets=0
+		zxfer_run_zfs_cmd_for_role() {
+			printf '%s\n' "$*" >>"$ROLE_LOG"
+			printf 'casesensitivity\tsensitive\t-\nutf8only\toff\t-\n'
+		}
+		zxfer_backfill_required_properties "tank/src" "compression=lz4=local" "casesensitivity,utf8only" source
+		printf 'status=%s gets=%s result=%s\n' "$?" "$g_zxfer_profile_required_property_backfill_gets" \
+			"$g_zxfer_required_properties_result"
+	) >"$TEST_TMPDIR/backfill_batch_ok.out"
+	assertEquals "Batch fast path resolves all missing properties in one call." \
+		"status=0 gets=1 result=compression=lz4=local,casesensitivity=sensitive=-,utf8only=off=-" \
+		"$(cat "$TEST_TMPDIR/backfill_batch_ok.out")"
+	assertEquals "source get -Hpo property,value,source casesensitivity,utf8only tank/src" "$(cat "$ROLE_LOG")"
+
+	ROLE_LOG="$TEST_TMPDIR/backfill_batch_fail.log"
+	: >"$ROLE_LOG"
+	(
+		g_zxfer_profile_required_property_backfill_gets=0
+		zxfer_run_zfs_cmd_for_role() {
+			printf '%s\n' "$*" >>"$ROLE_LOG"
+			case "$*" in
+			*" casesensitivity,utf8only tank/src") return 1 ;;
+			*" casesensitivity tank/src") printf 'casesensitivity\tsensitive\t-\n' ;;
+			*" utf8only tank/src") printf 'utf8only\toff\t-\n' ;;
+			esac
+		}
+		zxfer_backfill_required_properties "tank/src" "compression=lz4=local" "casesensitivity,utf8only" source
+		printf 'status=%s gets=%s result=%s\n' "$?" "$g_zxfer_profile_required_property_backfill_gets" \
+			"$g_zxfer_required_properties_result"
+	) >"$TEST_TMPDIR/backfill_batch_fail.out"
+	assertEquals "Batch error leaves result intact and falls back to individual probes." \
+		"status=0 gets=3 result=compression=lz4=local,casesensitivity=sensitive=-,utf8only=off=-" \
+		"$(cat "$TEST_TMPDIR/backfill_batch_fail.out")"
+}
+
 test_backfill_required_properties_probes_each_property_when_the_batch_is_not_one_line_per_name() {
 	for l_batch in 'casesensitivity\tsensitive\t-\n' \
 		'casesensitivity\tsensitive\t-\nutf8only\toff\t-\nextra\tline\t-\n' \

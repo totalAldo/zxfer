@@ -214,31 +214,115 @@ zxfer_append_unsupported_property() {
 	esac
 }
 
+# Purpose: Probe destination support for all source properties of one dataset
+# type, recording unsupported names via zxfer_append_unsupported_property.
+# Usage: zxfer_probe_unsupported_properties_for_type SOURCE TYPE TYPES_TABLE;
+# SOURCE is the first source dataset of TYPE, and TYPES_TABLE is the
+# newline-separated "dataset<TAB>type" list used to pick an existing
+# destination probe dataset of that type (falling back to the destination pool
+# root). Every remote call inside a loop reads /dev/null.
+zxfer_probe_unsupported_properties_for_type() {
+	l_type_probe_source=$1
+	l_type_probe_type=$2
+	l_type_probe_types=$3
+
+	l_type_probe_status=0
+	l_type_probe_source_names=$(zxfer_run_source_zfs_cmd get -Hpo property all "$l_type_probe_source" 2>&1 </dev/null) ||
+		l_type_probe_status=$?
+	[ "$l_type_probe_status" -eq 0 ] ||
+		zxfer_throw_error "Failed to retrieve source property list for dataset [$l_type_probe_source]: $l_type_probe_source_names" "$l_type_probe_status"
+
+	# The existence cache is seeded from the recursive destination
+	# listing, so these probes normally answer without a zfs call.
+	l_type_probe_dest=""
+	while IFS=$ZXFER_TAB read -r l_type_probe_row_source l_type_probe_row_type; do
+		[ "$l_type_probe_row_type" = "$l_type_probe_type" ] || continue
+		zxfer_map_destination_dataset "$l_type_probe_row_source"
+		[ -n "$l_type_probe_dest" ] || l_type_probe_dest=${g_zxfer_destination_dataset_result%%/*}
+		if zxfer_destination_exists "$g_zxfer_destination_dataset_result" </dev/null; then
+			l_type_probe_dest=$g_zxfer_destination_dataset_result
+			break
+		fi
+	done <<EOF
+$l_type_probe_types
+EOF
+	[ -n "$l_type_probe_dest" ] ||
+		zxfer_throw_error "Failed to determine the destination property-support probe dataset."
+
+	l_type_probe_status=0
+	l_type_probe_dest_type=$(zxfer_run_destination_zfs_cmd get -Hpo value type "$l_type_probe_dest" 2>&1 </dev/null) ||
+		l_type_probe_status=$?
+	[ "$l_type_probe_status" -eq 0 ] ||
+		zxfer_throw_error "Failed to determine the destination property-support probe dataset type for [$l_type_probe_dest]: $l_type_probe_dest_type" "$l_type_probe_status"
+	l_type_probe_dest_names=$(zxfer_run_destination_zfs_cmd get -Hpo property all "$l_type_probe_dest" 2>&1 </dev/null) ||
+		l_type_probe_status=$?
+	[ "$l_type_probe_status" -eq 0 ] ||
+		zxfer_throw_error "Failed to retrieve destination property list for dataset [$l_type_probe_dest]: $l_type_probe_dest_names" "$l_type_probe_status"
+
+	# shellcheck disable=SC2016
+	l_type_probe_candidates=$(
+		ZXFER_AWK_DESTINATION_PROPERTIES=$l_type_probe_dest_names
+		export ZXFER_AWK_DESTINATION_PROPERTIES
+		"${g_cmd_awk:-awk}" '
+BEGIN {
+	count = split(ENVIRON["ZXFER_AWK_DESTINATION_PROPERTIES"], names, "\n")
+	for (i = 1; i <= count; i++)
+		supported[names[i]] = 1
+}
+$0 != "" && !($0 in supported) && index($0, ":") == 0 && !seen[$0]++ { print }
+' <<EOF
+$l_type_probe_source_names
+EOF
+	) || zxfer_throw_error "Failed to compare source and destination property inventories for [$l_type_probe_dest]."
+
+	# zfs reports "does not apply" for a property of another dataset type,
+	# so that answer only counts when the probe has the source's type.
+	while IFS= read -r l_type_probe_property; do
+		[ -n "$l_type_probe_property" ] || continue
+		l_type_probe_status=0
+		l_type_probe_output=$(zxfer_run_destination_zfs_cmd get -Hpo property,value,source \
+			"$l_type_probe_property" "$l_type_probe_dest" 2>&1 </dev/null) || l_type_probe_status=$?
+		[ "$l_type_probe_status" -ne 0 ] || continue
+		case $l_type_probe_output in
+		*"invalid property"* | *"no such property"* | *"not supported"*)
+			zxfer_append_unsupported_property "$l_type_probe_type" "$l_type_probe_property"
+			continue
+			;;
+		*"does not apply"*)
+			[ "$l_type_probe_dest_type" != "$l_type_probe_type" ] ||
+				zxfer_append_unsupported_property "$l_type_probe_type" "$l_type_probe_property"
+			continue
+			;;
+		esac
+		if zxfer_destination_probe_is_ambiguous "$l_type_probe_output"; then
+			l_type_probe_output="probe exited nonzero without stdout/stderr"
+		fi
+		zxfer_throw_error "Failed to probe destination support for property [$l_type_probe_property] on [$l_type_probe_dest]: $l_type_probe_output" "$l_type_probe_status"
+	done <<EOF
+$l_type_probe_candidates
+EOF
+}
+
 # Purpose: Record, per source dataset type, the source properties the
 # destination cannot accept, so -U can drop them before create and set.
 # Usage: Called once at replication startup when -U has property work. Source
 # types come from batched `zfs get type` calls of at most 128 names each. For
-# each type, the property names of its first source dataset are compared with
-# those of a destination probe dataset (the first existing mapped destination
-# of that type, else the destination pool root), and only the names missing on
-# the destination are probed one by one. User properties (with a colon) are
-# valid everywhere and never probed. Every remote call inside a here-document
-# loop reads /dev/null, so an -O or -T ssh cannot drain the loop's input.
+# each type, zxfer_probe_unsupported_properties_for_type compares the first
+# source dataset's inventory with a destination probe dataset and probes only
+# missing non-user names. Every remote call inside a here-document loop reads
+# /dev/null, so an -O or -T ssh cannot drain the loop's input.
 zxfer_calculate_unsupported_properties() {
 	g_zxfer_unsupported_filesystem_properties=""
 	g_zxfer_unsupported_volume_properties=""
 	l_scan_sources=${g_recursive_source_list:-$g_initial_source}
 	[ -n "$l_scan_sources" ] || return 0
 
-	# The trailing empty line ends the list and flushes the last batch.
 	l_scan_types=""
 	set --
 	while IFS= read -r l_scan_source; do
-		if [ -n "$l_scan_source" ]; then
-			set -- "$@" "$l_scan_source"
-			[ "$#" -ge 128 ] || continue
-		fi
-		[ "$#" -gt 0 ] || continue
+		[ -n "$l_scan_source" ] || continue
+		set -- "$@" "$l_scan_source"
+		[ "$#" -ge 128 ] || continue
 		l_scan_status=0
 		l_scan_batch=$(zxfer_run_source_zfs_cmd get -Hpo name,value type "$@" 2>&1 </dev/null) ||
 			l_scan_status=$?
@@ -248,8 +332,15 @@ zxfer_calculate_unsupported_properties() {
 		set --
 	done <<EOF
 $l_scan_sources
-
 EOF
+	if [ "$#" -gt 0 ]; then
+		l_scan_status=0
+		l_scan_batch=$(zxfer_run_source_zfs_cmd get -Hpo name,value type "$@" 2>&1 </dev/null) ||
+			l_scan_status=$?
+		[ "$l_scan_status" -eq 0 ] ||
+			zxfer_throw_error "Failed to retrieve source dataset types for unsupported-property scan: $l_scan_batch" "$l_scan_status"
+		l_scan_types=${l_scan_types:+$l_scan_types$ZXFER_LF}$l_scan_batch
+	fi
 
 	l_scan_seen_types=""
 	while IFS=$ZXFER_TAB read -r l_scan_source l_scan_type; do
@@ -258,80 +349,7 @@ EOF
 		*",$l_scan_type,"*) continue ;;
 		esac
 		l_scan_seen_types=${l_scan_seen_types:+$l_scan_seen_types,}$l_scan_type
-
-		l_scan_status=0
-		l_scan_source_names=$(zxfer_run_source_zfs_cmd get -Hpo property all "$l_scan_source" 2>&1 </dev/null) ||
-			l_scan_status=$?
-		[ "$l_scan_status" -eq 0 ] ||
-			zxfer_throw_error "Failed to retrieve source property list for dataset [$l_scan_source]: $l_scan_source_names" "$l_scan_status"
-
-		# The existence cache is seeded from the recursive destination
-		# listing, so these probes normally answer without a zfs call.
-		l_scan_probe=""
-		while IFS=$ZXFER_TAB read -r l_scan_row_source l_scan_row_type; do
-			[ "$l_scan_row_type" = "$l_scan_type" ] || continue
-			zxfer_map_destination_dataset "$l_scan_row_source"
-			[ -n "$l_scan_probe" ] || l_scan_probe=${g_zxfer_destination_dataset_result%%/*}
-			if zxfer_destination_exists "$g_zxfer_destination_dataset_result" </dev/null; then
-				l_scan_probe=$g_zxfer_destination_dataset_result
-				break
-			fi
-		done <<EOF
-$l_scan_types
-EOF
-		[ -n "$l_scan_probe" ] ||
-			zxfer_throw_error "Failed to determine the destination property-support probe dataset."
-
-		l_scan_status=0
-		l_scan_probe_type=$(zxfer_run_destination_zfs_cmd get -Hpo value type "$l_scan_probe" 2>&1 </dev/null) ||
-			l_scan_status=$?
-		[ "$l_scan_status" -eq 0 ] ||
-			zxfer_throw_error "Failed to determine the destination property-support probe dataset type for [$l_scan_probe]: $l_scan_probe_type" "$l_scan_status"
-		l_scan_dest_names=$(zxfer_run_destination_zfs_cmd get -Hpo property all "$l_scan_probe" 2>&1 </dev/null) ||
-			l_scan_status=$?
-		[ "$l_scan_status" -eq 0 ] ||
-			zxfer_throw_error "Failed to retrieve destination property list for dataset [$l_scan_probe]: $l_scan_dest_names" "$l_scan_status"
-
-		# shellcheck disable=SC2016
-		l_scan_candidates=$(
-			ZXFER_AWK_DESTINATION_PROPERTIES=$l_scan_dest_names "${g_cmd_awk:-awk}" '
-BEGIN {
-	count = split(ENVIRON["ZXFER_AWK_DESTINATION_PROPERTIES"], names, "\n")
-	for (i = 1; i <= count; i++)
-		supported[names[i]] = 1
-}
-$0 != "" && !($0 in supported) && index($0, ":") == 0 && !seen[$0]++ { print }
-' <<EOF
-$l_scan_source_names
-EOF
-		) || zxfer_throw_error "Failed to compare source and destination property inventories for [$l_scan_probe]."
-
-		# zfs reports "does not apply" for a property of another dataset type,
-		# so that answer only counts when the probe has the source's type.
-		while IFS= read -r l_scan_property; do
-			[ -n "$l_scan_property" ] || continue
-			l_scan_status=0
-			l_scan_output=$(zxfer_run_destination_zfs_cmd get -Hpo property,value,source \
-				"$l_scan_property" "$l_scan_probe" 2>&1 </dev/null) || l_scan_status=$?
-			[ "$l_scan_status" -ne 0 ] || continue
-			case $l_scan_output in
-			*"invalid property"* | *"no such property"* | *"not supported"*)
-				zxfer_append_unsupported_property "$l_scan_type" "$l_scan_property"
-				continue
-				;;
-			*"does not apply"*)
-				[ "$l_scan_probe_type" != "$l_scan_type" ] ||
-					zxfer_append_unsupported_property "$l_scan_type" "$l_scan_property"
-				continue
-				;;
-			esac
-			if zxfer_destination_probe_is_ambiguous "$l_scan_output"; then
-				l_scan_output="probe exited nonzero without stdout/stderr"
-			fi
-			zxfer_throw_error "Failed to probe destination support for property [$l_scan_property] on [$l_scan_probe]: $l_scan_output" "$l_scan_status"
-		done <<EOF
-$l_scan_candidates
-EOF
+		zxfer_probe_unsupported_properties_for_type "$l_scan_source" "$l_scan_type" "$l_scan_types" </dev/null
 	done <<EOF
 $l_scan_types
 EOF
@@ -414,10 +432,8 @@ zxfer_get_validated_source_dataset_create_metadata() {
 # parent shell. The operation consumes the file before another may reuse it;
 # EXIT owns its release. Returns the allocation or write status on failure.
 zxfer_stage_property_inputs() {
-	if [ -z "${g_zxfer_property_input_file:-}" ]; then
-		zxfer_get_temp_file || return "$?"
-		g_zxfer_property_input_file=$g_zxfer_runtime_artifact_path_result
-	fi
+	zxfer_ensure_runtime_artifact_file "${g_zxfer_property_input_file:-}" property-input || return "$?"
+	g_zxfer_property_input_file=$g_zxfer_runtime_artifact_path_result
 	l_property_input_status=0
 	# A builtin's failed redirection returns instead of exiting the shell.
 	{ printf '%s\n' "$@" '__ZXFER_PROPERTY_INPUT__' >|"$g_zxfer_property_input_file"; } 2>/dev/null ||
@@ -672,35 +688,35 @@ BEGIN {
 # unknown records, a missing final marker or data after it.
 zxfer_validate_property_plan() {
 	g_zxfer_property_plan_summary_result=""
-	l_validate_property_plan_complete=0
-	l_validate_property_plan_actions=0
-	l_validate_property_plan_overrides=0
+	l_val_plan_complete=0
+	l_val_plan_actions=0
+	l_val_plan_overrides=0
 	{
-		while IFS= read -r l_validate_property_plan_row; do
-			[ "$l_validate_property_plan_complete" -eq 0 ] || return 1
-			case $l_validate_property_plan_row in
-			"__ZXFER_PROPERTY_ACTIONS__") l_validate_property_plan_complete=1 ;;
+		while IFS= read -r l_val_plan_row; do
+			[ "$l_val_plan_complete" -eq 0 ] || return 1
+			case $l_val_plan_row in
+			"__ZXFER_PROPERTY_ACTIONS__") l_val_plan_complete=1 ;;
 			create"$ZXFER_TAB"?*=*=*=* | set"$ZXFER_TAB"?*=*=*=* | inherit"$ZXFER_TAB"?*=*=*=*)
-				l_validate_property_plan_actions=$((l_validate_property_plan_actions + 1))
-				l_validate_property_plan_source=${l_validate_property_plan_row#*"$ZXFER_TAB"}
-				case $l_validate_property_plan_source in
+				l_val_plan_actions=$((l_val_plan_actions + 1))
+				l_val_plan_source=${l_val_plan_row#*"$ZXFER_TAB"}
+				case $l_val_plan_source in
 				*"$ZXFER_TAB"*) return 1 ;;
 				esac
-				l_validate_property_plan_source=${l_validate_property_plan_source#*=}
-				l_validate_property_plan_source=${l_validate_property_plan_source#*=}
-				l_validate_property_plan_desired=${l_validate_property_plan_source#*=}
-				case $l_validate_property_plan_desired in *'='*) return 1 ;; esac
-				case $l_validate_property_plan_source in
-				override=*) l_validate_property_plan_overrides=$((l_validate_property_plan_overrides + 1)) ;;
+				l_val_plan_source=${l_val_plan_source#*=}
+				l_val_plan_source=${l_val_plan_source#*=}
+				l_val_plan_desired=${l_val_plan_source#*=}
+				case $l_val_plan_desired in *'='*) return 1 ;; esac
+				case $l_val_plan_source in
+				override=*) l_val_plan_overrides=$((l_val_plan_overrides + 1)) ;;
 				esac
 				;;
 			view"$ZXFER_TAB"?*=*) ;;
 			*) return 1 ;;
 			esac
 		done
-		[ -z "$l_validate_property_plan_row" ] && [ "$l_validate_property_plan_complete" -eq 1 ]
+		[ -z "$l_val_plan_row" ] && [ "$l_val_plan_complete" -eq 1 ]
 	} 2>/dev/null <"$1" || return 1
-	g_zxfer_property_plan_summary_result="$l_validate_property_plan_actions $l_validate_property_plan_overrides"
+	g_zxfer_property_plan_summary_result="$l_val_plan_actions $l_val_plan_overrides"
 }
 
 # Purpose: Plan and validate this dataset without publishing payload globals.
@@ -713,10 +729,29 @@ zxfer_plan_property_changes() {
 	g_zxfer_property_plan_summary_result=""
 	[ "$#" -eq 6 ] || zxfer_throw_error "Failed to plan dataset properties."
 	case $1:$2 in 0:0 | 0:1 | 1:0 | 1:1) ;; *) zxfer_throw_error "Failed to plan dataset properties." ;; esac
+	# Live `zfs get all` skeletons enforce unique property keys when -e is off
+	# and never emit `override` provenance, so identical source and destination
+	# lists with no overrides, -U drops, or -V views need no actions.
+	if [ "$2" -eq 1 ] &&
+		[ "${g_option_P_transfer_property:-0}" -eq 1 ] &&
+		[ -z "${g_option_o_override_property:-}" ] &&
+		[ -z "${g_zxfer_property_override_policy:-}" ] &&
+		[ -z "$6" ] &&
+		[ "${g_option_e_restore_property_mode:-0}" -eq 0 ] &&
+		[ "${g_option_V_very_verbose:-0}" -eq 0 ] &&
+		[ "$4" = "$5" ]; then
+		zxfer_ensure_runtime_artifact_file "${g_zxfer_property_plan_file:-}" property-plan ||
+			zxfer_throw_error "Failed to plan dataset properties." "$?"
+		g_zxfer_property_plan_file=$g_zxfer_runtime_artifact_path_result
+		zxfer_write_runtime_artifact_file "$g_zxfer_property_plan_file" "__ZXFER_PROPERTY_ACTIONS__$ZXFER_LF" ||
+			zxfer_throw_error "Failed to plan dataset properties." "$?"
+		g_zxfer_property_plan_summary_result="0 0"
+		return 0
+	fi
 	zxfer_stage_property_inputs "source$ZXFER_TAB$4" \
 		"override$ZXFER_TAB$g_zxfer_property_override_policy" "destination$ZXFER_TAB$5" ||
 		zxfer_throw_error "Failed to stage property planner input." "$?"
-	zxfer_ensure_runtime_artifact_file "$g_zxfer_property_plan_file" property-plan ||
+	zxfer_ensure_runtime_artifact_file "${g_zxfer_property_plan_file:-}" property-plan ||
 		zxfer_throw_error "Failed to plan dataset properties." "$?"
 	g_zxfer_property_plan_file=$g_zxfer_runtime_artifact_path_result
 	zxfer_write_runtime_artifact_file "$g_zxfer_property_plan_file" "" ||
@@ -828,8 +863,10 @@ zxfer_create_destination_dataset() {
 			l_missing_parent_exists=0
 		fi
 	fi
+	l_missing_action_count=${g_zxfer_property_plan_summary_result%% *}
+	l_missing_override_count=${g_zxfer_property_plan_summary_result#* }
 	if [ "$l_missing_initial" -eq 0 ] && [ "$l_missing_parent_exists" = 1 ] &&
-		[ "${g_zxfer_property_plan_summary_result#* }" -ne 0 ]; then
+		[ "$l_missing_override_count" -ne 0 ]; then
 		zxfer_load_normalized_dataset_properties "$l_missing_parent" destination ||
 			zxfer_throw_error "Failed to retrieve parent destination properties for [$l_missing_parent]${g_zxfer_property_error_result:+: }${g_zxfer_property_error_result:-.}" "$?"
 		zxfer_resolve_parent_property_plan "$l_missing_plan" "$g_zxfer_normalized_dataset_properties" "$l_missing_readonly" create ||
@@ -839,7 +876,7 @@ zxfer_create_destination_dataset() {
 	zxfer_warn_missing_recursive_destination "$l_missing_dataset"
 	l_missing_with_parents=no
 	if [ "$l_missing_parent_exists" = 0 ]; then
-		if [ "${g_zxfer_property_plan_summary_result%% *}" -ne 0 ]; then
+		if [ "$l_missing_action_count" -ne 0 ]; then
 			zxfer_execute_property_plan create "" filesystem "" "$l_missing_parent" yes ||
 				zxfer_throw_error "Error when creating destination filesystem." "$?"
 			zxfer_note_destination_dataset_exists "$l_missing_parent"
@@ -978,6 +1015,29 @@ zxfer_resolve_parent_property_plan() {
 	return "$l_parent_property_plan_status"
 }
 
+# Purpose: Display the decoded set and inherit property lists under -v before
+# applying them to a destination dataset.
+# Usage: zxfer_show_applied_property_plan_lists DEST SET_CSV INHERIT_CSV;
+# caller checks g_option_v_verbose before calling.
+zxfer_show_applied_property_plan_lists() {
+	l_show_apply_dest=$1
+	l_show_apply_set_csv=$2
+	l_show_apply_inherit_csv=$3
+
+	zxfer_echov "Setting properties/sources on destination filesystem \"$l_show_apply_dest\"."
+	for l_show_apply_kind in set inherit; do
+		if [ "$l_show_apply_kind" = set ]; then
+			l_show_apply_list=$l_show_apply_set_csv
+		else
+			l_show_apply_list=$l_show_apply_inherit_csv
+		fi
+		[ -n "$l_show_apply_list" ] || continue
+		zxfer_decode_serialized_property_list_for_display "$l_show_apply_list"
+		zxfer_escape_report_value_into_result "$g_zxfer_property_display_list_result"
+		zxfer_echov "Property $l_show_apply_kind list: $g_zxfer_escaped_report_value_result"
+	done
+}
+
 # Purpose: Validate and execute an action plan in one pass: build create/set
 # argv directly from encoded action rows and apply ordered inherits after the
 # single batched set. Never pass a decoded value to eval.
@@ -986,65 +1046,65 @@ zxfer_resolve_parent_property_plan() {
 # its original status; set/inherit retain their centralized failure reports.
 zxfer_execute_property_plan() {
 	case $1 in create | apply) ;; *) return 1 ;; esac
-	l_execute_property_plan_mode=$1
-	l_execute_property_plan_file=$2
-	l_execute_property_plan_type=$3
-	l_execute_property_plan_size=$4
-	l_execute_property_plan_dest=$5
-	l_execute_property_plan_parents=${6:-no}
-	l_execute_property_plan_inherits=""
-	l_execute_property_plan_set_csv=""
-	l_execute_property_plan_inherit_csv=""
+	l_exec_plan_mode=$1
+	l_exec_plan_file=$2
+	l_exec_plan_type=$3
+	l_exec_plan_size=$4
+	l_exec_plan_dest=$5
+	l_exec_plan_parents=${6:-no}
+	l_exec_plan_inherits=""
+	l_exec_plan_set_csv=""
+	l_exec_plan_inherit_csv=""
 
-	if [ "$l_execute_property_plan_mode" = create ]; then
-		[ "$l_execute_property_plan_type" != volume ] ||
-			[ -n "$l_execute_property_plan_size" ] || return 1
+	if [ "$l_exec_plan_mode" = create ]; then
+		[ "$l_exec_plan_type" != volume ] ||
+			[ -n "$l_exec_plan_size" ] || return 1
 		set -- create
-		[ "$l_execute_property_plan_parents" != yes ] || set -- "$@" -p
-		[ "$l_execute_property_plan_type" != volume ] ||
-			set -- "$@" -V "$l_execute_property_plan_size"
+		[ "$l_exec_plan_parents" != yes ] || set -- "$@" -p
+		[ "$l_exec_plan_type" != volume ] ||
+			set -- "$@" -V "$l_exec_plan_size"
 	else
-		[ -n "$l_execute_property_plan_file" ] || return 1
+		[ -n "$l_exec_plan_file" ] || return 1
 		set --
 	fi
 
-	if [ -n "$l_execute_property_plan_file" ]; then
-		l_execute_property_plan_complete=0
+	if [ -n "$l_exec_plan_file" ]; then
+		l_exec_plan_complete=0
 		{
-			while IFS= read -r l_execute_property_plan_row; do
-				[ "$l_execute_property_plan_complete" -eq 0 ] || return 1
-				case $l_execute_property_plan_row in
+			while IFS= read -r l_exec_plan_row; do
+				[ "$l_exec_plan_complete" -eq 0 ] || return 1
+				case $l_exec_plan_row in
 				"__ZXFER_PROPERTY_ACTIONS__")
-					l_execute_property_plan_complete=1
+					l_exec_plan_complete=1
 					;;
 				view"$ZXFER_TAB"?*=*) ;;
 				create"$ZXFER_TAB"?*=*=*=* | set"$ZXFER_TAB"?*=*=*=* | inherit"$ZXFER_TAB"?*=*=*=*)
-					l_execute_property_plan_verb=${l_execute_property_plan_row%%"$ZXFER_TAB"*}
-					l_execute_property_plan_item=${l_execute_property_plan_row#*"$ZXFER_TAB"}
-					case $l_execute_property_plan_item in
+					l_exec_plan_verb=${l_exec_plan_row%%"$ZXFER_TAB"*}
+					l_exec_plan_item=${l_exec_plan_row#*"$ZXFER_TAB"}
+					case $l_exec_plan_item in
 					*"$ZXFER_TAB"*) return 1 ;;
 					esac
-					l_execute_property_plan_rest=${l_execute_property_plan_item#*=}
-					l_execute_property_plan_value=${l_execute_property_plan_rest%%=*}
-					l_execute_property_plan_rest=${l_execute_property_plan_rest#*=}
-					case ${l_execute_property_plan_rest#*=} in *'='*) return 1 ;; esac
-					l_execute_property_plan_name=${l_execute_property_plan_item%%=*}
-					case $l_execute_property_plan_mode,$l_execute_property_plan_verb in
+					l_exec_plan_rest=${l_exec_plan_item#*=}
+					l_exec_plan_value=${l_exec_plan_rest%%=*}
+					l_exec_plan_rest=${l_exec_plan_rest#*=}
+					case ${l_exec_plan_rest#*=} in *'='*) return 1 ;; esac
+					l_exec_plan_name=${l_exec_plan_item%%=*}
+					case $l_exec_plan_mode,$l_exec_plan_verb in
 					create,create)
-						[ "$l_execute_property_plan_parents" != yes ] || return 1
-						zxfer_decode_property_value "$l_execute_property_plan_value"
-						set -- "$@" -o "$l_execute_property_plan_name=$g_zxfer_decoded_property_value"
+						[ "$l_exec_plan_parents" != yes ] || return 1
+						zxfer_decode_property_value "$l_exec_plan_value"
+						set -- "$@" -o "$l_exec_plan_name=$g_zxfer_decoded_property_value"
 						;;
 					apply,set)
-						zxfer_decode_property_value "$l_execute_property_plan_value"
-						set -- "$@" "$l_execute_property_plan_name=$g_zxfer_decoded_property_value"
+						zxfer_decode_property_value "$l_exec_plan_value"
+						set -- "$@" "$l_exec_plan_name=$g_zxfer_decoded_property_value"
 						[ "${g_option_v_verbose:-0}" -ne 1 ] ||
-							l_execute_property_plan_set_csv=${l_execute_property_plan_set_csv:+$l_execute_property_plan_set_csv,}$l_execute_property_plan_name=$l_execute_property_plan_value
+							l_exec_plan_set_csv=${l_exec_plan_set_csv:+$l_exec_plan_set_csv,}$l_exec_plan_name=$l_exec_plan_value
 						;;
 					apply,inherit)
-						l_execute_property_plan_inherits=${l_execute_property_plan_inherits:+$l_execute_property_plan_inherits$ZXFER_LF}$l_execute_property_plan_name
+						l_exec_plan_inherits=${l_exec_plan_inherits:+$l_exec_plan_inherits$ZXFER_LF}$l_exec_plan_name
 						[ "${g_option_v_verbose:-0}" -ne 1 ] ||
-							l_execute_property_plan_inherit_csv=${l_execute_property_plan_inherit_csv:+$l_execute_property_plan_inherit_csv,}$l_execute_property_plan_name=$l_execute_property_plan_value
+							l_exec_plan_inherit_csv=${l_exec_plan_inherit_csv:+$l_exec_plan_inherit_csv,}$l_exec_plan_name=$l_exec_plan_value
 						;;
 					*) return 1 ;;
 					esac
@@ -1052,39 +1112,29 @@ zxfer_execute_property_plan() {
 				*) return 1 ;;
 				esac
 			done
-			[ -z "$l_execute_property_plan_row" ] && [ "$l_execute_property_plan_complete" -eq 1 ]
-		} 2>/dev/null <"$l_execute_property_plan_file" || return 1
+			[ -z "$l_exec_plan_row" ] && [ "$l_exec_plan_complete" -eq 1 ]
+		} 2>/dev/null <"$l_exec_plan_file" || return 1
 	fi
 
-	if [ "$l_execute_property_plan_mode" = create ]; then
-		zxfer_run_destination_zfs_cmd "$@" "$l_execute_property_plan_dest"
+	if [ "$l_exec_plan_mode" = create ]; then
+		zxfer_run_destination_zfs_cmd "$@" "$l_exec_plan_dest"
 		return "$?"
 	fi
-	[ "$#" -gt 0 ] || [ -n "$l_execute_property_plan_inherits" ] || return 0
+	[ "$#" -gt 0 ] || [ -n "$l_exec_plan_inherits" ] || return 0
 	if [ "${g_option_v_verbose:-0}" -eq 1 ]; then
-		zxfer_echov "Setting properties/sources on destination filesystem \"$l_execute_property_plan_dest\"."
-		for l_execute_property_plan_kind in set inherit; do
-			if [ "$l_execute_property_plan_kind" = set ]; then
-				l_execute_property_plan_display=$l_execute_property_plan_set_csv
-			else
-				l_execute_property_plan_display=$l_execute_property_plan_inherit_csv
-			fi
-			[ -n "$l_execute_property_plan_display" ] || continue
-			zxfer_decode_serialized_property_list_for_display "$l_execute_property_plan_display"
-			zxfer_escape_report_value_into_result "$g_zxfer_property_display_list_result"
-			zxfer_echov "Property $l_execute_property_plan_kind list: $g_zxfer_escaped_report_value_result"
-		done
+		zxfer_show_applied_property_plan_lists "$l_exec_plan_dest" \
+			"$l_exec_plan_set_csv" "$l_exec_plan_inherit_csv"
 	fi
 	[ "$#" -eq 0 ] || zxfer_run_destination_property_verb set \
-		"Error when setting properties on destination filesystem." "$l_execute_property_plan_dest" "$@"
-	[ -n "$l_execute_property_plan_inherits" ] || return 0
-	while IFS= read -r l_execute_property_plan_inherit_name; do
-		[ -n "$l_execute_property_plan_inherit_name" ] || continue
+		"Error when setting properties on destination filesystem." "$l_exec_plan_dest" "$@"
+	[ -n "$l_exec_plan_inherits" ] || return 0
+	while IFS= read -r l_exec_plan_inherit_name; do
+		[ -n "$l_exec_plan_inherit_name" ] || continue
 		zxfer_run_destination_property_verb inherit \
 			"Error when inheriting properties on destination filesystem." \
-			"$l_execute_property_plan_dest" "$l_execute_property_plan_inherit_name" </dev/null
+			"$l_exec_plan_dest" "$l_exec_plan_inherit_name" </dev/null
 	done <<EOF
-$l_execute_property_plan_inherits
+$l_exec_plan_inherits
 EOF
 }
 
@@ -1176,15 +1226,17 @@ zxfer_transfer_properties() {
 	zxfer_plan_property_changes "$l_transfer_is_initial_source" "$l_transfer_destination_exists" \
 		"$l_transfer_source_dstype" "$l_transfer_effective_pvs" "$l_transfer_destination_pvs" \
 		"$l_transfer_unsupported_properties"
-	set -- "$g_zxfer_property_plan_file"
-	zxfer_show_property_plan "$1"
+	l_transfer_plan_file=$g_zxfer_property_plan_file
+	l_transfer_action_count=${g_zxfer_property_plan_summary_result%% *}
+	zxfer_show_property_plan "$l_transfer_plan_file"
 	if [ "$l_transfer_destination_exists" -eq 0 ]; then
-		zxfer_create_destination_dataset "$1" "$l_transfer_is_initial_source" \
+		zxfer_create_destination_dataset "$l_transfer_plan_file" "$l_transfer_is_initial_source" \
 			"$l_transfer_source_dstype" "$l_transfer_source_volsize" "$g_actual_dest" "$g_zxfer_property_readonly_policy"
 		zxfer_capture_backup_metadata_for_completed_transfer "$l_transfer_source" "$l_transfer_raw_pvs"
 		return 0
 	fi
-	if [ "$l_transfer_is_initial_source" -eq 0 ] && [ "${g_zxfer_property_plan_summary_result%% *}" -ne 0 ]; then
+	l_transfer_parent_reconciled=0
+	if [ "$l_transfer_is_initial_source" -eq 0 ] && [ "$l_transfer_action_count" -ne 0 ]; then
 		l_transfer_parent=${g_actual_dest%/*}
 		if [ "$l_transfer_parent" != "$g_actual_dest" ] &&
 			zxfer_destination_exists "$l_transfer_parent"; then
@@ -1193,16 +1245,23 @@ zxfer_transfer_properties() {
 			if [ "$g_zxfer_normalized_dataset_properties_cache_hit" -eq 0 ]; then
 				g_zxfer_profile_parent_destination_property_reads=$((g_zxfer_profile_parent_destination_property_reads + 1))
 			fi
-			zxfer_resolve_parent_property_plan "$1" "$g_zxfer_normalized_dataset_properties" "$g_zxfer_property_readonly_policy" apply ||
+			zxfer_resolve_parent_property_plan "$l_transfer_plan_file" "$g_zxfer_normalized_dataset_properties" "$g_zxfer_property_readonly_policy" apply ||
 				zxfer_throw_error "Failed to reconcile inherited child properties for destination [$g_actual_dest]." "$?"
-			set -- "$g_zxfer_property_parent_plan_file"
+			l_transfer_plan_file=$g_zxfer_property_parent_plan_file
+			l_transfer_parent_reconciled=1
 		fi
 		if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
-			zxfer_echoV_escaped "zxfer_transfer_properties adjusted child_set" "$(zxfer_property_plan_list "$1" set)"
-			zxfer_echoV_escaped "zxfer_transfer_properties adjusted inherit" "$(zxfer_property_plan_list "$1" inherit)"
+			zxfer_echoV_escaped "zxfer_transfer_properties adjusted child_set" "$(zxfer_property_plan_list "$l_transfer_plan_file" set)"
+			zxfer_echoV_escaped "zxfer_transfer_properties adjusted inherit" "$(zxfer_property_plan_list "$l_transfer_plan_file" inherit)"
 		fi
 	fi
-	zxfer_execute_property_plan apply "$1" "" "" "$g_actual_dest" ||
-		zxfer_throw_error "Failed to read dataset property plan." "$?"
+	if [ "$l_transfer_action_count" -eq 0 ] && [ "$l_transfer_parent_reconciled" -eq 0 ]; then
+		if [ ! -f "$l_transfer_plan_file" ] || [ ! -r "$l_transfer_plan_file" ]; then
+			zxfer_throw_error "Failed to read dataset property plan." 1
+		fi
+	else
+		zxfer_execute_property_plan apply "$l_transfer_plan_file" "" "" "$g_actual_dest" ||
+			zxfer_throw_error "Failed to read dataset property plan." "$?"
+	fi
 	zxfer_capture_backup_metadata_for_completed_transfer "$l_transfer_source" "$l_transfer_raw_pvs"
 }
