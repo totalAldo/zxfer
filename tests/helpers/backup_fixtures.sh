@@ -73,12 +73,10 @@ zxfer_test_backup_metadata_row() {
 
 # Publish a validated metadata view as the restore entrypoint does.
 zxfer_test_publish_backup_restore_view() {
-	g_zxfer_backup_restore_row_dir=${g_zxfer_backup_view_result%%"$ZXFER_LF"*}
-	l_test_restore_view=${g_zxfer_backup_view_result#*"$ZXFER_LF"}
-	g_zxfer_backup_restore_source_root=${l_test_restore_view%%"$ZXFER_LF"*}
-	l_test_restore_view=${l_test_restore_view#*"$ZXFER_LF"}
-	g_zxfer_backup_restore_destination_root=${l_test_restore_view%%"$ZXFER_LF"*}
-	g_zxfer_backup_restore_index=$ZXFER_LF${l_test_restore_view#*"$ZXFER_LF"}
+	g_zxfer_backup_restore_row_dir=$g_zxfer_backup_view_dir_result
+	g_zxfer_backup_restore_source_root=$g_zxfer_backup_view_source_root_result
+	g_zxfer_backup_restore_destination_root=$g_zxfer_backup_view_destination_root_result
+	g_zxfer_backup_restore_index=$ZXFER_LF$g_zxfer_backup_view_index_result$ZXFER_LF
 }
 
 # Check an arbitrary file's grammar and pair lookup through the shared loader.

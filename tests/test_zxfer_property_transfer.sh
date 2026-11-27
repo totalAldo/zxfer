@@ -1237,5 +1237,348 @@ test_property_owner_skips_plan_execution_on_zero_actions_when_plan_file_is_reada
 	assertEquals 'captured=tank/src' "$(cat "$TEST_TMPDIR/skip-zero-action-exec.out")"
 }
 
+################################################################################
+# BATCH PROPERTY PLANNING (R2-P1), -V CAPTURE ISOLATION (R2-P2), VERB DISPLAY (R2-C2)
+################################################################################
+
+# Purpose: Create a counting wrapper around the real awk so batch-planning tests
+# can assert exact awk invocation counts without mocking awk semantics.
+# Usage: zxfer_property_test_make_counting_awk WRAPPER_PATH LOG_PATH
+zxfer_property_test_make_counting_awk() {
+	l_real_awk=$(command -v awk)
+	cat >"$1" <<EOF
+#!/bin/sh
+printf 'awk\n' >>"$2"
+exec "$l_real_awk" "\$@"
+EOF
+	chmod 755 "$1"
+}
+
+test_batch_property_planning_plans_prefetched_pairs_in_one_awk_with_0600_files() {
+	l_awk_log="$TEST_TMPDIR/batch_one_awk.log"
+	l_awk_bin="$TEST_TMPDIR/batch_counting_awk"
+	: >"$l_awk_log"
+	zxfer_property_test_make_counting_awk "$l_awk_bin" "$l_awk_log"
+
+	(
+		umask 002
+		g_zxfer_run_umask=""
+		g_cmd_awk=$l_awk_bin
+		g_option_P_transfer_property=1
+		g_initial_source="tank/src"
+		g_initial_source_had_trailing_slash=1
+		g_destination="backup/dst"
+		g_recursive_dest_list="backup/dst
+backup/dst/child1
+backup/dst/vol1"
+		g_zxfer_source_property_tree_prefetch_state=1
+		g_zxfer_destination_property_tree_prefetch_state=1
+
+		l_fs_match="type=filesystem=-,casesensitivity=sensitive=-,normalization=none=-,utf8only=off=-,compression=lz4=local"
+		l_vol_src="type=volume=-,volsize=16384=-,compression=lz4=local"
+		l_vol_dst="type=volume=-,volsize=16384=-,compression=off=local"
+
+		zxfer_property_test_table_add source "tank/src" "$l_fs_match"
+		zxfer_property_test_table_add source "tank/src/child1" "$l_fs_match"
+		zxfer_property_test_table_add source "tank/src/vol1" "$l_vol_src"
+		zxfer_property_test_table_add destination "backup/dst" "$l_fs_match"
+		zxfer_property_test_table_add destination "backup/dst/child1" "$l_fs_match"
+		zxfer_property_test_table_add destination "backup/dst/vol1" "$l_vol_dst"
+
+		zxfer_run_destination_zfs_cmd() { printf 'zfs:%s\n' "$*"; }
+		zxfer_capture_backup_metadata_for_completed_transfer() { :; }
+
+		for l_ds in tank/src tank/src/child1 tank/src/vol1; do
+			zxfer_map_destination_dataset "$l_ds"
+			g_actual_dest=$g_zxfer_destination_dataset_result
+			zxfer_transfer_properties "$l_ds"
+		done
+		printf 'umask=%s\n' "$(umask)"
+		for l_pos in 1 2 3; do
+			printf 'mode.%s=%s\n' "$l_pos" "$(zxfer_get_path_mode_octal "$g_zxfer_property_batch_plan_base.$l_pos.p")"
+		done
+	) >"$TEST_TMPDIR/batch_one_awk.out"
+	assertEquals "Batch property transfer must succeed." 0 "$?"
+	assertEquals "Three prefetched datasets use exactly one batch awk plus one parent reconcile awk for vol1." \
+		2 "$(wc -l <"$l_awk_log" | tr -d ' ')"
+	assertContains "$(cat "$TEST_TMPDIR/batch_one_awk.out")" "zfs:set compression=lz4 backup/dst/vol1"
+	assertContains "$(cat "$TEST_TMPDIR/batch_one_awk.out")" "mode.1=600"
+	assertContains "$(cat "$TEST_TMPDIR/batch_one_awk.out")" "mode.2=600"
+	assertContains "$(cat "$TEST_TMPDIR/batch_one_awk.out")" "mode.3=600"
+	assertContains "Caller umask must be safely restored even when g_zxfer_run_umask was empty." \
+		"$(cat "$TEST_TMPDIR/batch_one_awk.out")" "umask=0002"
+}
+
+test_batch_property_planning_falls_back_after_ancestor_mutation_and_post_seed_reset() {
+	l_awk_log="$TEST_TMPDIR/batch_inval.log"
+	l_awk_bin="$TEST_TMPDIR/batch_inval_awk"
+	: >"$l_awk_log"
+	zxfer_property_test_make_counting_awk "$l_awk_bin" "$l_awk_log"
+
+	(
+		g_cmd_awk=$l_awk_bin
+		g_option_P_transfer_property=1
+		g_initial_source="tank/src"
+		g_initial_source_had_trailing_slash=1
+		g_destination="backup/dst"
+		g_recursive_dest_list="backup/dst
+backup/dst/a
+backup/dst/a/sub
+backup/dst/b"
+		g_zxfer_source_property_tree_prefetch_state=1
+		g_zxfer_destination_property_tree_prefetch_state=1
+
+		l_fs_base="type=filesystem=-,casesensitivity=sensitive=-,normalization=none=-,utf8only=off=-"
+		zxfer_property_test_table_add source "tank/src" "$l_fs_base,compression=lz4=local"
+		zxfer_property_test_table_add source "tank/src/a" "$l_fs_base,compression=gzip=local"
+		zxfer_property_test_table_add source "tank/src/a/sub" "$l_fs_base,compression=lz4=local"
+		zxfer_property_test_table_add source "tank/src/b" "$l_fs_base,compression=lz4=local"
+		zxfer_property_test_table_add destination "backup/dst" "$l_fs_base,compression=lz4=local"
+		zxfer_property_test_table_add destination "backup/dst/a" "$l_fs_base,compression=lz4=local"
+		zxfer_property_test_table_add destination "backup/dst/a/sub" "$l_fs_base,compression=lz4=local"
+		zxfer_property_test_table_add destination "backup/dst/b" "$l_fs_base,compression=lz4=local"
+
+		# After backup/dst/a mutates, backup/dst/a/sub is invalidated and read
+		# live with a changed destination compression (zstd), forcing a live re-plan.
+		zxfer_read_live_dataset_properties() {
+			printf 'live_read:%s:%s\n' "$2" "$1"
+			if [ "$1" = "backup/dst/a/sub" ]; then
+				g_zxfer_normalized_dataset_properties="$l_fs_base,compression=zstd=local"
+			else
+				g_zxfer_normalized_dataset_properties="$l_fs_base,compression=gzip=local"
+			fi
+		}
+		zxfer_run_destination_zfs_cmd() { printf 'zfs:%s\n' "$*"; }
+		zxfer_capture_backup_metadata_for_completed_transfer() { :; }
+
+		for l_ds in tank/src tank/src/a tank/src/a/sub tank/src/b; do
+			zxfer_map_destination_dataset "$l_ds"
+			g_actual_dest=$g_zxfer_destination_dataset_result
+			zxfer_transfer_properties "$l_ds"
+		done
+
+		# Post-seed reset must clear batch state so freshly read destinations
+		# never consume stale batch plans.
+		zxfer_reset_destination_property_iteration_cache
+		printf 'post_seed_state=%s post_seed_index=<%s>\n' \
+			"$g_zxfer_property_batch_plan_state" "$g_zxfer_property_batch_plan_index"
+	) >"$TEST_TMPDIR/batch_inval.out"
+	assertEquals 0 "$?"
+	l_out=$(cat "$TEST_TMPDIR/batch_inval.out")
+	assertContains "Mutating backup/dst/a must invalidate backup/dst/a/sub and trigger live read." \
+		"$l_out" "live_read:destination:backup/dst/a/sub"
+	assertContains "Invalidated descendant must fall back to live plan and set compression=lz4." \
+		"$l_out" "zfs:set compression=lz4 backup/dst/a/sub"
+	assertNotContains "Unaffected sibling backup/dst/b must not be live-read." \
+		"$l_out" "live_read:destination:backup/dst/b"
+	assertContains "Post-seed cache reset must clear batch state and index." \
+		"$l_out" "post_seed_state=0 post_seed_index=<>"
+}
+
+test_batch_property_planning_defers_warnings_and_creation_mismatch_to_dataset_turn() {
+	(
+		g_option_P_transfer_property=1
+		g_option_U_skip_unsupported_properties=1
+		g_option_v_verbose=1
+		g_zxfer_unsupported_filesystem_properties="overlay,volmode"
+		g_initial_source="tank/src"
+		g_initial_source_had_trailing_slash=1
+		g_destination="backup/dst"
+		g_recursive_dest_list="backup/dst
+backup/dst/child1
+backup/dst/child2"
+		g_zxfer_source_property_tree_prefetch_state=1
+		g_zxfer_destination_property_tree_prefetch_state=1
+
+		l_fs_ok="type=filesystem=-,casesensitivity=sensitive=-,normalization=none=-,utf8only=off=-"
+		l_fs_bad="type=filesystem=-,casesensitivity=insensitive=-,normalization=none=-,utf8only=off=-"
+
+		zxfer_property_test_table_add source "tank/src" "$l_fs_ok,overlay=on=local"
+		zxfer_property_test_table_add source "tank/src/child1" "$l_fs_ok,volmode=geom=default"
+		zxfer_property_test_table_add source "tank/src/child2" "$l_fs_ok,overlay=off=default"
+		zxfer_property_test_table_add destination "backup/dst" "$l_fs_ok"
+		zxfer_property_test_table_add destination "backup/dst/child1" "$l_fs_bad"
+		zxfer_property_test_table_add destination "backup/dst/child2" "$l_fs_ok"
+
+		zxfer_run_destination_zfs_cmd() { printf 'zfs:%s\n' "$*"; }
+		zxfer_capture_backup_metadata_for_completed_transfer() { :; }
+		zxfer_throw_error_with_usage() {
+			printf 'THROW_USAGE:%s\n' "$1" >&2
+			exit 42
+		}
+
+		printf '=== turn 1 ===\n' >&2
+		g_actual_dest="backup/dst"
+		zxfer_transfer_properties "tank/src"
+		printf '=== turn 2 ===\n' >&2
+		g_actual_dest="backup/dst/child1"
+		zxfer_transfer_properties "tank/src/child1"
+		printf '=== turn 3 (unreachable) ===\n' >&2
+	) >"$TEST_TMPDIR/batch_defer.stdout" 2>"$TEST_TMPDIR/batch_defer.stderr"
+	assertEquals "Creation-time mismatch must stop at child1's exact turn." 42 "$?"
+	assertEquals "=== turn 1 ===
+Destination does not support property overlay=on
+Destination does not support property overlay=on
+=== turn 2 ===
+Destination does not support property volmode=geom
+THROW_USAGE:The property \"casesensitivity\" may only be set
+at filesystem creation time. To modify this property
+you will need to first destroy target filesystem." "$(cat "$TEST_TMPDIR/batch_defer.stderr")"
+}
+
+test_batch_property_planning_skips_missing_dest_restore_backfill_invalid_type_and_fails_closed_on_corrupt_plan() {
+	(
+		g_option_P_transfer_property=1
+		g_initial_source="tank/src"
+		g_initial_source_had_trailing_slash=1
+		g_destination="backup/dst"
+		g_recursive_dest_list="backup/dst
+backup/dst/backfill
+backup/dst/badtype"
+		g_zxfer_source_property_tree_prefetch_state=1
+		g_zxfer_destination_property_tree_prefetch_state=1
+
+		l_fs_full="type=filesystem=-,casesensitivity=sensitive=-,normalization=none=-,utf8only=off=-,compression=lz4=local"
+		l_fs_missing_req="type=filesystem=-,normalization=none=-,utf8only=off=-,compression=lz4=local"
+
+		zxfer_property_test_table_add source "tank/src" "$l_fs_full"
+		zxfer_property_test_table_add source "tank/src/missing" "$l_fs_full"
+		zxfer_property_test_table_add source "tank/src/backfill" "$l_fs_missing_req"
+		zxfer_property_test_table_add source "tank/src/badtype" "type=snapshot=-,compression=lz4=local"
+		zxfer_property_test_table_add destination "backup/dst" "$l_fs_full"
+		zxfer_property_test_table_add destination "backup/dst/backfill" "$l_fs_full"
+		zxfer_property_test_table_add destination "backup/dst/badtype" "$l_fs_full"
+
+		zxfer_prepare_batch_property_plans
+		printf 'batch_state=%s\n' "$g_zxfer_property_batch_plan_state"
+		printf 'has_root=%s\n' "$(zxfer_find_property_row "$g_zxfer_property_batch_plan_index" tank/src && printf yes || printf no)"
+		printf 'has_missing=%s\n' "$(zxfer_find_property_row "$g_zxfer_property_batch_plan_index" tank/src/missing && printf yes || printf no)"
+		printf 'has_backfill=%s\n' "$(zxfer_find_property_row "$g_zxfer_property_batch_plan_index" tank/src/backfill && printf yes || printf no)"
+		printf 'has_badtype=%s\n' "$(zxfer_find_property_row "$g_zxfer_property_batch_plan_index" tank/src/badtype && printf yes || printf no)"
+
+		# -e restore mode must never consume a batch plan.
+		g_option_e_restore_property_mode=1
+		zxfer_try_use_prepared_property_plan tank/src backup/dst
+		printf 'restore_skipped=%s\n' "$?"
+		g_option_e_restore_property_mode=0
+
+		# Corrupted matched batch plan file must fail closed.
+		zxfer_find_property_row "$g_zxfer_property_batch_plan_index" tank/src
+		l_pos=${g_zxfer_property_row_result%%:*}
+		printf 'set\tcompression=lz4=local=\n' >|"$g_zxfer_property_batch_plan_base.$l_pos.p"
+		zxfer_throw_error() {
+			printf 'corrupt_throw=%s\n' "$1"
+			exit 51
+		}
+		zxfer_try_use_prepared_property_plan tank/src backup/dst
+	) >"$TEST_TMPDIR/batch_guards.out"
+	assertEquals 51 "$?"
+	assertEquals "batch_state=1
+has_root=yes
+has_missing=no
+has_backfill=no
+has_badtype=no
+restore_skipped=1
+corrupt_throw=Failed to plan dataset properties." "$(cat "$TEST_TMPDIR/batch_guards.out")"
+}
+
+test_property_transfer_captured_zfs_calls_isolate_very_verbose_remote_command_traces() {
+	l_fake_ssh="$TEST_TMPDIR/fake_ssh_prop_v"
+	cat >"$l_fake_ssh" <<'EOF'
+#!/bin/sh
+# Last argument is the remote command rendered by zxfer.
+for l_arg in "$@"; do
+	l_cmd=$l_arg
+done
+case $l_cmd in
+*"'get' '-Hpo' 'name,value' 'type' 'tank/src'"*)
+	printf 'tank/src\tfilesystem\n'
+	;;
+*"'get' '-Hpo' 'property' 'all' 'tank/src'"*)
+	printf 'compression\noverlay\n'
+	;;
+*"'get' '-Hpo' 'value' 'type' 'backup/dst'"*)
+	printf 'filesystem\n'
+	;;
+*"'get' '-Hpo' 'property' 'all' 'backup/dst'"*)
+	printf 'compression\n'
+	;;
+*"'get' '-Hpo' 'property,value,source' 'overlay' 'backup/dst'"*)
+	printf "bad property list: invalid property 'overlay'\n" >&2
+	exit 1
+	;;
+*"'get' '-Hpo' 'value' 'type' 'tank/vol'"*)
+	printf 'volume\n'
+	;;
+*"'get' '-Hpo' 'value' 'volsize' 'tank/vol'"*)
+	printf '4096\n'
+	;;
+*)
+	printf 'unexpected remote cmd: %s\n' "$l_cmd" >&2
+	exit 9
+	;;
+esac
+EOF
+	chmod 755 "$l_fake_ssh"
+
+	(
+		g_cmd_ssh=$l_fake_ssh
+		g_cmd_zfs=/sbin/zfs
+		g_origin_cmd_zfs=/sbin/zfs
+		g_target_cmd_zfs=/sbin/zfs
+		g_option_O_origin_host="origin.example"
+		g_option_T_target_host="target.example"
+		g_option_V_very_verbose=1
+		g_option_v_verbose=1
+		g_initial_source="tank/src"
+		g_initial_source_had_trailing_slash=1
+		g_recursive_source_list="tank/src"
+		g_destination="backup/dst"
+		g_recursive_dest_list="backup/dst"
+
+		zxfer_calculate_unsupported_properties
+		zxfer_get_validated_source_dataset_create_metadata "tank/vol" ""
+		printf 'unsup=<%s> type=<%s> volsize=<%s>\n' \
+			"$g_zxfer_unsupported_filesystem_properties" \
+			"$g_zxfer_source_dataset_type_result" \
+			"$g_zxfer_source_volume_size_result"
+	) >"$TEST_TMPDIR/prop_v_remote.stdout" 2>"$TEST_TMPDIR/prop_v_remote.stderr"
+	assertEquals "Captured -U and create-metadata queries under -V -O -T must succeed cleanly." 0 "$?"
+	assertEquals "unsup=<overlay> type=<volume> volsize=<4096>" "$(cat "$TEST_TMPDIR/prop_v_remote.stdout")"
+	assertContains "Remote origin trace must still appear on stderr." \
+		"$(cat "$TEST_TMPDIR/prop_v_remote.stderr")" "Running remote command [origin: origin.example]:"
+	assertContains "Remote target trace must still appear on stderr." \
+		"$(cat "$TEST_TMPDIR/prop_v_remote.stderr")" "Running remote command [target: target.example]:"
+}
+
+test_run_destination_property_verb_display_preserves_target_quotes_and_gates_on_verbose() {
+	(
+		g_option_T_target_host="target.example"
+		g_target_cmd_zfs=/sbin/zfs
+		g_option_v_verbose=1
+		zxfer_run_destination_zfs_cmd() { return 0; }
+		zxfer_run_destination_property_verb set "err" "backup/dst" "user:q=it's"
+		zxfer_run_destination_property_verb set "err" "backup/dst" "$(printf 'user:c=a\033b')"
+		# Without -v, even unsafe failure-report mode must not print or render for display.
+		g_option_v_verbose=0
+		ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
+		export ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS
+		zxfer_render_zfs_command_for_role() { printf 'UNEXPECTED_RENDER\n'; }
+		zxfer_run_destination_property_verb set "err" "backup/dst" "compression=lz4"
+	) >"$TEST_TMPDIR/verb_display.out"
+	assertEquals 0 "$?"
+	l_line1=$(sed -n 1p "$TEST_TMPDIR/verb_display.out")
+	l_line2=$(sed -n 2p "$TEST_TMPDIR/verb_display.out")
+	l_lines=$(wc -l <"$TEST_TMPDIR/verb_display.out" | tr -d ' ')
+	assertEquals "Only the two verbose calls produce stdout lines." 2 "$l_lines"
+	assertContains "Printable -T command keeps single-quote escape intact without doubling backslashes." \
+		"$l_line1" "'\\''set'\\''"
+	assertNotContains "Printable -T command must not double-escape backslashes." \
+		"$l_line1" "'\\\\''set'\\\\''"
+	assertEquals "Control-byte -T command display holds zero raw control bytes." \
+		0 "$(zxfer_property_test_count_control_bytes "$l_line2")"
+	assertContains "Control byte is escaped in -T display." "$l_line2" '\x1B'
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

@@ -43,8 +43,7 @@
 #   (g_zxfer_property_row_dir and g_zxfer_property_row_count), and the result
 #   globals g_zxfer_normalized_dataset_properties(_cache_hit),
 #   g_zxfer_required_properties_result, g_zxfer_property_record_value/source,
-#   g_zxfer_encoded_property_value, g_zxfer_decoded_property_value (with the
-#   helper result g_zxfer_property_replace_result),
+#   g_zxfer_encoded_property_value, g_zxfer_decoded_property_value,
 #   g_zxfer_property_list_value_result,
 #   g_zxfer_property_display_list_result, g_zxfer_property_row_result and
 #   g_zxfer_property_row_payload_result
@@ -53,8 +52,10 @@
 # reads globals: the -R/-P/-o options, g_initial_source, g_destination, the
 #   recursive dataset lists, and g_cmd_awk.
 # mutates caches: the property tables, through prefetch, live reads, and
-#   destination invalidation and the property store's row files. The shared
-#   row reader also accepts backup metadata's private view directories.
+#   destination invalidation and the property store's row files. Iteration and
+#   destination-cache resets also invalidate the transfer module's batch-plan
+#   cache state (g_zxfer_property_batch_plan_*). The shared row reader also
+#   accepts backup metadata's private view directories.
 # returns via stdout: zxfer_parse_property_views prints the parser output;
 #   every other helper publishes result globals.
 #
@@ -104,6 +105,10 @@ zxfer_reset_property_iteration_caches() {
 	g_zxfer_source_property_tree_prefetch_state=0
 	g_zxfer_destination_property_tree_prefetch_root=""
 	g_zxfer_destination_property_tree_prefetch_state=0
+	g_zxfer_property_batch_plan_state=0
+	g_zxfer_property_batch_plan_index=""
+	g_zxfer_property_batch_plan_context=""
+	g_zxfer_property_batch_plan_file_result=""
 }
 
 # Purpose: Reset all property read scratch, row store handles, and iteration
@@ -397,24 +402,6 @@ zxfer_split_property_record() {
 	esac
 }
 
-# Purpose: Replace every FROM in TEXT with TO, left to right as gsub does,
-# without forking.
-# Usage: zxfer_property_replace_all TEXT FROM TO; publishes
-# g_zxfer_property_replace_result.
-zxfer_property_replace_all() {
-	g_zxfer_property_replace_result=""
-	l_replace_rest=$1
-	while :; do
-		case $l_replace_rest in
-		*"$2"*) ;;
-		*) break ;;
-		esac
-		g_zxfer_property_replace_result=$g_zxfer_property_replace_result${l_replace_rest%%"$2"*}$3
-		l_replace_rest=${l_replace_rest#*"$2"}
-	done
-	g_zxfer_property_replace_result=$g_zxfer_property_replace_result$l_replace_rest
-}
-
 # Purpose: Percent-encode one raw property value without forking, as the AWK
 # encode_value does (% first).
 # Usage: zxfer_encode_property_value VALUE; publishes
@@ -427,9 +414,9 @@ zxfer_encode_property_value() {
 	esac
 	for l_encode_pair in "%:%25" ",:%2C" "=:%3D" ";:%3B" \
 		"$ZXFER_TAB:%09" "$ZXFER_CR:%0D" "$ZXFER_LF:%0A"; do
-		zxfer_property_replace_all "$g_zxfer_encoded_property_value" \
+		zxfer_replace_all_into_result "$g_zxfer_encoded_property_value" \
 			"${l_encode_pair%%:*}" "${l_encode_pair#*:}"
-		g_zxfer_encoded_property_value=$g_zxfer_property_replace_result
+		g_zxfer_encoded_property_value=$g_zxfer_replace_all_result
 	done
 }
 
@@ -445,9 +432,9 @@ zxfer_decode_property_value() {
 	esac
 	for l_decode_pair in "%0D:$ZXFER_CR" "%0A:$ZXFER_LF" "%09:$ZXFER_TAB" \
 		"%3B:;" "%3D:=" "%2C:," "%25:%"; do
-		zxfer_property_replace_all "$g_zxfer_decoded_property_value" \
+		zxfer_replace_all_into_result "$g_zxfer_decoded_property_value" \
 			"${l_decode_pair%%:*}" "${l_decode_pair#*:}"
-		g_zxfer_decoded_property_value=$g_zxfer_property_replace_result
+		g_zxfer_decoded_property_value=$g_zxfer_replace_all_result
 	done
 }
 
@@ -606,12 +593,17 @@ zxfer_property_table_find_dataset() {
 	zxfer_read_property_row "$g_zxfer_property_row_result" || return 1
 }
 
-# Purpose: Reset the destination table and re-arm its prefetch so freshly
-# seeded destinations are re-read while source rows stay warm.
+# Purpose: Reset the destination table, re-arm its prefetch, and invalidate
+# prepared batch property plans so freshly seeded destinations are re-read and
+# re-planned while source rows stay warm.
 # Usage: Called before the post-seed property reconcile pass.
 zxfer_reset_destination_property_iteration_cache() {
 	g_zxfer_destination_property_table=""
 	g_zxfer_destination_property_tree_prefetch_state=0
+	g_zxfer_property_batch_plan_state=0
+	g_zxfer_property_batch_plan_index=""
+	g_zxfer_property_batch_plan_context=""
+	g_zxfer_property_batch_plan_file_result=""
 }
 
 # Purpose: Drop the destination table rows that one mutation may have changed.

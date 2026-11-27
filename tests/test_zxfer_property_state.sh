@@ -443,6 +443,26 @@ failed strip=<>" "$(cat "$TEST_TMPDIR/tombstone.out")"
 		"zxfer_property_table_find_dataset source tank/src"
 	assertEquals "A destination-wide reset re-arms the destination prefetch." \
 		0 "$g_zxfer_destination_property_tree_prefetch_state"
+
+	# Both destination and iteration resets must invalidate batch property plans
+	# so post-seed reconcile and repeated -Y passes never reuse stale plans.
+	g_zxfer_property_batch_plan_state=1
+	g_zxfer_property_batch_plan_index="1:p1:p2${ZXFER_TAB}tank/src"
+	g_zxfer_property_batch_plan_context="ctx"
+	g_zxfer_property_batch_plan_file_result="/tmp/stale.p"
+	zxfer_reset_destination_property_iteration_cache
+	assertEquals "Destination cache reset clears batch plan state while keeping source warm." \
+		"0|||" "$g_zxfer_property_batch_plan_state|$g_zxfer_property_batch_plan_index|$g_zxfer_property_batch_plan_context|$g_zxfer_property_batch_plan_file_result"
+	assertTrue "Source rows stay warm across destination cache reset." \
+		"zxfer_property_table_find_dataset source tank/src"
+
+	g_zxfer_property_batch_plan_state=1
+	g_zxfer_property_batch_plan_index="1:p1:p2${ZXFER_TAB}tank/src"
+	g_zxfer_property_batch_plan_context="ctx"
+	g_zxfer_property_batch_plan_file_result="/tmp/stale.p"
+	zxfer_reset_property_iteration_caches
+	assertEquals "Iteration cache reset clears batch plan state." \
+		"0|||" "$g_zxfer_property_batch_plan_state|$g_zxfer_property_batch_plan_index|$g_zxfer_property_batch_plan_context|$g_zxfer_property_batch_plan_file_result"
 }
 
 ################################################################################

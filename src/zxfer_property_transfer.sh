@@ -38,30 +38,36 @@
 
 # Module contract:
 # owns globals: the readonly, noninheritable and required-creation property
-#   constants, the filter, plan and child AWK programs, the run-wide
-#   unsupported-property lists (g_zxfer_unsupported_*_properties), the
-#   prepared g_zxfer_property_readonly_policy/g_zxfer_property_override_policy,
-#   reusable planner input, action and parent-work files,
+#   constants, the filter, plan core, single/batch plan and child AWK programs,
+#   the run-wide unsupported-property lists (g_zxfer_unsupported_*_properties),
+#   the prepared g_zxfer_property_readonly_policy/g_zxfer_property_override_policy,
+#   reusable planner input, action, parent-work and batch-plan files
+#   (g_zxfer_property_batch_plan_*),
 #   result globals g_zxfer_override_properties_result,
-#   g_zxfer_source_dataset_type_result, g_zxfer_source_volume_size_result
+#   g_zxfer_source_dataset_type_result, g_zxfer_source_volume_size_result,
+#   g_zxfer_property_batch_plan_context_result,
+#   g_zxfer_property_batch_plan_file_result,
 #   and the small g_zxfer_property_plan_summary_result (action and override
 #   counts), cleared before planning. It also writes the property state module's
 #   failure text g_zxfer_property_error_result.
 # reads globals: the property CLI options, the destination platform and -m
-#   state, g_initial_source, g_actual_dest, the recursive source and
-#   destination lists, the restore metadata, and the rendered -T command in
+#   state, g_initial_source, g_actual_dest, g_zxfer_run_umask, the recursive
+#   source and destination lists, the property tables and row directory, the
+#   restore metadata, and the rendered -T command in
 #   g_zxfer_shell_command_result.
-# mutates caches: the unsupported-property lists, destination property rows
+# mutates caches: the unsupported-property lists, batch-plan state (reset on
+#   destination/iteration cache resets), destination property rows
 #   (dropped by the state module's invalidation after every create, set and
 #   inherit), and the destination existence cache through probes.
-# returns via stdout: diagnostic plan lists and rendered -v display commands.
+# returns via stdout: diagnostic plan lists (zxfer_property_plan_list).
 #   Property values remain encoded until command construction.
 #
 # Per dataset, zxfer_transfer_properties reads the source, checks the -o
 # properties against the initial source, decides whether the destination
-# exists, then runs one plan awk: derive the apply and creation lists, and
-# diff them against the destination when it exists. A missing destination is
-# created; an existing one gets its sets and inherits, a child's after they
+# exists, then consumes a provenance-checked batch plan (for existing
+# prefetched pairs) or runs one plan awk: derive the apply and creation lists,
+# and diff them against the destination when it exists. A missing destination
+# is created; an existing one gets its sets and inherits, a child's after they
 # are adjusted to what its destination parent already provides.
 
 ZXFER_BASE_READONLY_PROPERTIES="type,creation,used,available,referenced,\
@@ -88,6 +94,12 @@ zxfer_reset_property_runtime_state() {
 	g_zxfer_property_plan_file=""
 	g_zxfer_property_parent_plan_file=""
 	g_zxfer_property_plan_summary_result=""
+	g_zxfer_property_batch_plan_base=""
+	g_zxfer_property_batch_plan_state=0
+	g_zxfer_property_batch_plan_index=""
+	g_zxfer_property_batch_plan_context=""
+	g_zxfer_property_batch_plan_context_result=""
+	g_zxfer_property_batch_plan_file_result=""
 }
 
 # Purpose: Resolve the readonly property list for the destination platform,
@@ -227,7 +239,8 @@ zxfer_probe_unsupported_properties_for_type() {
 	l_type_probe_types=$3
 
 	l_type_probe_status=0
-	l_type_probe_source_names=$(zxfer_run_source_zfs_cmd get -Hpo property all "$l_type_probe_source" 2>&1 </dev/null) ||
+	l_type_probe_source_names=$(zxfer_run_zfs_cmd_capturing_stderr source merge \
+		get -Hpo property all "$l_type_probe_source" </dev/null) ||
 		l_type_probe_status=$?
 	[ "$l_type_probe_status" -eq 0 ] ||
 		zxfer_throw_error "Failed to retrieve source property list for dataset [$l_type_probe_source]: $l_type_probe_source_names" "$l_type_probe_status"
@@ -250,11 +263,13 @@ EOF
 		zxfer_throw_error "Failed to determine the destination property-support probe dataset."
 
 	l_type_probe_status=0
-	l_type_probe_dest_type=$(zxfer_run_destination_zfs_cmd get -Hpo value type "$l_type_probe_dest" 2>&1 </dev/null) ||
+	l_type_probe_dest_type=$(zxfer_run_zfs_cmd_capturing_stderr destination merge \
+		get -Hpo value type "$l_type_probe_dest" </dev/null) ||
 		l_type_probe_status=$?
 	[ "$l_type_probe_status" -eq 0 ] ||
 		zxfer_throw_error "Failed to determine the destination property-support probe dataset type for [$l_type_probe_dest]: $l_type_probe_dest_type" "$l_type_probe_status"
-	l_type_probe_dest_names=$(zxfer_run_destination_zfs_cmd get -Hpo property all "$l_type_probe_dest" 2>&1 </dev/null) ||
+	l_type_probe_dest_names=$(zxfer_run_zfs_cmd_capturing_stderr destination merge \
+		get -Hpo property all "$l_type_probe_dest" </dev/null) ||
 		l_type_probe_status=$?
 	[ "$l_type_probe_status" -eq 0 ] ||
 		zxfer_throw_error "Failed to retrieve destination property list for dataset [$l_type_probe_dest]: $l_type_probe_dest_names" "$l_type_probe_status"
@@ -280,8 +295,9 @@ EOF
 	while IFS= read -r l_type_probe_property; do
 		[ -n "$l_type_probe_property" ] || continue
 		l_type_probe_status=0
-		l_type_probe_output=$(zxfer_run_destination_zfs_cmd get -Hpo property,value,source \
-			"$l_type_probe_property" "$l_type_probe_dest" 2>&1 </dev/null) || l_type_probe_status=$?
+		l_type_probe_output=$(zxfer_run_zfs_cmd_capturing_stderr destination merge \
+			get -Hpo property,value,source \
+			"$l_type_probe_property" "$l_type_probe_dest" </dev/null) || l_type_probe_status=$?
 		[ "$l_type_probe_status" -ne 0 ] || continue
 		case $l_type_probe_output in
 		*"invalid property"* | *"no such property"* | *"not supported"*)
@@ -324,7 +340,8 @@ zxfer_calculate_unsupported_properties() {
 		set -- "$@" "$l_scan_source"
 		[ "$#" -ge 128 ] || continue
 		l_scan_status=0
-		l_scan_batch=$(zxfer_run_source_zfs_cmd get -Hpo name,value type "$@" 2>&1 </dev/null) ||
+		l_scan_batch=$(zxfer_run_zfs_cmd_capturing_stderr source merge \
+			get -Hpo name,value type "$@" </dev/null) ||
 			l_scan_status=$?
 		[ "$l_scan_status" -eq 0 ] ||
 			zxfer_throw_error "Failed to retrieve source dataset types for unsupported-property scan: $l_scan_batch" "$l_scan_status"
@@ -335,7 +352,8 @@ $l_scan_sources
 EOF
 	if [ "$#" -gt 0 ]; then
 		l_scan_status=0
-		l_scan_batch=$(zxfer_run_source_zfs_cmd get -Hpo name,value type "$@" 2>&1 </dev/null) ||
+		l_scan_batch=$(zxfer_run_zfs_cmd_capturing_stderr source merge \
+			get -Hpo name,value type "$@" </dev/null) ||
 			l_scan_status=$?
 		[ "$l_scan_status" -eq 0 ] ||
 			zxfer_throw_error "Failed to retrieve source dataset types for unsupported-property scan: $l_scan_batch" "$l_scan_status"
@@ -372,7 +390,8 @@ zxfer_lookup_or_get_source_property() {
 		fi
 	fi
 	l_lookup_status=0
-	g_zxfer_property_list_value_result=$(zxfer_run_source_zfs_cmd get -Hpo value "$3" "$1" 2>&1) ||
+	g_zxfer_property_list_value_result=$(zxfer_run_zfs_cmd_capturing_stderr source merge \
+		get -Hpo value "$3" "$1") ||
 		l_lookup_status=$?
 	if [ "$l_lookup_status" -ne 0 ]; then
 		g_zxfer_property_error_result="Failed to retrieve source $4 for [$1]: $g_zxfer_property_list_value_result"
@@ -487,6 +506,15 @@ BEGIN {
 # ZXFER_PROPERTY_INPUT_AWK and ZXFER_PROPERTY_AWK_LIB.
 # shellcheck disable=SC2016  # AWK program is intentionally single-quoted.
 ZXFER_PROPERTY_RULES_AWK='
+function is_unsupported_property(property) {
+	if (property in unsupported_property)
+		return 1
+	if (!use_typed_unsupported)
+		return 0
+	if (source_dstype == "volume")
+		return (property in unsupported_volume_property)
+	return (property in unsupported_filesystem_property)
+}
 function filter_property_list(list, drop_unsupported, count, items, i, fields, field_count, output) {
 	count = split(list, items, ",")
 	output = ""
@@ -496,9 +524,11 @@ function filter_property_list(list, drop_unsupported, count, items, i, fields, f
 		field_count = split(items[i], fields, "=")
 		if ((fields[1] in remove_property) && (field_count < 3 || fields[3] != "override"))
 			continue
-		if (drop_unsupported && (fields[1] in unsupported_property)) {
-			if (verbose == 1)
+		if (drop_unsupported && is_unsupported_property(fields[1])) {
+			if (verbose == 1) {
 				warnings[++warning_count] = "Destination does not support property " fields[1] "=" decode_value(fields[2])
+				warning_items[warning_count] = fields[1] "=" fields[2]
+			}
 			continue
 		}
 		output = append_csv(output, items[i])
@@ -515,14 +545,15 @@ BEGIN {
 }
 '
 
-# Plan one dataset in one AWK. The file holds only selected create/set/inherit
-# actions, with encoded values and first-source/override provenance for late
-# parent reconciliation. -V alone retains the diagnostic CSV views. Checked
-# close and a final record precede the stdout marker and warnings; validation
-# publishes small action/override counts. Creation mismatches retain status 3
-# and the original property-name and warning protocol.
+# Shared property planner core for single-dataset and batch planning. The file
+# holds only selected create/set/inherit actions, with encoded values and
+# first-source/override provenance for late parent reconciliation. -V alone
+# retains the diagnostic CSV views. Checked close and a final record precede
+# completion; batch mode defers -U warnings (encoded as warn<TAB>NAME=VAL) and
+# creation-time mismatches (error<TAB>3<TAB>PROPERTY) into each dataset plan so
+# they fire at that exact dataset turn.
 # shellcheck disable=SC2016  # AWK field references must remain literal.
-ZXFER_PROPERTY_PLAN_AWK='
+ZXFER_PROPERTY_PLAN_CORE_AWK='
 function emit_action(verb, property, value, source, desired) {
 	print verb "\t" property "=" value "=" source "=" (source == "override" ? desired : "") > output_path
 }
@@ -557,21 +588,49 @@ function append_creation(property, value, source) {
 		creation_seen[property] = 1
 	}
 }
-function print_warnings(i) {
+function print_warnings(    i) {
 	for (i = 1; i <= warning_count; i++)
 		print warnings[i]
 }
-BEGIN {
-	output_path = ENVIRON["ZXFER_PROPERTY_PLAN_FILE"]
+function emit_deferred_warnings(    i) {
+	for (i = 1; i <= warning_count; i++)
+		print "warn\t" warning_items[i] > output_path
+}
+function init_override_plan_state() {
+	first_values(property_input["override"], override_value, override_source)
+	if (transfer_all_flag == 0)
+		override_count = split(property_input["override"], override_items, ",")
+}
+function plan_one_dataset(ds_is_initial, ds_has_dest, ds_type, ds_source_pvs, ds_dest_pvs, ds_output_path, defer_status,    k, i, fields, source_items, source_count, property, is_creation, plan_items, plan_count, create_items, create_count) {
+	is_initial = ds_is_initial
+	has_destination = ds_has_dest
+	source_dstype = ds_type
+	output_path = ds_output_path
+	# POSIX awk deletes entries individually to keep batch memory bounded.
+	for (k in required_create) delete required_create[k]
+	for (k in creation_seen) delete creation_seen[k]
+	for (k in dest_value) delete dest_value[k]
+	for (k in dest_source) delete dest_source[k]
+	for (k in dest_available) delete dest_available[k]
+	for (k in desired_value) delete desired_value[k]
+	for (k in desired_source) delete desired_source[k]
+	for (k in warnings) delete warnings[k]
+	for (k in warning_items) delete warning_items[k]
+	warning_count = 0
+	override_output = ""
+	creation_output = ""
+	dest_output = ""
+	initial_set_list = ""
+	child_set_list = ""
+	inherit_list = ""
+
 	printf "" > output_path
 	if (source_dstype != "volume")
 		csv_to_set(required_creation_properties, required_create)
 
 	# Derive. The -o items arrive parsed, encoded and unique. Without -P they
 	# lead both lists; with -P they replace the source values they name.
-	first_values(property_input["override"], override_value, override_source)
 	if (transfer_all_flag == 0) {
-		override_count = split(property_input["override"], override_items, ",")
 		for (i = 1; i <= override_count; i++) {
 			if (override_items[i] == "")
 				continue
@@ -581,7 +640,7 @@ BEGIN {
 		}
 	}
 
-	source_count = split(property_input["source"], source_items, ",")
+	source_count = split(ds_source_pvs, source_items, ",")
 	for (i = 1; i <= source_count; i++) {
 		if (source_items[i] == "")
 			continue
@@ -618,7 +677,7 @@ BEGIN {
 	# Diff. A creation-time property the destination holds with another
 	# value is refused before anything is planned.
 	if (has_destination == 1) {
-		dest_output = filter_property_list(property_input["destination"], 0)
+		dest_output = filter_property_list(ds_dest_pvs, 0)
 		first_values(dest_output, dest_value, dest_source)
 		for (property in dest_value)
 			dest_available[property] = 1
@@ -635,6 +694,14 @@ BEGIN {
 			}
 			if ((property in required_create) && (property in dest_available) &&
 				fields[2] != dest_value[property]) {
+				if (defer_status) {
+					emit_deferred_warnings()
+					print "error\t3\t" property > output_path
+					print "__ZXFER_PROPERTY_ACTIONS__" > output_path
+					if (close(output_path) != 0) exit 1
+					return 3
+				}
+				if (close(output_path) != 0) exit 1
 				print property
 				print_warnings()
 				exit 3
@@ -677,26 +744,191 @@ BEGIN {
 			print "view\tinherit=" inherit_list > output_path
 		}
 	}
+	if (defer_status)
+		emit_deferred_warnings()
 	print "__ZXFER_PROPERTY_ACTIONS__" > output_path
 	if (close(output_path) != 0) exit 1
-	print "__ZXFER_PROPERTY_PLAN__"
-	print_warnings()
+	if (!defer_status) {
+		print "__ZXFER_PROPERTY_PLAN__"
+		print_warnings()
+	}
+	return 0
+}'
+
+# Single-dataset driver sharing plan_one_dataset; preserves direct-AWK callers.
+# shellcheck disable=SC2016  # AWK field references must remain literal.
+ZXFER_PROPERTY_PLAN_AWK=$ZXFER_PROPERTY_PLAN_CORE_AWK'
+BEGIN {
+	init_override_plan_state()
+	plan_one_dataset(is_initial, has_destination, source_dstype,
+		property_input["source"], property_input["destination"],
+		ENVIRON["ZXFER_PROPERTY_PLAN_FILE"], 0)
+}'
+
+# Batch driver for existing prefetched (source_row, dest_row) pairs. Reads the
+# staged manifest in BEGIN, closes it, then opens/closes each source row, dest
+# row, and output plan file inside the loop (<= 1 FD open at a time for
+# illumos/BSD awk). Datasets missing valid type or required creation properties
+# are skipped so they fall through to live backfill and single-dataset planning.
+# shellcheck disable=SC2016  # AWK field references must remain literal.
+ZXFER_PROPERTY_BATCH_PLAN_AWK='
+function valid_row_name(name) {
+	return name ~ /^[abcdefghijklmnopqrstuvwxyz][0123456789]+$/
+}
+function read_row_file(file,    status, line, extra_line) {
+	line = ""
+	status = (getline line < file)
+	if (status <= 0) {
+		close(file)
+		return ""
+	}
+	if ((getline extra_line < file) != 0) {
+		close(file)
+		return ""
+	}
+	close(file)
+	return line
+}
+function map_destination(src,    prefix) {
+	if (src == initial_source)
+		return dest_root
+	prefix = initial_source "/"
+	if (substr(src, 1, length(prefix)) == prefix)
+		return dest_root substr(src, length(initial_source) + 1)
+	return ""
+}
+function list_first_value(list, prop_name,    hay, needle, at, rest, eq, comma) {
+	hay = "," list ","
+	needle = "," prop_name "="
+	at = index(hay, needle)
+	if (at == 0)
+		return ""
+	rest = substr(hay, at + length(needle))
+	eq = index(rest, "=")
+	comma = index(rest, ",")
+	if (eq <= 1 || (comma > 0 && eq > comma))
+		return ""
+	return substr(rest, 1, eq - 1)
+}
+function has_all_required_creation(list,    k) {
+	for (k = 1; k <= req_create_count; k++) {
+		if (req_create_names[k] != "" &&
+			index("," list ",", "," req_create_names[k] "=") == 0)
+			return 0
+	}
+	return 1
+}
+BEGIN {
+	row_dir = ENVIRON["ZXFER_AWK_ROW_DIR"]
+	plan_base = ENVIRON["ZXFER_AWK_PLAN_BASE"]
+	initial_source = ENVIRON["ZXFER_AWK_INITIAL_SOURCE"]
+	dest_root = ENVIRON["ZXFER_AWK_DESTINATION_ROOT"]
+	if (row_dir == "" || plan_base == "" || initial_source == "" || dest_root == "")
+		exit 1
+	use_typed_unsupported = 1
+	csv_to_set(ENVIRON["ZXFER_AWK_UNSUPPORTED_FILESYSTEM_LIST"], unsupported_filesystem_property)
+	csv_to_set(ENVIRON["ZXFER_AWK_UNSUPPORTED_VOLUME_LIST"], unsupported_volume_property)
+	req_create_count = split(required_creation_properties, req_create_names, ",")
+	init_override_plan_state()
+
+	section = 0
+	manifest_complete = 0
+	while ((m_status = (getline m_line < plan_base)) > 0) {
+		if (m_line == "__ZXFER_BATCH_SOURCE__") { section = 1; continue }
+		if (m_line == "__ZXFER_BATCH_DEST__") { section = 2; continue }
+		if (m_line == "__ZXFER_BATCH_DEST_LIST__") { section = 3; continue }
+		if (m_line == "__ZXFER_BATCH_END__") { manifest_complete = 1; break }
+		if (m_line == "") continue
+		if (section == 1 || section == 2) {
+			m_tab = index(m_line, "\t")
+			if (m_tab < 2) continue
+			m_row = substr(m_line, 1, m_tab - 1)
+			m_ds = substr(m_line, m_tab + 1)
+			if (section == 1) {
+				if (!(m_ds in src_row_seen)) {
+					src_row_seen[m_ds] = 1
+					src_order[++src_count] = m_ds
+					src_row[m_ds] = m_row
+				}
+			} else if (!(m_ds in dst_row_seen)) {
+				dst_row_seen[m_ds] = 1
+				dst_row[m_ds] = m_row
+			}
+		} else if (section == 3) {
+			dest_exists[m_line] = 1
+		}
+	}
+	if (!manifest_complete || (getline m_line < plan_base) != 0) {
+		close(plan_base)
+		exit 1
+	}
+	if (close(plan_base) != 0)
+		exit 1
+
+	cand_count = 0
+	for (bi = 1; bi <= src_count; bi++) {
+		ds = src_order[bi]
+		srow = src_row[ds]
+		if (!valid_row_name(srow)) continue
+		dst = map_destination(ds)
+		if (dst == "" || !(dst in dest_exists)) continue
+		if (!(dst in dst_row)) continue
+		drow = dst_row[dst]
+		if (!valid_row_name(drow)) continue
+		cand_count++
+		cand_src[cand_count] = ds
+		cand_srow[cand_count] = srow
+		cand_drow[cand_count] = drow
+	}
+	if (cand_count >= 2) {
+		pos = 0
+		for (bi = 1; bi <= cand_count; bi++) {
+			ds = cand_src[bi]
+			srow = cand_srow[bi]
+			drow = cand_drow[bi]
+			src_pvs = read_row_file(row_dir "/" srow)
+			if (src_pvs == "") continue
+			dst_pvs = read_row_file(row_dir "/" drow)
+			if (dst_pvs == "") continue
+			ds_type = list_first_value(src_pvs, "type")
+			if (ds_type != "filesystem" && ds_type != "volume") continue
+			if (ds_type == "filesystem" &&
+				(!has_all_required_creation(src_pvs) || !has_all_required_creation(dst_pvs)))
+				continue
+			pos++
+			plan_one_dataset(ds == initial_source ? 1 : 0, 1, ds_type,
+				src_pvs, dst_pvs, plan_base "." pos ".p", 1)
+			printf "%d:%s:%s\t%s\n", pos, srow, drow, ds
+		}
+	}
+	print "__ZXFER_PROPERTY_BATCH_PLAN__"
 }'
 
 # Purpose: Validate a complete action file before any property mutation.
-# Usage: zxfer_validate_property_plan FILE; returns 1 on read failure,
-# unknown records, a missing final marker or data after it.
+# Usage: zxfer_validate_property_plan FILE [batch]; returns 1 on read failure,
+# unknown records, a missing final marker or data after it. In "batch" mode,
+# also accepts deferred warn/error records (rejecting create), replays any
+# deferred -U warnings after full validation, and throws on error<TAB>3.
 zxfer_validate_property_plan() {
 	g_zxfer_property_plan_summary_result=""
+	l_val_plan_mode=${2:-}
 	l_val_plan_complete=0
 	l_val_plan_actions=0
 	l_val_plan_overrides=0
+	l_val_plan_warnings=""
+	l_val_plan_error_prop=""
 	{
 		while IFS= read -r l_val_plan_row; do
 			[ "$l_val_plan_complete" -eq 0 ] || return 1
 			case $l_val_plan_row in
 			"__ZXFER_PROPERTY_ACTIONS__") l_val_plan_complete=1 ;;
 			create"$ZXFER_TAB"?*=*=*=* | set"$ZXFER_TAB"?*=*=*=* | inherit"$ZXFER_TAB"?*=*=*=*)
+				[ -z "$l_val_plan_error_prop" ] || return 1
+				if [ "$l_val_plan_mode" = batch ]; then
+					case $l_val_plan_row in
+					create"$ZXFER_TAB"*) return 1 ;;
+					esac
+				fi
 				l_val_plan_actions=$((l_val_plan_actions + 1))
 				l_val_plan_source=${l_val_plan_row#*"$ZXFER_TAB"}
 				case $l_val_plan_source in
@@ -710,13 +942,231 @@ zxfer_validate_property_plan() {
 				override=*) l_val_plan_overrides=$((l_val_plan_overrides + 1)) ;;
 				esac
 				;;
-			view"$ZXFER_TAB"?*=*) ;;
+			view"$ZXFER_TAB"?*=*)
+				[ -z "$l_val_plan_error_prop" ] || return 1
+				;;
+			warn"$ZXFER_TAB"?*=*)
+				[ "$l_val_plan_mode" = batch ] || return 1
+				l_val_plan_warn_item=${l_val_plan_row#"warn$ZXFER_TAB"}
+				case $l_val_plan_warn_item in
+				*"$ZXFER_TAB"*) return 1 ;;
+				esac
+				case ${l_val_plan_warn_item#*=} in
+				*'='*) return 1 ;;
+				esac
+				l_val_plan_warnings=${l_val_plan_warnings:+$l_val_plan_warnings$ZXFER_LF}$l_val_plan_warn_item
+				;;
+			"error${ZXFER_TAB}3${ZXFER_TAB}"?*)
+				[ "$l_val_plan_mode" = batch ] || return 1
+				[ "$l_val_plan_actions" -eq 0 ] && [ -z "$l_val_plan_error_prop" ] || return 1
+				l_val_plan_error_prop=${l_val_plan_row#"error${ZXFER_TAB}3${ZXFER_TAB}"}
+				case $l_val_plan_error_prop in
+				*"$ZXFER_TAB"*) return 1 ;;
+				esac
+				;;
 			*) return 1 ;;
 			esac
 		done
 		[ -z "$l_val_plan_row" ] && [ "$l_val_plan_complete" -eq 1 ]
 	} 2>/dev/null <"$1" || return 1
+
+	if [ "$l_val_plan_mode" = batch ]; then
+		if [ -n "$l_val_plan_warnings" ]; then
+			while IFS= read -r l_val_plan_warn_item; do
+				[ -n "$l_val_plan_warn_item" ] || continue
+				zxfer_decode_property_value "${l_val_plan_warn_item#*=}"
+				zxfer_warn_stderr "Destination does not support property ${l_val_plan_warn_item%%=*}=$g_zxfer_decoded_property_value"
+			done <<EOF
+$l_val_plan_warnings
+EOF
+		fi
+		if [ -n "$l_val_plan_error_prop" ]; then
+			zxfer_throw_error_with_usage "The property \"$l_val_plan_error_prop\" may only be set
+at filesystem creation time. To modify this property
+you will need to first destroy target filesystem."
+			return 1
+		fi
+	fi
 	g_zxfer_property_plan_summary_result="$l_val_plan_actions $l_val_plan_overrides"
+}
+
+# Purpose: Build the current policy and endpoint fingerprint for batch property
+# planning so any policy, verbosity, row-store, or root change invalidates
+# previously prepared plans.
+# Usage: zxfer_build_property_batch_plan_context; publishes
+# g_zxfer_property_batch_plan_context_result and leaves the mapped destination
+# root in g_zxfer_destination_dataset_result, or returns 1 without roots.
+zxfer_build_property_batch_plan_context() {
+	g_zxfer_property_batch_plan_context_result=""
+	[ -n "${g_initial_source:-}" ] && [ -n "${g_destination:-}" ] || return 1
+	zxfer_map_destination_dataset
+	l_batch_ctx_dest_root=$g_zxfer_destination_dataset_result
+	l_batch_ctx_unsup_fs=""
+	l_batch_ctx_unsup_vol=""
+	if [ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ]; then
+		l_batch_ctx_unsup_fs=${g_zxfer_unsupported_filesystem_properties:-}
+		l_batch_ctx_unsup_vol=${g_zxfer_unsupported_volume_properties:-}
+	fi
+	g_zxfer_property_batch_plan_context_result="${g_zxfer_property_row_dir:-}$ZXFER_LF$g_initial_source$ZXFER_LF$l_batch_ctx_dest_root$ZXFER_LF${g_option_P_transfer_property:-0}:${g_option_U_skip_unsupported_properties:-0}:${g_option_v_verbose:-0}:${g_option_V_very_verbose:-0}$ZXFER_LF${g_zxfer_property_readonly_policy:-}$ZXFER_LF${g_option_I_ignore_properties:-}$ZXFER_LF${g_zxfer_property_override_policy:-}$ZXFER_LF$l_batch_ctx_unsup_fs$ZXFER_LF$l_batch_ctx_unsup_vol"
+}
+
+# Purpose: Batch-plan all existing prefetched (source_row, dest_row) pairs in
+# one AWK invocation under umask 077, writing 0600 per-dataset plan files.
+# Usage: zxfer_prepare_batch_property_plans; runs lazily once per destination
+# cache iteration when >= 2 eligible pairs exist. Publishes
+# g_zxfer_property_batch_plan_index ("POS:SROW:DROW<TAB>SOURCE" lines) and sets
+# g_zxfer_property_batch_plan_state=1 on complete validated output; failures
+# mark state=2 and publish nothing so callers fall back to single-dataset plans.
+zxfer_prepare_batch_property_plans() {
+	g_zxfer_property_batch_plan_state=2
+	g_zxfer_property_batch_plan_index=""
+	g_zxfer_property_batch_plan_context=""
+	g_zxfer_property_batch_plan_file_result=""
+
+	[ "${g_option_e_restore_property_mode:-0}" -eq 0 ] || return 1
+	[ "${g_zxfer_source_property_tree_prefetch_state:-0}" -ne 2 ] || return 1
+	[ "${g_zxfer_destination_property_tree_prefetch_state:-0}" -ne 2 ] || return 1
+	[ -n "${g_zxfer_property_row_dir:-}" ] || return 1
+	case ${g_zxfer_source_property_table:-} in
+	*"$ZXFER_TAB"*"$ZXFER_TAB"*) ;;
+	*) return 1 ;;
+	esac
+	case ${g_zxfer_destination_property_table:-} in
+	*"$ZXFER_TAB"*"$ZXFER_TAB"*) ;;
+	*) return 1 ;;
+	esac
+	case ${g_recursive_dest_list:-} in
+	*"$ZXFER_LF"?*) ;;
+	*) return 1 ;;
+	esac
+	zxfer_build_property_batch_plan_context || return 1
+	l_batch_prep_ctx=$g_zxfer_property_batch_plan_context_result
+	l_batch_prep_dest_root=$g_zxfer_destination_dataset_result
+	l_batch_prep_unsup_fs=""
+	l_batch_prep_unsup_vol=""
+	if [ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ]; then
+		l_batch_prep_unsup_fs=${g_zxfer_unsupported_filesystem_properties:-}
+		l_batch_prep_unsup_vol=${g_zxfer_unsupported_volume_properties:-}
+	fi
+
+	zxfer_stage_property_inputs "override$ZXFER_TAB$g_zxfer_property_override_policy" || return "$?"
+	zxfer_ensure_runtime_artifact_file "${g_zxfer_property_batch_plan_base:-}" property-batch-plan || return "$?"
+	g_zxfer_property_batch_plan_base=$g_zxfer_runtime_artifact_path_result
+	{
+		printf '%s\n' '__ZXFER_BATCH_SOURCE__' "$g_zxfer_source_property_table" \
+			'__ZXFER_BATCH_DEST__' "$g_zxfer_destination_property_table" \
+			'__ZXFER_BATCH_DEST_LIST__' "$g_recursive_dest_list" \
+			'__ZXFER_BATCH_END__' >|"$g_zxfer_property_batch_plan_base"
+	} 2>/dev/null || return 1
+
+	# Create batch plan files 0600; never restore an empty umask (ksh reads it
+	# as 0777).
+	l_batch_prep_umask=${g_zxfer_run_umask:-}
+	case $l_batch_prep_umask in
+	'' | *[!01234567]*) l_batch_prep_umask=$(umask) ;;
+	esac
+	l_batch_prep_status=0
+	umask 077
+	l_batch_prep_output=$(
+		ZXFER_PROPERTY_INPUT_FILE=$g_zxfer_property_input_file \
+			ZXFER_AWK_ROW_DIR=$g_zxfer_property_row_dir \
+			ZXFER_AWK_PLAN_BASE=$g_zxfer_property_batch_plan_base \
+			ZXFER_AWK_INITIAL_SOURCE=$g_initial_source \
+			ZXFER_AWK_DESTINATION_ROOT=$l_batch_prep_dest_root \
+			ZXFER_AWK_REMOVE_LIST="$g_zxfer_property_readonly_policy,$g_option_I_ignore_properties" \
+			ZXFER_AWK_UNSUPPORTED_LIST='' \
+			ZXFER_AWK_UNSUPPORTED_FILESYSTEM_LIST=$l_batch_prep_unsup_fs \
+			ZXFER_AWK_UNSUPPORTED_VOLUME_LIST=$l_batch_prep_unsup_vol \
+			"${g_cmd_awk:-awk}" \
+			-v transfer_all_flag="$g_option_P_transfer_property" \
+			-v required_creation_properties="$ZXFER_REQUIRED_CREATION_PROPERTIES" \
+			-v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
+			-v verbose="${g_option_v_verbose:-0}" \
+			-v very_verbose="${g_option_V_very_verbose:-0}" \
+			"$ZXFER_PROPERTY_INPUT_AWK$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK$ZXFER_PROPERTY_PLAN_CORE_AWK$ZXFER_PROPERTY_BATCH_PLAN_AWK"
+	) || l_batch_prep_status=$?
+	case $l_batch_prep_umask in
+	'' | *[!01234567]*) ;;
+	*) umask "$l_batch_prep_umask" ;;
+	esac
+	zxfer_write_runtime_artifact_file "$g_zxfer_property_batch_plan_base" "" || :
+	[ "$l_batch_prep_status" -eq 0 ] || return "$l_batch_prep_status"
+
+	l_batch_prep_complete=0
+	l_batch_prep_index=""
+	while IFS= read -r l_batch_prep_line; do
+		[ "$l_batch_prep_complete" -eq 0 ] || return 1
+		case $l_batch_prep_line in
+		"__ZXFER_PROPERTY_BATCH_PLAN__")
+			l_batch_prep_complete=1
+			;;
+		*"$ZXFER_TAB"?*)
+			l_batch_prep_meta=${l_batch_prep_line%%"$ZXFER_TAB"*}
+			case $l_batch_prep_meta in
+			[0123456789]*:[abcdefghijklmnopqrstuvwxyz]*:[abcdefghijklmnopqrstuvwxyz]*) ;;
+			*) return 1 ;;
+			esac
+			l_batch_prep_index=${l_batch_prep_index:+$l_batch_prep_index$ZXFER_LF}$l_batch_prep_line
+			;;
+		*) return 1 ;;
+		esac
+	done <<EOF
+$l_batch_prep_output
+EOF
+	[ "$l_batch_prep_complete" -eq 1 ] || return 1
+	[ -z "$l_batch_prep_index" ] ||
+		g_zxfer_property_batch_plan_index=$ZXFER_LF$l_batch_prep_index$ZXFER_LF
+	g_zxfer_property_batch_plan_context=$l_batch_prep_ctx
+	g_zxfer_property_batch_plan_state=1
+}
+
+# Purpose: Look up and consume a pre-planned batch property file for SOURCE/DEST
+# when its (source_row, dest_row) provenance and policy context still match.
+# Usage: zxfer_try_use_prepared_property_plan SOURCE DEST; lazily triggers
+# zxfer_prepare_batch_property_plans once per pass. Returns 0 with
+# g_zxfer_property_batch_plan_file_result and
+# g_zxfer_property_plan_summary_result published, throws on a deferred
+# creation-time mismatch or corrupted matched plan file, or returns 1 to fall
+# back to single-dataset planning.
+zxfer_try_use_prepared_property_plan() {
+	g_zxfer_property_batch_plan_file_result=""
+	l_batch_use_source=$1
+	l_batch_use_dest=$2
+
+	[ "${g_option_e_restore_property_mode:-0}" -eq 0 ] || return 1
+	if [ "${g_zxfer_property_batch_plan_state:-0}" -eq 0 ]; then
+		zxfer_prepare_batch_property_plans || return 1
+	fi
+	[ "${g_zxfer_property_batch_plan_state:-0}" -eq 1 ] || return 1
+	[ -n "${g_zxfer_property_batch_plan_index:-}" ] || return 1
+	[ -n "${g_zxfer_property_batch_plan_base:-}" ] || return 1
+
+	zxfer_build_property_batch_plan_context || return 1
+	[ "$g_zxfer_property_batch_plan_context_result" = "$g_zxfer_property_batch_plan_context" ] ||
+		return 1
+	zxfer_map_destination_dataset "$l_batch_use_source"
+	[ "$g_zxfer_destination_dataset_result" = "$l_batch_use_dest" ] || return 1
+
+	zxfer_find_property_row "$g_zxfer_property_batch_plan_index" "$l_batch_use_source" ||
+		return 1
+	l_batch_use_meta=$g_zxfer_property_row_result
+	l_batch_use_pos=${l_batch_use_meta%%:*}
+	l_batch_use_rest=${l_batch_use_meta#*:}
+	l_batch_use_srow=${l_batch_use_rest%%:*}
+	l_batch_use_drow=${l_batch_use_rest#*:}
+	zxfer_is_uint "$l_batch_use_pos" || return 1
+
+	zxfer_find_property_row "${g_zxfer_source_property_table:-}" "$l_batch_use_source" ||
+		return 1
+	[ "$g_zxfer_property_row_result" = "$l_batch_use_srow" ] || return 1
+	zxfer_find_property_row "${g_zxfer_destination_property_table:-}" "$l_batch_use_dest" ||
+		return 1
+	[ "$g_zxfer_property_row_result" = "$l_batch_use_drow" ] || return 1
+
+	l_batch_use_file=$g_zxfer_property_batch_plan_base.$l_batch_use_pos.p
+	zxfer_validate_property_plan "$l_batch_use_file" batch ||
+		zxfer_throw_error "Failed to plan dataset properties."
+	g_zxfer_property_batch_plan_file_result=$l_batch_use_file
 }
 
 # Purpose: Plan and validate this dataset without publishing payload globals.
@@ -876,43 +1326,45 @@ zxfer_create_destination_dataset() {
 # DESTINATION SET / INHERIT COMMANDS
 ################################################################################
 
-# Purpose: Render one destination zfs command line for -v display.
-# Usage: zxfer_build_destination_zfs_command SUBCOMMAND [ARG...]; prints the
-# report-quoted local command, or the ssh command line under -T. That line
-# carries values raw, so it is escaped as a report value when it holds a
-# control byte.
-zxfer_build_destination_zfs_command() {
-	if [ -z "$g_option_T_target_host" ]; then
-		zxfer_render_command_for_report "" "$g_cmd_zfs" "$@"
-		return
-	fi
-	zxfer_render_zfs_command_for_role destination "$@" || return
-	# Without character classes in case patterns (posh), always escape.
-	if [ "$g_zxfer_report_fast_path" = 1 ]; then
-		case $g_zxfer_shell_command_result in
-		*[[:cntrl:]]*) ;;
-		*)
-			printf '%s\n' "$g_zxfer_shell_command_result"
-			return
-			;;
-		esac
-	fi
-	zxfer_escape_report_value "$g_zxfer_shell_command_result"
-	printf '\n'
-}
-
 # Purpose: Run one destination property verb (set or inherit) live.
 # Usage: zxfer_run_destination_property_verb VERB ERROR_MESSAGE DESTINATION
-# [ARG...]. Shows the command under -v, runs it, then invalidates cached
-# destination rows. A failed run throws ERROR_MESSAGE with the failing status.
+# [ARG...]. Shows the rendered command under -v (keeping -T single-quote
+# escapes intact unless a control byte requires report escaping), runs it, then
+# invalidates cached destination rows. A failed run throws ERROR_MESSAGE with
+# the failing status.
 zxfer_run_destination_property_verb() {
 	l_verb=$1
 	l_verb_error_message=$2
 	l_verb_destination=$3
 	shift 3
 
-	if zxfer_command_display_render_enabled; then
-		zxfer_echov "$(zxfer_build_destination_zfs_command "$l_verb" "$@" "$l_verb_destination")"
+	if [ "${g_option_v_verbose:-0}" -eq 1 ]; then
+		l_verb_display=""
+		if [ -z "${g_option_T_target_host:-}" ]; then
+			if zxfer_render_command_for_report_into_result "" "$g_cmd_zfs" "$l_verb" "$@" "$l_verb_destination"; then
+				l_verb_display=$g_zxfer_rendered_report_command_result
+			fi
+		elif zxfer_render_zfs_command_for_role destination "$l_verb" "$@" "$l_verb_destination"; then
+			l_verb_display=$g_zxfer_shell_command_result
+			# Without character classes in case patterns (posh), always escape.
+			# With them, skip escaping when no control byte is present so '\''
+			# inside rendered -T commands is not double-escaped.
+			l_verb_needs_escape=1
+			if [ "${g_zxfer_report_fast_path:-0}" = 1 ]; then
+				case $l_verb_display in
+				*[[:cntrl:]]*) ;;
+				*) l_verb_needs_escape=0 ;;
+				esac
+			fi
+			if [ "$l_verb_needs_escape" -eq 1 ]; then
+				if zxfer_escape_report_value_into_result "$l_verb_display"; then
+					l_verb_display=$g_zxfer_escaped_report_value_result
+				else
+					l_verb_display=""
+				fi
+			fi
+		fi
+		zxfer_echov "$l_verb_display"
 	fi
 	zxfer_run_destination_zfs_cmd "$l_verb" "$@" "$l_verb_destination" ||
 		zxfer_throw_error "$l_verb_error_message" "$?"
@@ -961,7 +1413,7 @@ BEGIN {
 			if (mode != "apply") exit 1
 			inherits[++inherit_count] = item
 		}
-		else if (verb != "view") exit 1
+		else if (verb != "view" && verb != "warn") exit 1
 	}
 	if (!complete || (getline row < input_path) != 0 || close(input_path) != 0) exit 1
 	printf "" > output_path
@@ -994,29 +1446,6 @@ zxfer_resolve_parent_property_plan() {
 	[ "$l_parent_property_plan_status" -ne 0 ] || return 0
 	[ "$4" != apply ] || zxfer_throw_error "Failed to reconcile child property inheritance."
 	return "$l_parent_property_plan_status"
-}
-
-# Purpose: Display the decoded set and inherit property lists under -v before
-# applying them to a destination dataset.
-# Usage: zxfer_show_applied_property_plan_lists DEST SET_CSV INHERIT_CSV;
-# caller checks g_option_v_verbose before calling.
-zxfer_show_applied_property_plan_lists() {
-	l_show_apply_dest=$1
-	l_show_apply_set_csv=$2
-	l_show_apply_inherit_csv=$3
-
-	zxfer_echov "Setting properties/sources on destination filesystem \"$l_show_apply_dest\"."
-	for l_show_apply_kind in set inherit; do
-		if [ "$l_show_apply_kind" = set ]; then
-			l_show_apply_list=$l_show_apply_set_csv
-		else
-			l_show_apply_list=$l_show_apply_inherit_csv
-		fi
-		[ -n "$l_show_apply_list" ] || continue
-		zxfer_decode_serialized_property_list_for_display "$l_show_apply_list"
-		zxfer_escape_report_value_into_result "$g_zxfer_property_display_list_result"
-		zxfer_echov "Property $l_show_apply_kind list: $g_zxfer_escaped_report_value_result"
-	done
 }
 
 # Purpose: Validate and execute an action plan in one pass: build create/set
@@ -1058,7 +1487,7 @@ zxfer_execute_property_plan() {
 				"__ZXFER_PROPERTY_ACTIONS__")
 					l_exec_plan_complete=1
 					;;
-				view"$ZXFER_TAB"?*=*) ;;
+				view"$ZXFER_TAB"?*=* | warn"$ZXFER_TAB"?*=*) ;;
 				create"$ZXFER_TAB"?*=*=*=* | set"$ZXFER_TAB"?*=*=*=* | inherit"$ZXFER_TAB"?*=*=*=*)
 					l_exec_plan_verb=${l_exec_plan_row%%"$ZXFER_TAB"*}
 					l_exec_plan_item=${l_exec_plan_row#*"$ZXFER_TAB"}
@@ -1103,8 +1532,18 @@ zxfer_execute_property_plan() {
 	fi
 	[ "$#" -gt 0 ] || [ -n "$l_exec_plan_inherits" ] || return 0
 	if [ "${g_option_v_verbose:-0}" -eq 1 ]; then
-		zxfer_show_applied_property_plan_lists "$l_exec_plan_dest" \
-			"$l_exec_plan_set_csv" "$l_exec_plan_inherit_csv"
+		zxfer_echov "Setting properties/sources on destination filesystem \"$l_exec_plan_dest\"."
+		for l_exec_plan_kind in set inherit; do
+			if [ "$l_exec_plan_kind" = set ]; then
+				l_exec_plan_list=$l_exec_plan_set_csv
+			else
+				l_exec_plan_list=$l_exec_plan_inherit_csv
+			fi
+			[ -n "$l_exec_plan_list" ] || continue
+			zxfer_decode_serialized_property_list_for_display "$l_exec_plan_list"
+			zxfer_escape_report_value_into_result "$g_zxfer_property_display_list_result"
+			zxfer_echov "Property $l_exec_plan_kind list: $g_zxfer_escaped_report_value_result"
+		done
 	fi
 	[ "$#" -eq 0 ] || zxfer_run_destination_property_verb set \
 		"Error when setting properties on destination filesystem." "$l_exec_plan_dest" "$@"
@@ -1172,9 +1611,13 @@ zxfer_transfer_properties() {
 	esac
 	[ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ] ||
 		l_transfer_unsupported_properties=""
+	l_transfer_src_backfilled=0
+	l_transfer_dst_backfilled=0
 	zxfer_backfill_required_properties "$l_transfer_source" "$l_transfer_raw_pvs" \
 		"$l_transfer_must_create_properties" source ||
 		zxfer_throw_error "$g_zxfer_property_error_result" "$?"
+	[ "$g_zxfer_required_properties_result" = "$l_transfer_raw_pvs" ] ||
+		l_transfer_src_backfilled=1
 	l_transfer_raw_pvs=$g_zxfer_required_properties_result
 	l_transfer_effective_pvs=$l_transfer_raw_pvs
 	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
@@ -1202,12 +1645,22 @@ zxfer_transfer_properties() {
 		zxfer_backfill_required_properties "$g_actual_dest" "$g_zxfer_normalized_dataset_properties" \
 			"$l_transfer_must_create_properties" destination ||
 			zxfer_throw_error "$g_zxfer_property_error_result" "$?"
+		[ "$g_zxfer_required_properties_result" = "$g_zxfer_normalized_dataset_properties" ] ||
+			l_transfer_dst_backfilled=1
 		l_transfer_destination_pvs=$g_zxfer_required_properties_result
 	fi
-	zxfer_plan_property_changes "$l_transfer_is_initial_source" "$l_transfer_destination_exists" \
-		"$l_transfer_source_dstype" "$l_transfer_effective_pvs" "$l_transfer_destination_pvs" \
-		"$l_transfer_unsupported_properties"
-	l_transfer_plan_file=$g_zxfer_property_plan_file
+	if [ "$l_transfer_destination_exists" -eq 1 ] &&
+		[ "$g_option_e_restore_property_mode" -eq 0 ] &&
+		[ "$l_transfer_src_backfilled" -eq 0 ] &&
+		[ "$l_transfer_dst_backfilled" -eq 0 ] &&
+		zxfer_try_use_prepared_property_plan "$l_transfer_source" "$g_actual_dest"; then
+		l_transfer_plan_file=$g_zxfer_property_batch_plan_file_result
+	else
+		zxfer_plan_property_changes "$l_transfer_is_initial_source" "$l_transfer_destination_exists" \
+			"$l_transfer_source_dstype" "$l_transfer_effective_pvs" "$l_transfer_destination_pvs" \
+			"$l_transfer_unsupported_properties"
+		l_transfer_plan_file=$g_zxfer_property_plan_file
+	fi
 	l_transfer_action_count=${g_zxfer_property_plan_summary_result%% *}
 	zxfer_show_property_plan "$l_transfer_plan_file"
 	if [ "$l_transfer_destination_exists" -eq 0 ]; then
@@ -1232,8 +1685,26 @@ zxfer_transfer_properties() {
 			l_transfer_parent_reconciled=1
 		fi
 		if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
-			zxfer_echoV_escaped "zxfer_transfer_properties adjusted child_set" "$(zxfer_property_plan_list "$l_transfer_plan_file" set)"
-			zxfer_echoV_escaped "zxfer_transfer_properties adjusted inherit" "$(zxfer_property_plan_list "$l_transfer_plan_file" inherit)"
+			l_transfer_adjusted_set=""
+			l_transfer_adjusted_inherit=""
+			{
+				while IFS="$ZXFER_TAB" read -r l_transfer_adj_verb l_transfer_adj_item; do
+					case $l_transfer_adj_verb in
+					set | inherit)
+						l_transfer_adj_name=${l_transfer_adj_item%%=*}
+						l_transfer_adj_value=${l_transfer_adj_item#*=}
+						l_transfer_adj_pair=$l_transfer_adj_name=${l_transfer_adj_value%%=*}
+						if [ "$l_transfer_adj_verb" = set ]; then
+							l_transfer_adjusted_set=${l_transfer_adjusted_set:+$l_transfer_adjusted_set,}$l_transfer_adj_pair
+						else
+							l_transfer_adjusted_inherit=${l_transfer_adjusted_inherit:+$l_transfer_adjusted_inherit,}$l_transfer_adj_pair
+						fi
+						;;
+					esac
+				done
+			} <"$l_transfer_plan_file" || zxfer_throw_error "Failed to read dataset property plan." "$?"
+			zxfer_echoV_escaped "zxfer_transfer_properties adjusted child_set" "$l_transfer_adjusted_set"
+			zxfer_echoV_escaped "zxfer_transfer_properties adjusted inherit" "$l_transfer_adjusted_inherit"
 		fi
 	fi
 	if [ "$l_transfer_action_count" -eq 0 ] && [ "$l_transfer_parent_reconciled" -eq 0 ]; then

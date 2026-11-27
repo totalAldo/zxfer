@@ -342,7 +342,7 @@ test_try_backup_restore_candidate_maps_read_format_and_row_statuses() {
 				}
 				zxfer_try_backup_restore_candidate "$g_backup_storage_root/tank/src" \
 					tank/src backup/dst "${pair%|*}" "${pair#*|}" '' source tank/src
-				printf '%s %s\n' "$?" "${g_zxfer_backup_view_result:+view}"
+				printf '%s %s\n' "$?" "${g_zxfer_backup_view_dir_result:+view}"
 			)
 		)
 		assertEquals "Pair ${pair%|*} -> ${pair#*|} maps to status and contents [$expected]." \
@@ -497,7 +497,6 @@ test_metadata_view_preserves_format_priority_and_clears_failed_publications() {
 		zxfer_write_runtime_artifact_file "$staging" "$contents"
 		output=$(
 			(
-				g_zxfer_backup_view_result=stale
 				g_zxfer_backup_view_dir_result=stale
 				g_zxfer_backup_view_source_root_result=stale
 				g_zxfer_backup_view_destination_root_result=stale
@@ -508,12 +507,12 @@ test_metadata_view_preserves_format_priority_and_clears_failed_publications() {
 				else
 					zxfer_load_backup_metadata_view "$staging" tank/src backup/dst/src
 				fi
-				printf '%s <%s|%s|%s|%s|%s>' "$?" "$g_zxfer_backup_view_result" \
+				printf '%s <%s|%s|%s|%s>' "$?" \
 					"$g_zxfer_backup_view_dir_result" "$g_zxfer_backup_view_source_root_result" \
 					"$g_zxfer_backup_view_destination_root_result" "$g_zxfer_backup_view_index_result"
 			)
 		)
-		assertEquals "Format failures precede row-directory allocation [$kind]." "$expected <||||>" "$output"
+		assertEquals "Format failures precede row-directory allocation [$kind]." "$expected <|||>" "$output"
 	done
 
 	zxfer_write_runtime_artifact_file "$staging" "$valid"
@@ -530,18 +529,17 @@ test_metadata_view_preserves_format_priority_and_clears_failed_publications() {
 				fi
 				command awk "$@"
 			}
-			g_zxfer_backup_view_result=stale
 			g_zxfer_backup_view_dir_result=stale
 			g_zxfer_backup_view_source_root_result=stale
 			g_zxfer_backup_view_destination_root_result=stale
 			g_zxfer_backup_view_index_result=stale
 			zxfer_load_backup_metadata_view "$staging" tank/src backup/dst/src
-			printf '%s <%s|%s|%s|%s|%s>' "$?" "$g_zxfer_backup_view_result" \
+			printf '%s <%s|%s|%s|%s>' "$?" \
 				"$g_zxfer_backup_view_dir_result" "$g_zxfer_backup_view_source_root_result" \
 				"$g_zxfer_backup_view_destination_root_result" "$g_zxfer_backup_view_index_result"
 		)
 	)
-	assertEquals "A partial row write publishes no view." '5 <||||>' "$output"
+	assertEquals "A partial row write publishes no view." '5 <|||>' "$output"
 }
 
 test_metadata_view_publishes_named_fields_and_preserves_backslash_roots() {
@@ -567,9 +565,6 @@ $(zxfer_test_backup_metadata_row 'sub\x' 'atime=off=local')"
 	assertEquals "Named destination root keeps literal backslashes." "$l_bs_dst" "$g_zxfer_backup_view_destination_root_result"
 	assertEquals "Named index holds raw newline-joined rows without surrounding LF." \
 		"r1${ZXFER_TAB}.${ZXFER_LF}r2${ZXFER_TAB}sub\\x" "$g_zxfer_backup_view_index_result"
-	assertEquals "Combined view result stays backward-compatible." \
-		"${g_zxfer_backup_view_dir_result}${ZXFER_LF}${l_bs_src}${ZXFER_LF}${l_bs_dst}${ZXFER_LF}${g_zxfer_backup_view_index_result}${ZXFER_LF}" \
-		"$g_zxfer_backup_view_result"
 
 	# An empty alias publishes an empty index string (status 8) with no stray LF.
 	l_empty_alias="$ZXFER_BACKUP_METADATA_HEADER_LINE
@@ -585,8 +580,8 @@ $(zxfer_test_backup_metadata_row 'sub\x' 'atime=off=local')"
 	assertEquals "tank/src" "$g_zxfer_backup_view_destination_root_result"
 
 	zxfer_reset_backup_metadata_state
-	assertEquals "Session reset clears every backup view result global." "||||" \
-		"$g_zxfer_backup_view_result|$g_zxfer_backup_view_dir_result|$g_zxfer_backup_view_source_root_result|$g_zxfer_backup_view_destination_root_result|$g_zxfer_backup_view_index_result"
+	assertEquals "Session reset clears every backup view result global." "|||" \
+		"$g_zxfer_backup_view_dir_result|$g_zxfer_backup_view_source_root_result|$g_zxfer_backup_view_destination_root_result|$g_zxfer_backup_view_index_result"
 
 	# P7b-heredoc: validating literal backslashes and shell syntax keeps bytes untouched.
 	# shellcheck disable=SC2016  # Literal shell syntax must not expand here.
@@ -609,19 +604,18 @@ test_candidate_discards_partial_reads_and_allocation_failures() {
 					[ "$failure" != allocation ] || return 17
 					zxfer_create_runtime_artifact_file "$2"
 				}
-				g_zxfer_backup_view_result=stale
 				g_zxfer_backup_view_dir_result=stale
 				g_zxfer_backup_view_source_root_result=stale
 				g_zxfer_backup_view_destination_root_result=stale
 				g_zxfer_backup_view_index_result=stale
 				zxfer_try_backup_restore_candidate "$g_backup_storage_root/tank/src" \
 					tank/src backup/dst tank/src backup/dst/src
-				printf '%s <%s|%s|%s|%s|%s>' "$?" "$g_zxfer_backup_view_result" \
+				printf '%s <%s|%s|%s|%s>' "$?" \
 					"$g_zxfer_backup_view_dir_result" "$g_zxfer_backup_view_source_root_result" \
 					"$g_zxfer_backup_view_destination_root_result" "$g_zxfer_backup_view_index_result"
 			)
 		)
-		assertEquals "$failure failure must not publish partial metadata." '5 <||||>' "$output"
+		assertEquals "$failure failure must not publish partial metadata." '5 <|||>' "$output"
 	done
 }
 
@@ -937,9 +931,11 @@ test_ensure_local_backup_dir_creates_private_directories_and_refuses_unsafe_path
 				# No case statement here: bash 3.2 (macOS /bin/sh) mis-parses
 				# case patterns inside command substitution.
 				if [ "$failure" = "owner unknown" ]; then
-					zxfer_get_path_owner_uid() { return 1; }
+					zxfer_read_path_metadata() { return 1; }
 				elif [ "${failure%% *}" = owner ]; then
-					zxfer_get_path_owner_uid() { printf '%s\n' "${failure#owner }"; }
+					zxfer_read_path_metadata() {
+						g_zxfer_path_owner_uid_result=${failure#owner }
+					}
 				elif [ "$failure" = mkdir ]; then
 					mkdir() { return 1; }
 				elif [ "$failure" = chmod ]; then
@@ -1156,6 +1152,63 @@ test_build_remote_backup_dir_prepare_cmd_runs_locally_and_rejects_symlinked_comp
 
 	output=$(sh -c "$(zxfer_build_remote_backup_dir_prepare_cmd "-dashed/dir" "target.example")" 2>&1)
 	assertEquals "Relative dash-prefixed paths are quoted for ls and still fail closed outside a real root." 92 "$?"
+}
+
+test_build_remote_backup_dir_prepare_cmd_checks_owner_before_chmod_and_prints_literal_paths() {
+	base="$TEST_TMPDIR_PHYSICAL/remote_prepare_security"
+	mkdir -p "$base/owned_other" "$base/real"
+	chmod 755 "$base/owned_other"
+
+	# Fake ls reports UID 4321 while fake id reports UID 1000, and fake chmod
+	# logs any call so we prove chmod never mutates an unowned directory.
+	fake_bin="$TEST_TMPDIR/remote_prepare_owner_bin"
+	chmod_log="$TEST_TMPDIR/remote_prepare_chmod.log"
+	mkdir -p "$fake_bin"
+	: >"$chmod_log"
+	cat >"$fake_bin/ls" <<'EOF'
+#!/bin/sh
+printf 'drwxr-xr-x 2 4321 4321 64 Jan 1 00:00 %s\n' "$2"
+EOF
+	cat >"$fake_bin/id" <<'EOF'
+#!/bin/sh
+printf '1000\n'
+EOF
+	cat >"$fake_bin/chmod" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$chmod_log"
+exit 0
+EOF
+	chmod +x "$fake_bin/ls" "$fake_bin/id" "$fake_bin/chmod"
+	other_owner_cmd=$(
+		g_zxfer_secure_path="$fake_bin:$ZXFER_DEFAULT_SECURE_PATH"
+		zxfer_build_remote_backup_dir_prepare_cmd "$base/owned_other" "target.example"
+	)
+	output=$(sh -c "$other_owner_cmd" 2>&1)
+	assertEquals "An unowned existing directory must fail with status 92." 92 "$?"
+	assertContains "$output" "Backup directory must be owned by root or the ssh user."
+	assertEquals "chmod must never run before the directory owner is verified." "" "$(cat "$chmod_log")"
+
+	# A top-level symlink target (e.g. /tmp on macOS) is skipped by the prelude
+	# component walk and must still be rejected directly by [ -L "$l_prepare_dir" ].
+	if [ -L /tmp ]; then
+		output=$(sh -c "$(zxfer_build_remote_backup_dir_prepare_cmd /tmp "target.example")" 2>&1)
+		assertEquals "Top-level symlink target must be refused with status 92." 92 "$?"
+		assertEquals "Refusing to use symlinked zxfer backup directory." "$output"
+	fi
+
+	# Prelude symlink diagnostics must use printf so literal backslashes (such
+	# as \n or \t) in variable paths are never expanded on dash or macOS /bin/sh.
+	bs_link="$base/dir\\nlink"
+	ln -s "$base/real" "$bs_link"
+	output=$(sh -c "$(zxfer_build_remote_backup_dir_prepare_cmd "$bs_link/child" "target.example")" 2>&1)
+	assertEquals "Symlinked backslash directory component exits 92." 92 "$?"
+	assertEquals "Refusing to use backup directory $bs_link/child because path component $bs_link is a symlink." "$output"
+
+	bs_meta="$base/meta\\nlink"
+	ln -s "$base/real" "$bs_meta"
+	output=$(sh -c "$(zxfer_build_remote_backup_read_cmd "$bs_meta" "origin.example")" 2>&1)
+	assertEquals "Symlinked backslash metadata target exits 98." 98 "$?"
+	assertEquals "Refusing to use backup metadata $bs_meta because it is a symlink." "$output"
 }
 
 test_build_backup_pair_write_cmd_handles_a_shared_target_without_following_symlinks() {

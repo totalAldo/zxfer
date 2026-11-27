@@ -43,7 +43,7 @@
 #   row index (g_zxfer_backup_restore_*), the forwarded
 #   provenance memo g_zxfer_backup_forwarded_*, reusable read staging
 #   g_zxfer_backup_read_file, ZXFER_BACKUP_METADATA_VALIDATE_AWK, and the
-#   checked view results g_zxfer_backup_view_result plus
+#   checked view results
 #   g_zxfer_backup_view_{dir,source_root,destination_root,index}_result.
 #   Row lookups publish g_zxfer_property_row_payload_result;
 #   dry-run previews publish quoting's g_zxfer_shell_command_result directly.
@@ -243,7 +243,6 @@ zxfer_reset_backup_metadata_state() {
 	g_zxfer_backup_restore_row_dir=""
 	g_zxfer_backup_read_file=""
 	g_zxfer_backup_restore_candidate_path_result=""
-	g_zxfer_backup_view_result=""
 	g_zxfer_backup_view_dir_result=""
 	g_zxfer_backup_view_source_root_result=""
 	g_zxfer_backup_view_destination_root_result=""
@@ -500,11 +499,11 @@ zxfer_list_remote_backup_storage_dirs() {
 # FILENAME_DESTINATION EXPECTED_SOURCE EXPECTED_DESTINATION [HOST]
 # [PROFILE_SIDE] [ALIAS_ROOT]. Returns 0 with a checked view, or 8 when the
 # pair has no row (aliases still publish a view on 8). The view is published
-# in g_zxfer_backup_view_result and its named g_zxfer_backup_view_*_result
-# fields. Returns 1 when neither file exists; the file check's 3, 4, 6, 7 or
-# 9; 5 for a read failure or any other check status; 11 when no filename can
-# be derived. The path examined last is published in
-# g_zxfer_backup_restore_candidate_path_result for error messages.
+# in the named g_zxfer_backup_view_*_result fields. Returns 1 when neither
+# file exists; the file check's 3, 4, 6, 7 or 9; 5 for a read failure or any
+# other check status; 11 when no filename can be derived. The path examined
+# last is published in g_zxfer_backup_restore_candidate_path_result for error
+# messages.
 zxfer_try_backup_restore_candidate() {
 	l_candidate_dir=$1
 	l_candidate_filename_source=$2
@@ -516,7 +515,6 @@ zxfer_try_backup_restore_candidate() {
 	l_candidate_alias_root=${8:-}
 
 	g_zxfer_backup_restore_candidate_path_result=""
-	g_zxfer_backup_view_result=""
 	g_zxfer_backup_view_dir_result=""
 	g_zxfer_backup_view_source_root_result=""
 	g_zxfer_backup_view_destination_root_result=""
@@ -674,15 +672,12 @@ zxfer_require_restored_backup_properties() {
 # Usage: zxfer_load_backup_metadata_view FILE SOURCE DESTINATION [ALIAS_ROOT].
 # Publishes g_zxfer_backup_view_dir_result,
 # g_zxfer_backup_view_source_root_result,
-# g_zxfer_backup_view_destination_root_result,
-# g_zxfer_backup_view_index_result (raw newline-joined rows, empty when none),
-# and the legacy combined g_zxfer_backup_view_result (directory, source root,
-# destination root, then index lines, terminated by LF). Restore lines are
-# ROW<TAB>KEY; alias lines are ROW<TAB>ALIAS_ROOT@DATASET. Duplicates use "-".
-# Returns the lookup status; publishes on 0, or on 8 for an alias without its
-# requested row. A read/write/allocation failure is 5.
+# g_zxfer_backup_view_destination_root_result, and
+# g_zxfer_backup_view_index_result (raw newline-joined rows, empty when none).
+# Restore lines are ROW<TAB>KEY; alias lines are ROW<TAB>ALIAS_ROOT@DATASET.
+# Duplicates use "-". Returns the lookup status; publishes on 0, or on 8 for
+# an alias without its requested row. A read/write/allocation failure is 5.
 zxfer_load_backup_metadata_view() {
-	g_zxfer_backup_view_result=""
 	g_zxfer_backup_view_dir_result=""
 	g_zxfer_backup_view_source_root_result=""
 	g_zxfer_backup_view_destination_root_result=""
@@ -751,7 +746,6 @@ $0 == "" || substr($0, 1, 1) == "#" { next }
 	g_zxfer_backup_view_source_root_result=$l_view_source_root
 	g_zxfer_backup_view_destination_root_result=$l_view_destination_root
 	g_zxfer_backup_view_index_result=$l_view_rows
-	g_zxfer_backup_view_result=$l_view_dir$ZXFER_LF$l_view_index$ZXFER_LF
 	return "$l_view_status"
 }
 
@@ -891,10 +885,10 @@ zxfer_ensure_local_backup_dir() {
 		(umask 077 && mkdir -p "$l_ensure_local_backup_dir") ||
 			zxfer_throw_error "Error creating secure backup directory $l_ensure_local_backup_dir."
 	fi
-	if ! l_ensure_local_backup_owner_uid=$(zxfer_get_path_owner_uid \
-		"$l_ensure_local_backup_dir"); then
+	if ! zxfer_read_path_metadata "$l_ensure_local_backup_dir"; then
 		zxfer_throw_error "Cannot determine the owner of backup directory $l_ensure_local_backup_dir."
 	fi
+	l_ensure_local_backup_owner_uid=$g_zxfer_path_owner_uid_result
 	if ! zxfer_backup_owner_uid_is_allowed "$l_ensure_local_backup_owner_uid"; then
 		l_ensure_local_backup_expected_owner=$(zxfer_describe_expected_backup_owner)
 		zxfer_throw_error "Refusing to use backup directory $l_ensure_local_backup_dir because it is owned by UID $l_ensure_local_backup_owner_uid instead of $l_ensure_local_backup_expected_owner."
@@ -1090,13 +1084,13 @@ zxfer_build_remote_backup_script_prelude() {
 		    echo 'Refusing to use symlinked zxfer backup directory.' >&2;
 		    ;;
 		  metadata:"$l_scan_path")
-		    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+		    printf '%s\n' "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
 		    ;;
 		  *)
 		    if [ "$l_scan_kind" = directory ]; then
-		      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+		      printf '%s\n' "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
 		    else
-		      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+		      printf '%s\n' "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
 		    fi;
 		    ;;
 		  esac;
@@ -1106,8 +1100,8 @@ zxfer_build_remote_backup_script_prelude() {
 }
 
 # Purpose: Render the remote program that creates or validates one backup
-# directory: symlink walk, not-a-directory check, mkdir -p under umask 077,
-# chmod 700, and the root-or-ssh-user owner check.
+# directory: symlink walk and target-symlink check, not-a-directory check,
+# mkdir -p under umask 077, root-or-ssh-user owner check, and chmod 700.
 # Usage: zxfer_build_remote_backup_dir_prepare_cmd DIR HOST [EXTRA_TOOL...];
 # the program exits 99 for a missing helper and 92 for any other refusal.
 zxfer_build_remote_backup_dir_prepare_cmd() {
@@ -1128,6 +1122,10 @@ zxfer_build_remote_backup_dir_prepare_cmd() {
 	zxfer_print_backup_script_body <<-'EOF'
 		l_prepare_dir=$1;
 		l_prepare_ls_path=$2;
+		if [ -L "$l_prepare_dir" ]; then
+		  echo 'Refusing to use symlinked zxfer backup directory.' >&2;
+		  exit 92;
+		fi;
 		if [ -e "$l_prepare_dir" ] && [ ! -d "$l_prepare_dir" ]; then
 		  echo 'Backup path exists but is not a directory.' >&2;
 		  exit 92;
@@ -1137,10 +1135,6 @@ zxfer_build_remote_backup_dir_prepare_cmd() {
 		  echo 'Error creating secure backup directory.' >&2;
 		  exit 92;
 		fi;
-		if ! chmod 700 "$l_prepare_dir"; then
-		  echo 'Error securing backup directory.' >&2;
-		  exit 92;
-		fi;
 		l_dir_uid=$(ls -ldn "$l_prepare_ls_path" 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
 		if [ "$l_dir_uid" = '' ]; then
 		  echo 'Unable to determine backup directory owner.' >&2;
@@ -1148,6 +1142,10 @@ zxfer_build_remote_backup_dir_prepare_cmd() {
 		fi;
 		if [ "$l_dir_uid" != 0 ] && [ "$l_dir_uid" != "$(id -u)" ]; then
 		  echo 'Backup directory must be owned by root or the ssh user.' >&2;
+		  exit 92;
+		fi;
+		if ! chmod 700 "$l_prepare_dir"; then
+		  echo 'Error securing backup directory.' >&2;
 		  exit 92;
 		fi;
 	EOF

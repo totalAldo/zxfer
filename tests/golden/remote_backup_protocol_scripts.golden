@@ -46,13 +46,13 @@ while [ -n "$l_scan_rest" ]; do
     echo 'Refusing to use symlinked zxfer backup directory.' >&2;
     ;;
   metadata:"$l_scan_path")
-    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    printf '%s\n' "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
     ;;
   *)
     if [ "$l_scan_kind" = directory ]; then
-      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     else
-      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     fi;
     ;;
   esac;
@@ -106,13 +106,13 @@ while [ -n "$l_scan_rest" ]; do
     echo 'Refusing to use symlinked zxfer backup directory.' >&2;
     ;;
   metadata:"$l_scan_path")
-    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    printf '%s\n' "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
     ;;
   *)
     if [ "$l_scan_kind" = directory ]; then
-      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     else
-      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     fi;
     ;;
   esac;
@@ -121,6 +121,10 @@ done;
 'set' '--' '/var/db/zxfer/tank/src' '/var/db/zxfer/tank/src';
 l_prepare_dir=$1;
 l_prepare_ls_path=$2;
+if [ -L "$l_prepare_dir" ]; then
+  echo 'Refusing to use symlinked zxfer backup directory.' >&2;
+  exit 92;
+fi;
 if [ -e "$l_prepare_dir" ] && [ ! -d "$l_prepare_dir" ]; then
   echo 'Backup path exists but is not a directory.' >&2;
   exit 92;
@@ -130,10 +134,6 @@ if ! mkdir -p "$l_prepare_dir"; then
   echo 'Error creating secure backup directory.' >&2;
   exit 92;
 fi;
-if ! chmod 700 "$l_prepare_dir"; then
-  echo 'Error securing backup directory.' >&2;
-  exit 92;
-fi;
 l_dir_uid=$(ls -ldn "$l_prepare_ls_path" 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
 if [ "$l_dir_uid" = '' ]; then
   echo 'Unable to determine backup directory owner.' >&2;
@@ -141,6 +141,10 @@ if [ "$l_dir_uid" = '' ]; then
 fi;
 if [ "$l_dir_uid" != 0 ] && [ "$l_dir_uid" != "$(id -u)" ]; then
   echo 'Backup directory must be owned by root or the ssh user.' >&2;
+  exit 92;
+fi;
+if ! chmod 700 "$l_prepare_dir"; then
+  echo 'Error securing backup directory.' >&2;
   exit 92;
 fi;
 ### write
@@ -191,13 +195,13 @@ while [ -n "$l_scan_rest" ]; do
     echo 'Refusing to use symlinked zxfer backup directory.' >&2;
     ;;
   metadata:"$l_scan_path")
-    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    printf '%s\n' "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
     ;;
   *)
     if [ "$l_scan_kind" = directory ]; then
-      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     else
-      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     fi;
     ;;
   esac;
@@ -206,6 +210,10 @@ done;
 'set' '--' '/var/db/zxfer/tank/src' '/var/db/zxfer/tank/src';
 l_prepare_dir=$1;
 l_prepare_ls_path=$2;
+if [ -L "$l_prepare_dir" ]; then
+  echo 'Refusing to use symlinked zxfer backup directory.' >&2;
+  exit 92;
+fi;
 if [ -e "$l_prepare_dir" ] && [ ! -d "$l_prepare_dir" ]; then
   echo 'Backup path exists but is not a directory.' >&2;
   exit 92;
@@ -215,10 +223,6 @@ if ! mkdir -p "$l_prepare_dir"; then
   echo 'Error creating secure backup directory.' >&2;
   exit 92;
 fi;
-if ! chmod 700 "$l_prepare_dir"; then
-  echo 'Error securing backup directory.' >&2;
-  exit 92;
-fi;
 l_dir_uid=$(ls -ldn "$l_prepare_ls_path" 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
 if [ "$l_dir_uid" = '' ]; then
   echo 'Unable to determine backup directory owner.' >&2;
@@ -226,6 +230,10 @@ if [ "$l_dir_uid" = '' ]; then
 fi;
 if [ "$l_dir_uid" != 0 ] && [ "$l_dir_uid" != "$(id -u)" ]; then
   echo 'Backup directory must be owned by root or the ssh user.' >&2;
+  exit 92;
+fi;
+if ! chmod 700 "$l_prepare_dir"; then
+  echo 'Error securing backup directory.' >&2;
   exit 92;
 fi;
 'set' '--' '/secure/bin:/usr/bin' 'target.example doas' '/var/db/zxfer/backup/dst' 'directory' '92' 'mkdir' 'chmod' 'id' 'ls' 'awk' 'mktemp' 'mv' 'rm';
@@ -275,13 +283,13 @@ while [ -n "$l_scan_rest" ]; do
     echo 'Refusing to use symlinked zxfer backup directory.' >&2;
     ;;
   metadata:"$l_scan_path")
-    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    printf '%s\n' "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
     ;;
   *)
     if [ "$l_scan_kind" = directory ]; then
-      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     else
-      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     fi;
     ;;
   esac;
@@ -290,6 +298,10 @@ done;
 'set' '--' '/var/db/zxfer/backup/dst' '/var/db/zxfer/backup/dst';
 l_prepare_dir=$1;
 l_prepare_ls_path=$2;
+if [ -L "$l_prepare_dir" ]; then
+  echo 'Refusing to use symlinked zxfer backup directory.' >&2;
+  exit 92;
+fi;
 if [ -e "$l_prepare_dir" ] && [ ! -d "$l_prepare_dir" ]; then
   echo 'Backup path exists but is not a directory.' >&2;
   exit 92;
@@ -299,10 +311,6 @@ if ! mkdir -p "$l_prepare_dir"; then
   echo 'Error creating secure backup directory.' >&2;
   exit 92;
 fi;
-if ! chmod 700 "$l_prepare_dir"; then
-  echo 'Error securing backup directory.' >&2;
-  exit 92;
-fi;
 l_dir_uid=$(ls -ldn "$l_prepare_ls_path" 2>/dev/null | awk '$3 ~ /^[0-9]+$/ { print $3 }');
 if [ "$l_dir_uid" = '' ]; then
   echo 'Unable to determine backup directory owner.' >&2;
@@ -310,6 +318,10 @@ if [ "$l_dir_uid" = '' ]; then
 fi;
 if [ "$l_dir_uid" != 0 ] && [ "$l_dir_uid" != "$(id -u)" ]; then
   echo 'Backup directory must be owned by root or the ssh user.' >&2;
+  exit 92;
+fi;
+if ! chmod 700 "$l_prepare_dir"; then
+  echo 'Error securing backup directory.' >&2;
   exit 92;
 fi;
 'set' '--' '/var/db/zxfer/tank/src/backup.meta' '/var/db/zxfer/backup/dst/backup.meta' 'backup/dst';
@@ -431,13 +443,13 @@ while [ -n "$l_scan_rest" ]; do
     echo 'Refusing to use symlinked zxfer backup directory.' >&2;
     ;;
   metadata:"$l_scan_path")
-    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    printf '%s\n' "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
     ;;
   *)
     if [ "$l_scan_kind" = directory ]; then
-      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     else
-      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     fi;
     ;;
   esac;
@@ -526,13 +538,13 @@ while [ -n "$l_scan_rest" ]; do
     echo 'Refusing to use symlinked zxfer backup directory.' >&2;
     ;;
   metadata:"$l_scan_path")
-    echo "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
+    printf '%s\n' "Refusing to use backup metadata $l_scan_path because it is a symlink." >&2;
     ;;
   *)
     if [ "$l_scan_kind" = directory ]; then
-      echo "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup directory $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     else
-      echo "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
+      printf '%s\n' "Refusing to use backup metadata $l_scan_path because path component $l_scan_candidate is a symlink." >&2;
     fi;
     ;;
   esac;
