@@ -892,6 +892,7 @@ zxfer_validate_property_plan() {
 	l_val_plan_mode=${2:-}
 	l_val_plan_complete=0
 	l_val_plan_actions=0
+	l_val_plan_views=0
 	l_val_plan_overrides=0
 	l_val_plan_warnings=""
 	l_val_plan_error_prop=""
@@ -922,6 +923,7 @@ zxfer_validate_property_plan() {
 				;;
 			view"$ZXFER_TAB"?*=*)
 				[ -z "$l_val_plan_error_prop" ] || return 1
+				l_val_plan_views=$((l_val_plan_views + 1))
 				;;
 			warn"$ZXFER_TAB"?*=*)
 				l_val_plan_warn_item=${l_val_plan_row#"warn$ZXFER_TAB"}
@@ -934,7 +936,7 @@ zxfer_validate_property_plan() {
 				l_val_plan_warnings=${l_val_plan_warnings:+$l_val_plan_warnings$ZXFER_LF}$l_val_plan_warn_item
 				;;
 			"error${ZXFER_TAB}3${ZXFER_TAB}"?*)
-				[ "$l_val_plan_actions" -eq 0 ] && [ -z "$l_val_plan_error_prop" ] || return 1
+				[ "$l_val_plan_actions" -eq 0 ] && [ "$l_val_plan_views" -eq 0 ] && [ -z "$l_val_plan_error_prop" ] || return 1
 				l_val_plan_error_prop=${l_val_plan_row#"error${ZXFER_TAB}3${ZXFER_TAB}"}
 				case $l_val_plan_error_prop in
 				*"$ZXFER_TAB"*) return 1 ;;

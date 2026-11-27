@@ -97,6 +97,33 @@ transfer plan. Verbose-only `skip` rows are reported after divergence
 enforcement during dataset execution, so `-g` preflight does not duplicate
 them. They never authorize sends, deletes or adoption of an older live anchor.
 
+During grouped preparation, `ZXFER_SNAPSHOT_GROUP_PLAN_AWK` also prints one
+pass delete manifest row per plan that has a destroy target, cached in
+`g_zxfer_snapshot_delete_plans`:
+
+```text
+PLAN_FILE<TAB><has_source><diverged><TAB>COMMON_DEST
+```
+
+`<has_source>` and `<diverged>` are `0`/`1` flags and `COMMON_DEST` is empty
+when the plan has no common snapshot. On the first dataset needing
+creation-time evaluation, `zxfer_prepare_snapshot_delete_creation_state` lazily
+filters eligible pass delete plans (skipping non-converging diverged plans
+without `-F`, and `source_count == 0` or empty-`COMMON_DEST` plans without
+`-g`), batches their common and tagged deletion snapshots into
+`<=128`-path `zfs get creation` calls, and runs
+`ZXFER_SNAPSHOT_DELETE_CREATION_AWK` once (`side=creation FILE side=manifest -`
+with `PLAN_FILE<TAB>COMMON_DEST` rows on stdin, opening at most one plan at a
+time with checked `close()`). It prints one verdict row per manifest entry:
+
+```text
+PLAN<TAB>COMMON<TAB>NEWER[<TAB>PATH[<TAB>EPOCH<TAB>AGE_DAYS]]
+```
+
+The verdicts are cached for the pass in
+`g_zxfer_snapshot_delete_creation_verdicts` (keyed on active slice record files
+and `-g` days) so later datasets and `zxfer_delete_snaps` reuse them.
+
 Fields are tab-separated, including the name and GUID inside a snapshot
 record. A delete candidate is not authorization to delete: option checks,
 retention protection, and execution checks still govern the operation.
@@ -194,11 +221,26 @@ before application; a parent that does not provide the required value can
 turn that action into a `set`. Sets run as one command, followed by individual
 inherits in their planned order. Values are decoded only when constructing argv.
 
-The planner prints `__ZXFER_PROPERTY_PLAN__` and any warnings on stdout after
-closing the file successfully. The shell validates the complete action file
-before publishing action/override counts or applying it, rejecting missing
-markers, malformed records and trailing data. A valid empty plan contains only
-the final marker. A creation-time mismatch retains its separate error path.
+Both single-dataset and batch planners write the same private action-file
+protocol and emit no stdout header or warnings for single-dataset plans. In
+addition to action (`create`, `set`, `inherit`) and optional `-V` `view` rows,
+a plan file may carry deferred diagnostic rows before the final
+`__ZXFER_PROPERTY_ACTIONS__` marker:
+
+```text
+warn<TAB><property>=<encoded value>
+error<TAB>3<TAB><property>
+```
+
+Single-dataset planning pre-truncates the reusable plan file, runs
+`ZXFER_PROPERTY_PLAN_AWK` directly, and validates the complete action file
+through `zxfer_validate_property_plan` before publishing action/override counts
+or applying it, rejecting missing markers, malformed records, and trailing
+data. A valid empty plan contains only the final marker. Any `error<TAB>3` row
+must appear with zero action and zero `view` rows; after the full file
+validates up to `__ZXFER_PROPERTY_ACTIONS__`, `zxfer_validate_property_plan`
+decodes and replays each `warn` row to stderr and then throws the creation-time
+usage error if an `error<TAB>3` row was recorded.
 
 For recursive runs without `-e` where both prefetched tables hold at least two
 existing `(source_row, dest_row)` pairs, `zxfer_prepare_batch_property_plans`
@@ -224,24 +266,17 @@ under subshell `umask 077`, writes each eligible dataset's `0600` plan file at
 __ZXFER_PROPERTY_BATCH_PLAN__
 ```
 
-Batch plan files use the same action-file grammar as single-dataset plans
-except that `create<TAB>...` rows are rejected and two deferred diagnostic
-record types are permitted so warnings and creation-time refusals occur at that
-dataset's exact turn:
-
-```text
-warn<TAB><property>=<encoded value>
-error<TAB>3<TAB><property>
-```
+Batch plan files use the same unified action-file grammar as single-dataset
+plans, including deferred `warn<TAB>...` and `error<TAB>3<TAB>...` records so
+warnings and creation-time refusals occur at that dataset's exact turn, except
+that `create<TAB>...` rows are rejected.
 
 When `zxfer_try_use_prepared_property_plan` confirms that the policy/endpoint
 context fingerprint and live `(SROW, DROW)` entries in both property tables
 still match, it validates `<base>.<POS>.p` through
-`zxfer_validate_property_plan FILE batch`. In `batch` mode, any `error<TAB>3`
-row must appear with zero action/view rows; after the full file validates up to
-`__ZXFER_PROPERTY_ACTIONS__`, `batch` mode decodes and replays each `warn` row
-to stderr and then throws the creation-time usage error if an `error<TAB>3` row
-was recorded.
+`zxfer_validate_property_plan FILE batch`, which enforces the no-`create` rule
+and the shared `error<TAB>3` zero-action/zero-`view` check before replaying any
+decoded `warn` rows to stderr and throwing on `error<TAB>3`.
 
 ## Property Backup Metadata
 

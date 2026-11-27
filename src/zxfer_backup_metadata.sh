@@ -68,7 +68,8 @@
 # file). Each rename is atomic; the pair is not a crash-atomic transaction.
 #
 # Protections, enforced locally and in the rendered remote programs: an
-# absolute single-line ZXFER_BACKUP_DIR; no symlinked path component (a
+# absolute single-line non-root ZXFER_BACKUP_DIR without '.'/'..' components;
+# no symlinked path component (a
 # symlink directly under / such as macOS /var is trusted since only root can
 # create entries there); directories 0700 and owned by root or the effective
 # uid; files written 0600 and read only when they are regular 0600 files with
@@ -219,8 +220,9 @@ END {
 # Purpose: Validate ZXFER_BACKUP_DIR (default /var/db/zxfer) once per session
 # into g_backup_storage_root, ignoring any inherited internal value.
 # Usage: zxfer_init_backup_storage_root, from session bootstrap; throws unless
-# the root is a single-line absolute non-root path, and strips trailing
-# slashes. A dataset's storage directory is "$g_backup_storage_root/<dataset>".
+# the root is a single-line absolute non-root path without '.' or '..'
+# components, and strips trailing slashes. A dataset's storage directory is
+# "$g_backup_storage_root/<dataset>".
 zxfer_init_backup_storage_root() {
 	l_init_backup_root=${ZXFER_BACKUP_DIR:-/var/db/zxfer}
 	zxfer_value_is_single_line "$l_init_backup_root" ||
@@ -231,9 +233,15 @@ zxfer_init_backup_storage_root() {
 	esac
 	zxfer_strip_trailing_slashes "$l_init_backup_root"
 	case $g_zxfer_stripped_path_result in
-	*[!/]*) g_backup_storage_root=$g_zxfer_stripped_path_result ;;
+	*[!/]*) ;;
 	*) zxfer_throw_error "Refusing to use backup metadata root \"$l_init_backup_root\" because ZXFER_BACKUP_DIR must not be the filesystem root." ;;
 	esac
+	case $g_zxfer_stripped_path_result in
+	'.' | '..' | ./* | ../* | */. | */.. | */./* | */../*)
+		zxfer_throw_error "Refusing to use backup metadata root \"$l_init_backup_root\" because ZXFER_BACKUP_DIR must not contain '.' or '..' path components."
+		;;
+	esac
+	g_backup_storage_root=$g_zxfer_stripped_path_result
 }
 
 # Purpose: Reset the buffered rows, restore cache, forwarded memo, and result
@@ -867,9 +875,10 @@ EOF
 
 # Purpose: Create or validate one local backup directory.
 # Usage: Strips trailing slashes and refuses empty paths, the filesystem
-# root, symlinked components, non-directories, and owners other than root or
-# the effective uid; creates missing directories 0700 and re-applies 0700 so
-# an operator-created directory is private too.
+# root, '.' or '..' path components, symlinked components, non-directories,
+# and owners other than root or the effective uid; creates missing
+# directories 0700 and re-applies 0700 so an operator-created directory is
+# private too.
 zxfer_ensure_local_backup_dir() {
 	zxfer_strip_trailing_slashes "$1"
 	l_ensure_local_backup_dir=$g_zxfer_stripped_path_result
@@ -877,6 +886,11 @@ zxfer_ensure_local_backup_dir() {
 	'') zxfer_throw_error "Refusing to use empty backup directory." ;;
 	*[!/]*) ;;
 	*) zxfer_throw_error "Refusing to use backup directory $1 because it must not be the filesystem root." ;;
+	esac
+	case $l_ensure_local_backup_dir in
+	'.' | '..' | ./* | ../* | */. | */.. | */./* | */../*)
+		zxfer_throw_error "Refusing to use backup directory $1 because it must not contain '.' or '..' path components."
+		;;
 	esac
 	if l_ensure_local_backup_symlink=$(zxfer_find_symlink_path_component \
 		"$l_ensure_local_backup_dir"); then
@@ -1115,9 +1129,9 @@ zxfer_build_remote_backup_script_prelude() {
 # directory: symlink walk and target-symlink check, not-a-directory check,
 # mkdir -p under umask 077, root-or-ssh-user owner check, and chmod 700.
 # Usage: zxfer_build_remote_backup_dir_prepare_cmd DIR HOST [EXTRA_TOOL...];
-# strips trailing slashes and refuses empty or filesystem-root DIR (status 1
-# before rendering). The rendered program exits 99 for a missing helper and
-# 92 for any other refusal.
+# strips trailing slashes and refuses empty, filesystem-root, or '.'/'..'
+# path-component DIR (status 1 before rendering). The rendered program exits
+# 99 for a missing helper and 92 for any other refusal.
 zxfer_build_remote_backup_dir_prepare_cmd() {
 	zxfer_strip_trailing_slashes "$1"
 	l_prepare_dir=$g_zxfer_stripped_path_result
@@ -1129,6 +1143,12 @@ zxfer_build_remote_backup_dir_prepare_cmd() {
 	*[!/]*) ;;
 	*)
 		printf '%s\n' "Refusing to use backup directory $1 because it must not be the filesystem root." >&2
+		return 1
+		;;
+	esac
+	case $l_prepare_dir in
+	'.' | '..' | ./* | ../* | */. | */.. | */./* | */../*)
+		printf '%s\n' "Refusing to use backup directory $1 because it must not contain '.' or '..' path components." >&2
 		return 1
 		;;
 	esac

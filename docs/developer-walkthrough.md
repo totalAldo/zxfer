@@ -84,7 +84,8 @@ same relative mapping, and each dataset gets its own snapshot and property plan.
    grouped traversal before passing it to the ready queue; single-dataset
    queues without `-g` clear stale slices (`zxfer_forget_snapshot_slices`) and
    plan directly. The `-g` preflight loads the snapshot-work subset in its
-   original order; execution reuses those plans. Planner memory holds only one
+   original order; execution reuses both those plans and the lazily populated
+   pass delete creation-time verdicts. Planner memory holds only one
    dataset's snapshots, and source slices remain available for live rechecks.
    `zxfer_process_source_dataset` maps the destination and selects that dataset's
    prepared snapshot plan. With parallel sends,
@@ -99,8 +100,12 @@ same relative mapping, and each dataset gets its own snapshot and property plan.
    to three examples. A GUID-less row is recorded during preparation
    and refused here with its original status; `-g` refuses it during preflight.
    Here `@one` is the shared anchor and `@two` needs transfer. Destination
-   deletion is a separate, guarded action. A same-named snapshot with a
-   different GUID is divergence, not an incremental anchor.
+   deletion is a separate, guarded action. On a prepared pass, the first
+   dataset needing creation-time checks lazily batches eligible delete plans
+   into `<=128`-path `zfs get creation` calls and caches per-plan
+   rollback/`-g` verdicts for later rows and `zxfer_delete_snaps`. A
+   same-named snapshot with a different GUID is divergence, not an incremental
+   anchor.
    Live re-planning consumes the retained listing file only after a successful
    listing. Runtime owns file allocation and reuse; the dataset modules retain
    the paths and decide when their contents can be used.
@@ -122,11 +127,15 @@ same relative mapping, and each dataset gets its own snapshot and property plan.
    `umask 077`, validating policy/endpoint context, live `(source_row, dest_row)`
    provenance, and deferred warnings/errors at each dataset's turn. Missing
    destinations, `-e` restores, datasets needing creation-property backfill,
-   and invalidated rows fall back to single-dataset planning, where one AWK
-   consumes staged encoded inputs from a run-root-enforced reusable
-   file (`g_zxfer_property_input_file`) and writes selected actions
-   into a reusable private file, keeping values out of the command environment.
-   The operation validates the file before mutation, resolves child inheritance
+   and invalidated rows fall back to single-dataset planning, where one direct
+   AWK consumes staged encoded inputs from a run-root-enforced reusable
+   file (`g_zxfer_property_input_file`) and writes the same unified plan-file
+   protocol (actions, optional `-V` `view` rows, encoded `warn` rows, or
+   `error<TAB>3` with zero action/view rows) into a pre-truncated reusable
+   private file, keeping values out of the command environment.
+   The operation validates the complete file through
+   `zxfer_validate_property_plan` (replaying decoded `-U` warnings and throwing
+   on `error<TAB>3`) before mutation, resolves child inheritance
    against the parent after earlier changes, then skips `zxfer_execute_property_plan`
    (after confirming the retained plan file is readable) when zero actions remain
    and no parent reconciliation ran; otherwise it consumes the plan for create,

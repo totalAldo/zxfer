@@ -134,9 +134,11 @@ whatever `command -v` would report on the host shell.
 Both secure-PATH inputs are rejected in full if they contain a tab, carriage
 return, or line feed; resolved local and remote helper paths must satisfy the
 same byte-shape rule. `ZXFER_BACKUP_DIR` is likewise rejected before any path
-derivation if it contains one of those three bytes. This validation happens
-before readable remote programs are converted to their one-line transport
-form, so login-shell compatibility cannot translate configured path bytes.
+derivation if it contains one of those three bytes, is not an absolute
+non-root path, or contains `.` or `..` path components; trailing slashes are
+stripped once during validation. This validation happens before readable remote
+programs are converted to their one-line transport form, so login-shell
+compatibility cannot translate configured path bytes.
 
 ## Path Checks
 
@@ -155,11 +157,14 @@ on every platform, so a backup metadata file or `ZXFER_ERROR_LOG` that is
 root under a set-group-ID `TMPDIR` (mode 2700) is accepted. The
 `ZXFER_ERROR_LOG` link-count check uses field 3 of the same `ls -ldin` record
 as its owner and mode checks; newly created logs get a fresh mode read after
-`chmod`. Local backup files likewise share one owner/mode read. The
-remote backup directory prep script (`zxfer_build_remote_backup_dir_prepare_cmd`)
-matches local `zxfer_ensure_local_backup_dir` by rejecting a target symlink
-(`[ -L ]`) and verifying directory ownership from field 3 of `ls -ldn` before
-running `chmod 700` on the remote host.
+`chmod`. Local backup files likewise share one owner/mode read. Both local
+`zxfer_ensure_local_backup_dir` and the remote backup directory prep builder
+(`zxfer_build_remote_backup_dir_prepare_cmd`) strip trailing slashes and refuse
+empty paths, the filesystem root, and `.`/`..` path components before any
+filesystem check or remote rendering; both then reject a target symlink
+(`[ -L ]`, including stripped top-level symlinks such as macOS `/tmp/` or
+`/var/`) and verify directory ownership from field 3 of `ls -ldn` before
+running `chmod 700`.
 
 ## Remote Hosts
 
@@ -173,7 +178,10 @@ matters especially when:
   writes for `-k` use `cat` on the target, and `-k` over `-O` lists the
   origin's backup storage directories once per run, with `find` when the
   source dataset already has a storage directory there, and reads each
-  forwarded alias found there with the origin's `cat`
+  forwarded alias found there with the origin's `cat` (when `g_cmd_cat` is not
+  pre-resolved, the remote read prelude checks `cat` in the secure `PATH` and
+  exits `99` so missing remote `cat` is reported as a `dependency` failure
+  rather than a transport error)
 - `-j` uses explicit per-dataset source discovery on the executing origin host
   in the changed-source/full discovery path whenever `jobs > 1`. The clean
   recursive no-op proof uses one recursive `name,guid` source stream and never
@@ -204,9 +212,10 @@ matters especially when:
 
 Current releases keep ssh control sockets and remote capability state
 strictly per-run. Each invocation creates its own short `ssh-<role>.sock`
-path under the private 0700 temp root (or, when a long `TMPDIR` would push
-that path past the `sun_path` limit, in a private `zxfer.ssh.XXXXXX`
-directory under the default temp root) and opens the master before its
+path under the private 0700 temp root (or, when a long or multibyte `TMPDIR`
+would push that path past the 104-byte `sun_path` limit measured under
+`LC_ALL=C`, in a private `zxfer.ssh.XXXXXX` directory under the default temp
+root) and opens the master before its
 first remote command, reuses that socket only for its own remote commands
 (a `-T` spec equal to the `-O` spec shares the origin master), and closes it
 before removing the temp root and that directory. There are no
@@ -222,12 +231,14 @@ backup-metadata guard/staging scripts run, so their auxiliary lookups
 Capability probes and secure remote-backup directory/write/read and
 storage-listing protocols are maintained as readable multiline POSIX `sh`
 programs and pinned by focused golden tests. At the SSH boundary zxfer retains the established rendering for
-short, single-line scripts. Long or multiline scripts are split into bounded,
-quoted positional arguments on one physical login-shell command line; a fixed
-POSIX `sh` bootstrap reassembles the original bytes before an explicit
-`sh -c`. This keeps every word below the illumos csh lexical limit while
-preserving the program, standard input, exit status, and protocol fields on
-remote accounts whose login shell is csh or tcsh.
+short, single-line scripts. Long or multiline scripts — and remote `zfs`
+commands with a newline or any single rendered argument exceeding 768 bytes
+(measured under `LC_ALL=C`) — are split into bounded, quoted positional
+arguments on one physical login-shell command line; a fixed POSIX `sh`
+bootstrap reassembles the original bytes before an explicit `sh -c`. This keeps
+every word below the illumos csh 1020-byte lexical limit while preserving the
+program, standard input, exit status, and protocol fields on remote accounts
+whose login shell is csh or tcsh.
 
 Remote target (`-T`) destination discovery runs no target-side script. Like
 every other destination `zfs` command, each discovery listing (the

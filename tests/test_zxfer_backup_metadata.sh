@@ -1877,6 +1877,81 @@ EOF
 		700 "$(zxfer_get_path_mode_octal "$base/normal_remote")"
 }
 
+test_backup_storage_root_and_dir_guards_refuse_dot_path_components() {
+	base="$TEST_TMPDIR_PHYSICAL/dot_component_guards"
+	mkdir -p "$base/sub"
+	chmod_log="$TEST_TMPDIR/dot_component_chmod.log"
+	fake_chmod_bin="$TEST_TMPDIR/dot_component_chmod_bin"
+	mkdir -p "$fake_chmod_bin"
+	: >"$chmod_log"
+	cat >"$fake_chmod_bin/chmod" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$chmod_log"
+exit 0
+EOF
+	chmod +x "$fake_chmod_bin/chmod"
+
+	for l_dot_bad in "/." "/.." "/./" "/../" "/tmp/." "/var/." "/tmp/.." "/var/.." "$base/sub/.."; do
+		l_output=$(
+			(
+				ZXFER_BACKUP_DIR="$l_dot_bad"
+				export ZXFER_BACKUP_DIR
+				zxfer_init_backup_storage_root
+			) 2>&1
+		)
+		l_status=$?
+		assertEquals "ZXFER_BACKUP_DIR=$l_dot_bad must be refused." 1 "$l_status"
+		assertContains "$l_output" "must not contain '.' or '..' path components."
+	done
+
+	for l_dot_bad in "/." "/.." "/./" "/../" "/tmp/." "/var/." "/tmp/.." "/var/.." "$base/sub/.." "." ".." "./rel" "../rel"; do
+		l_output=$(
+			(
+				PATH="$fake_chmod_bin:$PATH"
+				zxfer_ensure_local_backup_dir "$l_dot_bad"
+			) 2>&1
+		)
+		l_status=$?
+		assertEquals "Local guard must refuse $l_dot_bad." 1 "$l_status"
+		assertContains "$l_output" "must not contain '.' or '..' path components."
+		assertEquals "Local guard must never invoke chmod on $l_dot_bad." "" "$(cat "$chmod_log")"
+
+		l_remote_stdout="$TEST_TMPDIR/remote_dot_bad.stdout"
+		l_remote_stderr="$TEST_TMPDIR/remote_dot_bad.stderr"
+		zxfer_build_remote_backup_dir_prepare_cmd "$l_dot_bad" "target.example" \
+			>"$l_remote_stdout" 2>"$l_remote_stderr"
+		l_status=$?
+		assertEquals "Remote builder must refuse $l_dot_bad before rendering." 1 "$l_status"
+		assertEquals "Refused remote builder must emit no script for $l_dot_bad." "" "$(cat "$l_remote_stdout")"
+		assertContains "$(cat "$l_remote_stderr")" "must not contain '.' or '..' path components."
+		assertEquals "Remote guard must never invoke chmod on $l_dot_bad." "" "$(cat "$chmod_log")"
+	done
+
+	# Legitimate dot-prefixed directory names (such as .zxfer_backup_info.v2) remain accepted.
+	l_dotdir_root=$(
+		ZXFER_BACKUP_DIR="$base/.zxfer_store/"
+		export ZXFER_BACKUP_DIR
+		zxfer_init_backup_storage_root
+		printf '%s\n' "$g_backup_storage_root"
+	)
+	l_status=$?
+	assertEquals "Dot-prefixed directory name in ZXFER_BACKUP_DIR must succeed." 0 "$l_status"
+	assertEquals "$base/.zxfer_store" "$l_dotdir_root"
+
+	zxfer_ensure_local_backup_dir "$base/.zxfer_store_local"
+	l_status=$?
+	assertEquals "Local guard must accept dot-prefixed directory name." 0 "$l_status"
+	assertEquals 700 "$(zxfer_get_path_mode_octal "$base/.zxfer_store_local")"
+
+	l_remote_dotdir_cmd=$(zxfer_build_remote_backup_dir_prepare_cmd "$base/.zxfer_store_remote" "target.example")
+	l_status=$?
+	assertEquals "Remote builder must accept dot-prefixed directory name." 0 "$l_status"
+	sh -c "$l_remote_dotdir_cmd"
+	l_status=$?
+	assertEquals "Remote guard must succeed for dot-prefixed directory name." 0 "$l_status"
+	assertEquals 700 "$(zxfer_get_path_mode_octal "$base/.zxfer_store_remote")"
+}
+
 test_read_remote_backup_file_classifies_missing_remote_cat_as_dependency_when_g_cmd_cat_is_empty() {
 	zxfer_create_runtime_artifact_file backup-no-cat
 	staging=$g_zxfer_runtime_artifact_path_result

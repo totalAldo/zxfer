@@ -19,8 +19,11 @@ Key protections already present in the project include:
   PATH is refused rather than exported
 - rejection of tab, carriage-return, or line-feed bytes in
   `ZXFER_SECURE_PATH`, `ZXFER_SECURE_PATH_APPEND`, and `ZXFER_BACKUP_DIR`
-  before those values are split, cached, exported, or remotely rendered, and
-  of any control character in the source and destination operands
+  before those values are split, cached, exported, or remotely rendered,
+  rejection of filesystem-root or `.`/`..` path components in
+  `ZXFER_BACKUP_DIR` (after stripping trailing slashes) before symlink,
+  ownership, or `chmod 700` checks locally and remotely, and rejection of any
+  control character in the source and destination operands
 - structured failure reporting instead of ad hoc error handling
 - safe-by-default failure-report redaction for `invocation` and `last_command`
 - hardened `ZXFER_ERROR_LOG` path validation

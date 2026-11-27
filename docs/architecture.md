@@ -118,13 +118,18 @@ module or a chain of setters.
   policy validated once per run, ssh argv assembled per call with the role's
   control socket and the remote command retained in dispatcher scratch,
   direct argv invocation versus rendered shell-pipeline
-  channels, the csh-safe `sh -c` rendering, an argv-preserving zfs role runner
-  and renderer, `zxfer_run_zfs_cmd_capturing_stderr` plus `run_quiet`/`echoV`
-  modes that emit `-V` `Running remote command [...]` traces on unredirected
-  stderr without contaminating captured stderr, active remote ZFS routing, and
-  the per-run control sockets
-  with the short socket directory it creates and removes when a long TMPDIR
-  would pass the `sun_path` limit. Renderers publish the canonical quoting
+  channels, the csh-safe `sh -c` rendering (also triggered for remote `zfs`
+  commands with a newline or any rendered argument exceeding 768 bytes under
+  `LC_ALL=C`), an argv-preserving zfs role runner
+  and renderer, `zxfer_run_zfs_cmd_capturing_stderr` (routing outermost remote
+  `-V` `Running remote command [...]` traces to caller stderr on FD 6 via
+  `g_zxfer_ssh_echoV_to_fd6` without double rendering, closing FD 6 with `6>&-`
+  before executing `ssh`, and resetting the flag in `zxfer_trap_exit`) plus
+  `run_quiet` for callers that already logged a trace, active remote ZFS
+  routing, and the per-run control sockets
+  with the short socket directory it creates and removes when a long or
+  multibyte TMPDIR would pass the 104-byte `sun_path` limit (measured under
+  `LC_ALL=C`). Renderers publish the canonical quoting
   result (`g_zxfer_shell_command_result`), including csh-safe programs and
   backup dry-run previews; callers retain it before any further rendering, and
   `zxfer_get_remote_command_context_label_into_result` formats remote context
@@ -204,11 +209,12 @@ module or a chain of setters.
   Unmarked destination identities supply the delete records. Source slices
   support live rechecks using the same algorithm. Malformed identity is
   deferred to the dataset boundary.
-  It also owns one batched creation-time query
-  per delete plan that decides rollback eligibility and `-g`, deletion with
-  its safety rechecks, the divergence contract, the live re-plan of a dataset
-  whose `-d` destroy ran, and reusable run-scoped plan, creation-time and
-  slice scratch files. `zxfer_publish_snapshot_transfer_plan` is the only
+  It also owns lazy pass-level batched creation-time queries (`<=128` paths per
+  `zfs get creation`, with pass-scoped verdict cache reuse across datasets and
+  between `-g` preflight and `zxfer_delete_snaps`) that decide rollback
+  eligibility and `-g`, deletion with its safety rechecks, the divergence
+  contract, the live re-plan of a dataset whose `-d` destroy ran, and reusable
+  run-scoped plan, creation-time and slice scratch files. `zxfer_publish_snapshot_transfer_plan` is the only
   writer of the published plan; a seed receive records its new anchor
   through it
 - [../src/zxfer_replication.sh](../src/zxfer_replication.sh): the pass roots,
@@ -395,9 +401,10 @@ listing file; discovery owns the reusable destination-listing stderr file;
 remote hosts owns the reusable `g_zxfer_remote_probe_stderr_file`; and
 property transfer owns reusable `g_zxfer_property_input_file`, action-plan,
 and parent-work files. None are cleared by per-dataset state resets, and each
-is reused only when it lies under the run's private temp root.
-`zxfer_ensure_runtime_artifact_file` in runtime reuses or allocates their paths
-through the same artifact-path result, and
+is reused only when it is an existing, non-symlink regular file directly under
+the run's private temp root. `zxfer_ensure_runtime_artifact_file` in runtime
+enforces that check before reusing a path or allocating a fresh one through the
+same artifact-path result, and
 `zxfer_cleanup_runtime_artifact_path_list` supports retaining multiple paths
 when releasing a workspace list. Each domain keeps its durable path;
 runtime does not adopt its lifecycle. A live destination listing's path remains
@@ -438,10 +445,17 @@ loader rejects partial blocks, invalid counts/presence and trailing data, and
 starts no AWK process for a prepared plan. The shell loads range endpoints, source
 count, destination presence, a divergence count with at most three examples,
 and the single destroy argument; it does not rebuild snapshot lists. The
-planner no longer stores a pending-record array. Creation-time queries read
-only tagged deletion records, in batches of at most 128 paths (common first),
-and grandfather protection considers them in their original order. The destroy
-argument retains the reverse deletion order and remains one command.
+planner no longer stores a pending-record array, and emits a pass delete
+manifest (`g_zxfer_snapshot_delete_plans`) for plans with a destroy target.
+On the first dataset needing creation-time evaluation,
+`zxfer_prepare_snapshot_delete_creation_state` lazily batches eligible pass
+delete plans' common and tagged deletion snapshots into `zfs get creation`
+chunks of at most 128 paths, runs one `ZXFER_SNAPSHOT_DELETE_CREATION_AWK` pass
+(opening at most one plan at a time with checked `close()`), and caches the
+per-plan verdicts for the pass (keyed by slice record files and `-g`) so later
+datasets and `zxfer_delete_snaps` reuse them. Grandfather protection considers
+each plan's deletion records in their original order, and the destroy argument
+retains the reverse deletion order and remains one command.
 
 The snapshot-only `-g` preflight projects its original delta-list ordering onto
 those queue positions, excluding property-only work. Preflight and execution
@@ -576,11 +590,16 @@ the program's exit status.
 The renderer publishes only `g_zxfer_shell_command_result`; it writes no
 stdout, so callers retain the result before another render.
 Remote zfs commands are rendered from argv; when an argument contains a
-newline the command uses the same chunked form, so argument boundaries,
-including empty arguments, survive a csh login shell.
+newline or any rendered argument exceeds 768 bytes (measured in bytes under
+`LC_ALL=C`), the command uses the same chunked `sh -c` form, so argument
+boundaries, empty arguments, and overlong values survive a csh login shell
+below its 1020-byte word limit.
 `ZXFER_SECURE_PATH`, `ZXFER_SECURE_PATH_APPEND`, resolved helper paths, and
 `ZXFER_BACKUP_DIR` reject tab, carriage-return, and line-feed bytes before that
 rendering, so transport compatibility cannot translate trusted configuration.
+`ZXFER_BACKUP_DIR` and backup directory guards also strip trailing slashes and
+refuse the filesystem root or `.`/`..` path components before symlink,
+ownership, or `chmod 700` checks locally and remotely.
 
 One accepted capability response is parsed once and checked for framing,
 requested-tool coverage, duplicate records, statuses, and helper-path shape.
@@ -676,20 +695,26 @@ a `POS:SROW:DROW<TAB>SOURCE` index. Consumption verifies the policy/endpoint
 context fingerprint, destination mapping, and live `(source_row, dest_row)`
 provenance in both tables (so ancestor mutations, tombstones, and post-seed or
 iteration cache resets invalidate stale rows cleanly), then validates the plan
-in `batch` mode, replaying deferred `-U` warnings (`warn<TAB>...`) and
-creation-time mismatches (`error<TAB>3<TAB>...`) in single-dataset order at
-that dataset's turn. Missing destinations, `-e` restores, datasets missing
-required creation-time properties that need live backfill, and invalidated or
-unmatched pairs fall back to the single-dataset planner.
+via `zxfer_validate_property_plan FILE batch` (rejecting `create<TAB>` rows),
+replaying deferred `-U` warnings (`warn<TAB>...`) and creation-time mismatches
+(`error<TAB>3<TAB>...`) in single-dataset order at that dataset's turn. Missing
+destinations, `-e` restores, datasets missing required creation-time properties
+that need live backfill, and invalidated or unmatched pairs fall back to the
+single-dataset planner.
 
 For single-dataset planning, the property planner reads
 encoded source, destination and override lists from one run-root-enforced
 reusable private input file (`g_zxfer_property_input_file`); only its path
-crosses the environment. One batched AWK writes selected
-create/set/inherit action records, retaining the first source and override value
-needed for late parent reconciliation. A checked close and final record precede
-publication of the small action/override counts. Full diagnostic CSV views are
-retained only under `-V`; ordinary runs never transport six result lists.
+crosses the environment. After pre-truncating the reusable plan file, one
+direct AWK (`ZXFER_PROPERTY_PLAN_AWK`) writes the same unified action-file
+protocol (selected create/set/inherit action records, optional `-V` `view`
+rows, encoded `warn<TAB>` rows, or `error<TAB>3<TAB>PROP` with zero action or
+`view` rows), retaining the first source and override value needed for late
+parent reconciliation. A checked close and final `__ZXFER_PROPERTY_ACTIONS__`
+record precede `zxfer_validate_property_plan`, which decodes and replays any
+`-U` warnings, throws on `error<TAB>3`, and publishes the small action/override
+counts. Full diagnostic CSV views are retained only under `-V`; ordinary runs
+never transport six result lists.
 
 The operation retains its plan path while parent reads replace shared read
 results. One parent-resolution AWK rewrites a reusable work file with explicit

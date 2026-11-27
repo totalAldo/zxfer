@@ -771,6 +771,8 @@ test_property_plan_rejects_malformed_truncated_and_unreadable_action_files() {
 		"bogus${ZXFER_TAB}compression=lz4=local=lz4${ZXFER_LF}__ZXFER_PROPERTY_ACTIONS__" \
 		"set${ZXFER_TAB}compression=lz4=local=extra=bad${ZXFER_LF}__ZXFER_PROPERTY_ACTIONS__" \
 		"set${ZXFER_TAB}compression=lz4${ZXFER_TAB}bad=local=${ZXFER_LF}__ZXFER_PROPERTY_ACTIONS__" \
+		"view${ZXFER_TAB}apply=compression=lz4=local${ZXFER_LF}error${ZXFER_TAB}3${ZXFER_TAB}casesensitivity${ZXFER_LF}__ZXFER_PROPERTY_ACTIONS__" \
+		"error${ZXFER_TAB}3${ZXFER_TAB}casesensitivity${ZXFER_LF}view${ZXFER_TAB}apply=compression=lz4=local${ZXFER_LF}__ZXFER_PROPERTY_ACTIONS__" \
 		"__ZXFER_PROPERTY_ACTIONS__${ZXFER_LF}trailing"; do
 		printf '%s\n' "$l_bad_rows" >|"$l_bad_plan"
 		zxfer_validate_property_plan "$l_bad_plan"

@@ -816,19 +816,23 @@ test_collect_destination_dataset_inventory_preserves_setup_and_publish_failures(
 
 test_collect_destination_dataset_inventory_streams_profiles_and_reuses_error_file() {
 	stderr_file="$TEST_TMPDIR/dest_inventory_stream.stderr"
+	fake_ssh_bin="$TEST_TMPDIR/dest_inventory_fake_ssh"
+	cat >"$fake_ssh_bin" <<'EOF'
+#!/bin/sh
+printf '%s\n' "backup/dst" "backup/dst/existing"
+exit 0
+EOF
+	chmod +x "$fake_ssh_bin"
 	output=$(
 		(
 			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 			g_option_V_very_verbose=1
 			g_option_T_target_host="target.example"
+			g_cmd_ssh="$fake_ssh_bin"
 			g_target_cmd_zfs="/remote/zfs"
 			zxfer_ensure_runtime_artifact_file "" zxfer-destination-listing-err || exit 1
 			g_zxfer_destination_listing_error_file=$g_zxfer_runtime_artifact_path_result
 			files_before=$g_zxfer_profile_runtime_artifact_files_created
-			zxfer_run_destination_zfs_cmd() {
-				printf '%s\n' "backup/dst" "backup/dst/existing"
-				return 0
-			}
 			zxfer_collect_destination_dataset_inventory >/dev/null 2>"$stderr_file" || exit "$?"
 			files_after=$g_zxfer_profile_runtime_artifact_files_created
 			err_size=0
@@ -847,7 +851,7 @@ test_collect_destination_dataset_inventory_streams_profiles_and_reuses_error_fil
 	assertContains "Streaming inventory must publish datasets, preserve parent -V counters, and reuse the shared stderr file." \
 		"$output" "list=<backup/dst,backup/dst/existing> zfs=1 zlist=1 ssh=1 bucket=1 new_files=0 err_nonempty=0"
 	assertContains "Streaming inventory must record the remote ssh command in the parent shell." \
-		"$output" "cmd=<'$FAKE_SSH_BIN'"
+		"$output" "cmd=<'$fake_ssh_bin'"
 	assertContains "Streaming inventory under -V -T must still emit Running remote command on stderr." \
 		"$(cat "$stderr_file")" "Running remote command [target: target.example]:"
 
@@ -3167,15 +3171,19 @@ test_write_destination_snapshot_list_keeps_remote_trace_out_of_captured_stderr()
 	raw_file="$TEST_TMPDIR/remote_dest_list.raw"
 	sorted_file="$TEST_TMPDIR/remote_dest_list.sorted"
 	stderr_file="$TEST_TMPDIR/remote_dest_list.stderr"
+	fake_ssh_bin="$TEST_TMPDIR/remote_dest_list_fake_ssh"
+	cat >"$fake_ssh_bin" <<'EOF'
+#!/bin/sh
+printf 'backup/dst/src@s1\t101\n'
+exit 0
+EOF
+	chmod +x "$fake_ssh_bin"
 	output=$(
 		(
 			g_option_V_very_verbose=1
 			g_option_T_target_host="target.example"
+			g_cmd_ssh="$fake_ssh_bin"
 			g_target_cmd_zfs="/remote/zfs"
-			zxfer_run_destination_zfs_cmd() {
-				printf 'backup/dst/src@s1\t101\n'
-				return 0
-			}
 			zxfer_write_destination_snapshot_list_to_files "$raw_file" "$sorted_file" >/dev/null 2>"$stderr_file"
 			err_nonempty=0
 			[ ! -s "$g_zxfer_destination_listing_error_file" ] || err_nonempty=1
