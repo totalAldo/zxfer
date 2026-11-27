@@ -85,7 +85,7 @@ zxfer_find_cleanup_pid_record() {
 	g_zxfer_cleanup_pid_record_purpose=""
 	g_zxfer_cleanup_pid_record_scope=""
 
-	while IFS='	' read -r l_cleanup_find_record_pid l_cleanup_find_record_purpose l_cleanup_find_record_scope || [ -n "${l_cleanup_find_record_pid}${l_cleanup_find_record_purpose}" ]; do
+	while IFS="$ZXFER_TAB" read -r l_cleanup_find_record_pid l_cleanup_find_record_purpose l_cleanup_find_record_scope || [ -n "${l_cleanup_find_record_pid}${l_cleanup_find_record_purpose}" ]; do
 		[ -n "$l_cleanup_find_record_pid" ] || continue
 		[ "$l_cleanup_find_record_pid" = "$l_cleanup_find_pid" ] || continue
 		g_zxfer_cleanup_pid_record_purpose=$l_cleanup_find_record_purpose
@@ -247,11 +247,14 @@ zxfer_kill_registered_cleanup_pids() {
 	l_cleanup_kill_first_failure_message=""
 	l_cleanup_kill_tracked_pids=""
 
-	# Take the PID field of every row first: the loops below signal, wait and
-	# unregister, so they must not read the rows through their own stdin.
+	# Take each valid non-self PID field first: the loops below signal, wait
+	# and unregister, so they must not read the rows through their own stdin.
 	while IFS= read -r l_cleanup_kill_row; do
 		[ -n "$l_cleanup_kill_row" ] || continue
-		l_cleanup_kill_tracked_pids="$l_cleanup_kill_tracked_pids ${l_cleanup_kill_row%%"$ZXFER_TAB"*}"
+		l_cleanup_kill_pid=${l_cleanup_kill_row%%"$ZXFER_TAB"*}
+		zxfer_is_uint "$l_cleanup_kill_pid" || continue
+		[ "$l_cleanup_kill_pid" != "$$" ] || continue
+		l_cleanup_kill_tracked_pids="$l_cleanup_kill_tracked_pids $l_cleanup_kill_pid"
 	done <<EOF
 ${g_zxfer_cleanup_pid_records:-}
 EOF
@@ -260,8 +263,6 @@ EOF
 	# concurrently. A TERM delivery failure is provisional: KILL below may
 	# still terminate the same owned direct child safely.
 	for l_cleanup_kill_pid in $l_cleanup_kill_tracked_pids; do
-		zxfer_is_uint "$l_cleanup_kill_pid" || continue
-		[ "$l_cleanup_kill_pid" = "$$" ] && continue
 		zxfer_abort_cleanup_pid "$l_cleanup_kill_pid" TERM >/dev/null 2>&1 || :
 	done
 
@@ -272,8 +273,6 @@ EOF
 	# that remains live after KILL failure is retained and reported; this keeps
 	# trap shutdown bounded without promoting a recoverable TERM failure.
 	for l_cleanup_kill_pid in $l_cleanup_kill_tracked_pids; do
-		zxfer_is_uint "$l_cleanup_kill_pid" || continue
-		[ "$l_cleanup_kill_pid" = "$$" ] && continue
 		zxfer_find_cleanup_pid_record "$l_cleanup_kill_pid" || continue
 		if [ "$g_zxfer_cleanup_pid_record_scope" = pgid ] ||
 			kill -s 0 "$l_cleanup_kill_pid" 2>/dev/null; then
@@ -292,12 +291,7 @@ EOF
 		zxfer_unregister_cleanup_pid "$l_cleanup_kill_pid"
 	done
 
-	if [ "$l_cleanup_kill_abort_status" -eq 0 ]; then
-		g_zxfer_cleanup_pid_abort_failure_message=""
-	fi
-	if [ -n "$l_cleanup_kill_first_failure_message" ]; then
-		g_zxfer_cleanup_pid_abort_failure_message=$l_cleanup_kill_first_failure_message
-	fi
+	g_zxfer_cleanup_pid_abort_failure_message=$l_cleanup_kill_first_failure_message
 	return "$l_cleanup_kill_abort_status"
 }
 
@@ -499,45 +493,45 @@ zxfer_ensure_run_tmp_root() {
 	zxfer_try_get_effective_tmpdir 1 || return
 	l_ensure_run_tmp_root_effective_tmpdir=$g_zxfer_effective_tmpdir
 
-	l_run_tmp_template="${l_ensure_run_tmp_root_effective_tmpdir%/}/zxfer.$$.XXXXXX"
+	l_ensure_run_tmp_root_template="${l_ensure_run_tmp_root_effective_tmpdir%/}/zxfer.$$.XXXXXX"
 	# One substitution prints the caller's umask on its first line, then
 	# creates the root under umask 077 without changing this shell's umask.
 	# Recording the umask here spares the file allocator a $(umask) fork.
-	l_run_tmp_root=$(umask && umask 077 && mktemp -d "$l_run_tmp_template" 2>/dev/null) ||
+	l_ensure_run_tmp_root=$(umask && umask 077 && mktemp -d "$l_ensure_run_tmp_root_template" 2>/dev/null) ||
 		return
-	l_run_umask=${l_run_tmp_root%%"$ZXFER_LF"*}
-	l_run_tmp_root=${l_run_tmp_root#"$l_run_umask"}
-	l_run_tmp_root=${l_run_tmp_root#"$ZXFER_LF"}
+	l_ensure_run_tmp_root_umask=${l_ensure_run_tmp_root%%"$ZXFER_LF"*}
+	l_ensure_run_tmp_root=${l_ensure_run_tmp_root#"$l_ensure_run_tmp_root_umask"}
+	l_ensure_run_tmp_root=${l_ensure_run_tmp_root#"$ZXFER_LF"}
 	# mktemp's answer is the one input that sets the root's pathname, so its
 	# shape is checked here, once; a path outside the template is not ours
 	# to remove.
-	g_zxfer_owned_run_tmp_root=$l_run_tmp_root
+	g_zxfer_owned_run_tmp_root=$l_ensure_run_tmp_root
 	g_zxfer_owned_run_tmp_root_parent=$l_ensure_run_tmp_root_effective_tmpdir
-	if ! zxfer_run_tmp_root_has_safe_owned_shape "$l_run_tmp_root"; then
+	if ! zxfer_run_tmp_root_has_safe_owned_shape "$l_ensure_run_tmp_root"; then
 		g_zxfer_owned_run_tmp_root=""
 		g_zxfer_owned_run_tmp_root_parent=""
 		return 1
 	fi
 	# Record inode, owner and mode now; whole-root removal compares one fresh
 	# record against this one instead of asking id again.
-	l_run_tmp_root_record=""
-	if zxfer_get_private_directory_security_record "$l_run_tmp_root"; then
-		l_run_tmp_root_record=$g_zxfer_private_directory_record_result
+	l_ensure_run_tmp_root_record=""
+	if zxfer_get_private_directory_security_record "$l_ensure_run_tmp_root"; then
+		l_ensure_run_tmp_root_record=$g_zxfer_private_directory_record_result
 	fi
 	# The mode keeps special bits: a root under a setgid TMPDIR is 2700.
-	case $l_run_tmp_root_record in
+	case $l_ensure_run_tmp_root_record in
 	*"$ZXFER_TAB"700 | *"$ZXFER_TAB"[1234567]700) ;;
 	*)
 		g_zxfer_owned_run_tmp_root=""
 		g_zxfer_owned_run_tmp_root_parent=""
-		rmdir "$l_run_tmp_root" 2>/dev/null || :
+		rmdir "$l_ensure_run_tmp_root" 2>/dev/null || :
 		return 1
 		;;
 	esac
 
-	g_zxfer_run_tmp_root=$l_run_tmp_root
-	g_zxfer_owned_run_tmp_root_identity=$l_run_tmp_root_record
-	g_zxfer_run_umask=$l_run_umask
+	g_zxfer_run_tmp_root=$l_ensure_run_tmp_root
+	g_zxfer_owned_run_tmp_root_identity=$l_ensure_run_tmp_root_record
+	g_zxfer_run_umask=$l_ensure_run_tmp_root_umask
 	g_zxfer_run_tmp_counter=0
 	return 0
 }
@@ -547,18 +541,18 @@ zxfer_ensure_run_tmp_root() {
 # keeps the handles when the root is no longer the private directory this
 # process created, or when rm fails.
 zxfer_remove_run_tmp_root() {
-	l_run_tmp_root=${g_zxfer_run_tmp_root:-}
+	l_remove_run_tmp_root=${g_zxfer_run_tmp_root:-}
 
-	if [ -z "$l_run_tmp_root" ]; then
+	if [ -z "$l_remove_run_tmp_root" ]; then
 		# Owner fields without a root handle are inconsistent state.
 		[ -z "${g_zxfer_owned_run_tmp_root:-}${g_zxfer_owned_run_tmp_root_parent:-}${g_zxfer_owned_run_tmp_root_identity:-}" ]
 		return
 	fi
-	zxfer_run_tmp_root_has_safe_owned_shape "$l_run_tmp_root" || return 1
-	if [ -e "$l_run_tmp_root" ] || [ -L "$l_run_tmp_root" ]; then
-		zxfer_run_tmp_root_is_current_private_dir "$l_run_tmp_root" || return 1
-		rm -rf "$l_run_tmp_root" 2>/dev/null ||
-			{ [ ! -e "$l_run_tmp_root" ] && [ ! -L "$l_run_tmp_root" ]; } ||
+	zxfer_run_tmp_root_has_safe_owned_shape "$l_remove_run_tmp_root" || return 1
+	if [ -e "$l_remove_run_tmp_root" ] || [ -L "$l_remove_run_tmp_root" ]; then
+		zxfer_run_tmp_root_is_current_private_dir "$l_remove_run_tmp_root" || return 1
+		rm -rf "$l_remove_run_tmp_root" 2>/dev/null ||
+			{ [ ! -e "$l_remove_run_tmp_root" ] && [ ! -L "$l_remove_run_tmp_root" ]; } ||
 			return 1
 		g_zxfer_profile_runtime_artifact_paths_cleaned=$((g_zxfer_profile_runtime_artifact_paths_cleaned + 1))
 	fi
@@ -577,14 +571,14 @@ zxfer_remove_run_tmp_root() {
 # Usage: Runtime allocations are deliberately flat; contained workspaces own
 # their descendants and are removed as one direct-child directory.
 zxfer_runtime_artifact_path_is_run_root_child() {
-	l_artifact_path=$1
-	l_run_tmp_root=${g_zxfer_run_tmp_root:-}
+	l_run_root_child_path=$1
+	l_run_root_child_root=${g_zxfer_run_tmp_root:-}
 
 	zxfer_run_tmp_root_is_usable_dir || return 1
-	case "$l_artifact_path" in
-	"$l_run_tmp_root"/*)
-		l_artifact_name=${l_artifact_path#"$l_run_tmp_root"/}
-		case "$l_artifact_name" in
+	case "$l_run_root_child_path" in
+	"$l_run_root_child_root"/*)
+		l_run_root_child_name=${l_run_root_child_path#"$l_run_root_child_root"/}
+		case "$l_run_root_child_name" in
 		'' | '.' | '..' | */*) return 1 ;;
 		esac
 		return 0
@@ -681,27 +675,27 @@ zxfer_is_safe_artifact_token() {
 # Usage: zxfer_create_private_temp_dir [PREFIX]; publishes
 # g_zxfer_runtime_artifact_path_result. The run-root removal covers it.
 zxfer_create_private_temp_dir() {
-	l_prefix=${1:-zxfer-temp-dir}
+	l_private_dir_prefix=${1:-zxfer-temp-dir}
 
 	g_zxfer_runtime_artifact_path_result=""
-	zxfer_is_safe_artifact_token "$l_prefix" || return 1
+	zxfer_is_safe_artifact_token "$l_private_dir_prefix" || return 1
 	zxfer_ensure_run_tmp_root || return "$?"
 
 	# A taken name means an earlier allocation ran in a subshell and its
 	# counter bump never reached this shell; skip ahead to a free name.
 	while :; do
 		g_zxfer_run_tmp_counter=$((g_zxfer_run_tmp_counter + 1))
-		l_artifact_dir="$g_zxfer_run_tmp_root/$l_prefix.$g_zxfer_run_tmp_counter"
-		if mkdir -m 700 "$l_artifact_dir" 2>/dev/null; then
+		l_private_dir_path="$g_zxfer_run_tmp_root/$l_private_dir_prefix.$g_zxfer_run_tmp_counter"
+		if mkdir -m 700 "$l_private_dir_path" 2>/dev/null; then
 			break
 		fi
-		if [ -e "$l_artifact_dir" ] || [ -L "$l_artifact_dir" ]; then
+		if [ -e "$l_private_dir_path" ] || [ -L "$l_private_dir_path" ]; then
 			continue
 		fi
 		return 1
 	done
 	g_zxfer_profile_runtime_artifact_dirs_created=$((g_zxfer_profile_runtime_artifact_dirs_created + 1))
-	g_zxfer_runtime_artifact_path_result=$l_artifact_dir
+	g_zxfer_runtime_artifact_path_result=$l_private_dir_path
 }
 
 # Purpose: Create an empty 0600 scratch file under the per-run temp root.
@@ -711,13 +705,13 @@ zxfer_create_private_temp_dir() {
 # umask across the call. With NAME, PREFIX is a workspace stem basename and
 # the fixed sibling PREFIX.NAME is created once; a collision fails closed.
 zxfer_create_runtime_artifact_file() {
-	l_prefix=${1:-zxfer-temp}
-	l_artifact_name=${2:-}
+	l_create_file_prefix=${1:-zxfer-temp}
+	l_create_file_name=${2:-}
 
 	g_zxfer_runtime_artifact_path_result=""
-	zxfer_is_safe_artifact_token "$l_prefix" || return 1
-	if [ -n "$l_artifact_name" ]; then
-		zxfer_is_safe_artifact_token "$l_artifact_name" || return 1
+	zxfer_is_safe_artifact_token "$l_create_file_prefix" || return 1
+	if [ -n "$l_create_file_name" ]; then
+		zxfer_is_safe_artifact_token "$l_create_file_name" || return 1
 	fi
 	zxfer_ensure_run_tmp_root || return "$?"
 	# A root that zxfer_ensure_run_tmp_root did not create here has no recorded
@@ -732,31 +726,31 @@ zxfer_create_runtime_artifact_file() {
 	# allocation ran in a subshell and its counter bump never reached this
 	# shell, so step ahead to the next free name instead of failing.
 	case $- in
-	*C*) l_artifact_noclobber_was_set=1 ;;
-	*) l_artifact_noclobber_was_set=0 ;;
+	*C*) l_create_file_noclobber_was_set=1 ;;
+	*) l_create_file_noclobber_was_set=0 ;;
 	esac
 	umask 077
 	set -C
-	l_artifact_status=1
+	l_create_file_status=1
 	while :; do
-		if [ -n "$l_artifact_name" ]; then
-			l_artifact_file="$g_zxfer_run_tmp_root/$l_prefix.$l_artifact_name"
+		if [ -n "$l_create_file_name" ]; then
+			l_create_file_path="$g_zxfer_run_tmp_root/$l_create_file_prefix.$l_create_file_name"
 		else
 			g_zxfer_run_tmp_counter=$((g_zxfer_run_tmp_counter + 1))
-			l_artifact_file="$g_zxfer_run_tmp_root/$l_prefix.$g_zxfer_run_tmp_counter"
+			l_create_file_path="$g_zxfer_run_tmp_root/$l_create_file_prefix.$g_zxfer_run_tmp_counter"
 		fi
-		if { printf '' >"$l_artifact_file"; } 2>/dev/null; then
-			l_artifact_status=0
+		if { printf '' >"$l_create_file_path"; } 2>/dev/null; then
+			l_create_file_status=0
 			break
 		fi
-		[ -z "$l_artifact_name" ] || break
-		[ -e "$l_artifact_file" ] || [ -L "$l_artifact_file" ] || break
+		[ -z "$l_create_file_name" ] || break
+		[ -e "$l_create_file_path" ] || [ -L "$l_create_file_path" ] || break
 	done
-	[ "$l_artifact_noclobber_was_set" -eq 1 ] || set +C
+	[ "$l_create_file_noclobber_was_set" -eq 1 ] || set +C
 	umask "$g_zxfer_run_umask"
-	[ "$l_artifact_status" -eq 0 ] || return 1
+	[ "$l_create_file_status" -eq 0 ] || return 1
 	g_zxfer_profile_runtime_artifact_files_created=$((g_zxfer_profile_runtime_artifact_files_created + 1))
-	g_zxfer_runtime_artifact_path_result=$l_artifact_file
+	g_zxfer_runtime_artifact_path_result=$l_create_file_path
 }
 
 # Purpose: Allocate a named file family without a directory or extra process.

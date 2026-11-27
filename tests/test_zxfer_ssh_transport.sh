@@ -539,6 +539,68 @@ EOF
 		"$(zxfer_echoV_remote_command_for_host "misc.example doas" other /bin/echo hello 2>&1)"
 }
 
+test_remote_command_context_label_into_result_publishes_in_current_shell_and_resets() {
+	zxfer_test_exec_fixture_setup
+	l_out=$(
+		g_option_O_origin_host=origin.example
+		g_option_T_target_host="target.example doas"
+		l_stdout_file="$TEST_TMPDIR/context-label-into-result.stdout"
+		: >"$l_stdout_file"
+		while IFS='|' read -r l_host l_side; do
+			zxfer_get_remote_command_context_label_into_result "$l_host" "$l_side" >>"$l_stdout_file"
+			printf '%s\n' "$g_zxfer_remote_command_context_label_result"
+		done <<'EOF'
+origin.example|source
+target.example doas|destination
+misc.example|other
+origin.example|
+target.example doas|
+misc.example|
+|
+EOF
+		g_option_T_target_host=origin.example
+		zxfer_get_remote_command_context_label_into_result origin.example >>"$l_stdout_file"
+		printf '%s\n' "$g_zxfer_remote_command_context_label_result"
+
+		g_option_V_very_verbose=1
+		g_zxfer_remote_command_context_label_result=""
+		g_zxfer_rendered_report_command_result=""
+		l_echo_err="$TEST_TMPDIR/context-label-echoV.err"
+		zxfer_echoV_remote_command_for_host "misc.example doas" other /bin/echo "a'b" 2>"$l_echo_err"
+		printf 'echoV=%s\n' "$(cat "$l_echo_err")"
+		printf 'in_shell=%s|%s\n' \
+			"$g_zxfer_remote_command_context_label_result" \
+			"$g_zxfer_rendered_report_command_result"
+
+		g_cmd_ssh=/usr/bin/true
+		l_open_err="$TEST_TMPDIR/context-label-openV.err"
+		zxfer_run_ssh_control_socket_action open origin.example "$TEST_TMPDIR/openV.sock" 2>"$l_open_err"
+		wait "$g_zxfer_ssh_control_socket_action_pid" 2>/dev/null || :
+		printf 'openV=%s\n' "$(cat "$l_open_err")"
+		printf 'open_in_shell=%s\n' "$g_zxfer_remote_command_context_label_result"
+
+		zxfer_reset_ssh_transport_state
+		printf 'after_reset=<%s>\n' "$g_zxfer_remote_command_context_label_result"
+		printf 'stdout_bytes=%s\n' "$(wc -c <"$l_stdout_file" | tr -d ' ')"
+	)
+
+	assertEquals "The in-shell context-label helper should publish all role forms with no stdout, feed -V formatting in-shell, and clear on reset." \
+		"origin: origin.example
+target: target.example doas
+remote: misc.example
+origin: origin.example
+target: target.example doas
+remote: misc.example
+remote
+origin/target: origin.example
+echoV=Running remote command [remote: misc.example doas]: '/bin/echo' 'a'\"'\"'b'
+in_shell=remote: misc.example doas|'/bin/echo' 'a'\"'\"'b'
+openV=Opening ssh control socket [origin/target: origin.example]: '/usr/bin/true' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' '-M' '-S' '$TEST_TMPDIR/openV.sock' '-fN' 'origin.example'
+open_in_shell=origin/target: origin.example
+after_reset=<>
+stdout_bytes=0" "$l_out"
+}
+
 test_ssh_shell_command_render_fuzzes_wrapper_specs_and_control_socket_paths() {
 	zxfer_test_exec_fixture_setup
 	marker_rel="control_socket_fuzz_marker"

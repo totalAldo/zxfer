@@ -42,8 +42,9 @@
 #   the per-role control sockets and their directory (with
 #   g_zxfer_ssh_control_socket_short_dir, the short directory this module
 #   creates and removes when the run root's socket path is too long), the
-#   control-socket action results and host-resolution results. Rendered SSH
-#   argv uses quoting's g_zxfer_shell_command_result directly; the full remote
+#   control-socket action results, host-resolution results, and
+#   g_zxfer_remote_command_context_label_result. Rendered SSH argv uses
+#   quoting's g_zxfer_shell_command_result directly; the full remote
 #   command stays in the dispatch's l_ssh_* scratch.
 # reads globals: g_option_O_origin_host, g_option_T_target_host, g_cmd_zfs,
 #   g_origin_cmd_zfs, g_target_cmd_zfs, ZXFER_SSH_*, and runtime state.
@@ -51,11 +52,17 @@
 # mutates caches: sets g_cmd_ssh on first remote use; opens the per-run ssh
 #   control masters (each open is in the runtime cleanup-PID registry until
 #   it finishes) and closes them at exit.
-# returns via stdout: remote command output and the remote context label;
-#   role command renderers publish g_zxfer_shell_command_result.
+# returns via stdout: remote command output and the remote context label
+#   wrapper; role command renderers publish g_zxfer_shell_command_result.
 
 ZXFER_SSH_CONTROL_SOCKET_PATH_MAX=104
 ZXFER_SSH_CONTROL_SOCKET_TEMP_SUFFIX_SAMPLE=".Mvij6x1tYLn6woxm"
+# Fixed byte-count patterns for zxfer_build_remote_sh_c_command (under LC_ALL=C,
+# each `?` matches one byte): 128-byte chunk size and 768-byte plain-form cap.
+ZXFER_SSH_SH_C_CHUNK_PATTERN='????????????????????????????????'
+ZXFER_SSH_SH_C_CHUNK_PATTERN=$ZXFER_SSH_SH_C_CHUNK_PATTERN$ZXFER_SSH_SH_C_CHUNK_PATTERN$ZXFER_SSH_SH_C_CHUNK_PATTERN$ZXFER_SSH_SH_C_CHUNK_PATTERN
+ZXFER_SSH_SH_C_PLAIN_PATTERN=$ZXFER_SSH_SH_C_CHUNK_PATTERN$ZXFER_SSH_SH_C_CHUNK_PATTERN$ZXFER_SSH_SH_C_CHUNK_PATTERN
+ZXFER_SSH_SH_C_PLAIN_PATTERN=$ZXFER_SSH_SH_C_PLAIN_PATTERN$ZXFER_SSH_SH_C_PLAIN_PATTERN
 
 ################################################################################
 # SESSION STATE / LOCAL SSH / TRANSPORT POLICY
@@ -88,6 +95,7 @@ zxfer_reset_ssh_transport_state() {
 	g_zxfer_ssh_policy_error=""
 	g_zxfer_ssh_shell_host_result=""
 	g_zxfer_ssh_shell_context_error_result=""
+	g_zxfer_remote_command_context_label_result=""
 	zxfer_reset_ssh_control_socket_action_state
 
 	# -O/-T host specs parsed by zxfer_refresh_remote_zfs_commands.
@@ -253,8 +261,11 @@ zxfer_refresh_remote_zfs_commands() {
 
 # Purpose: Look up the ssh host and wrapper for a host spec, reusing the -O/-T
 # parse when the spec is a role spec.
-# Usage: zxfer_resolve_ssh_host_spec HOST_SPEC; same results and status as
-# zxfer_parse_ssh_host_spec.
+# Usage: zxfer_resolve_ssh_host_spec HOST_SPEC; publishes
+# g_zxfer_ssh_shell_host_result, g_zxfer_ssh_wrapper_result and status like
+# zxfer_parse_ssh_host_spec, except cache hits do not populate
+# g_zxfer_ssh_host_spec_tokens_result (callers needing raw tokens must use
+# zxfer_parse_ssh_host_spec).
 zxfer_resolve_ssh_host_spec() {
 	g_zxfer_ssh_shell_context_error_result=""
 	if [ -n "$1" ] && [ "$1" = "${g_zxfer_ssh_origin_spec:-}" ]; then
@@ -272,36 +283,48 @@ zxfer_resolve_ssh_host_spec() {
 # SSH COMMANDS
 ################################################################################
 
-# Purpose: Label a remote command with its role and host spec for -V output.
-# Usage: zxfer_get_remote_command_context_label HOST_SPEC [source|destination|other];
-# prints "origin: HOST", "target: HOST", "origin/target: HOST" or "remote: HOST".
-zxfer_get_remote_command_context_label() {
-	l_label_host_spec=$1
+# Purpose: Build the role and host-spec label for a remote command in the
+# current shell for -V output.
+# Usage: zxfer_get_remote_command_context_label_into_result HOST_SPEC
+# [source|destination|other]; publishes "origin: HOST", "target: HOST",
+# "origin/target: HOST", "remote: HOST", or the bare role (for an empty
+# HOST_SPEC) in g_zxfer_remote_command_context_label_result.
+zxfer_get_remote_command_context_label_into_result() {
+	g_zxfer_remote_command_context_label_result=""
+	l_context_label_host_spec=${1:-}
 
 	case ${2:-} in
-	source) l_label_role="origin" ;;
-	destination) l_label_role="target" ;;
-	other) l_label_role="remote" ;;
+	source) l_context_label_role="origin" ;;
+	destination) l_context_label_role="target" ;;
+	other) l_context_label_role="remote" ;;
 	*)
-		l_label_role="remote"
-		if [ -n "$l_label_host_spec" ]; then
-			if [ "$l_label_host_spec" = "${g_option_O_origin_host:-}" ] &&
-				[ "$l_label_host_spec" = "${g_option_T_target_host:-}" ]; then
-				l_label_role="origin/target"
-			elif [ "$l_label_host_spec" = "${g_option_O_origin_host:-}" ]; then
-				l_label_role="origin"
-			elif [ "$l_label_host_spec" = "${g_option_T_target_host:-}" ]; then
-				l_label_role="target"
+		l_context_label_role="remote"
+		if [ -n "$l_context_label_host_spec" ]; then
+			if [ "$l_context_label_host_spec" = "${g_option_O_origin_host:-}" ] &&
+				[ "$l_context_label_host_spec" = "${g_option_T_target_host:-}" ]; then
+				l_context_label_role="origin/target"
+			elif [ "$l_context_label_host_spec" = "${g_option_O_origin_host:-}" ]; then
+				l_context_label_role="origin"
+			elif [ "$l_context_label_host_spec" = "${g_option_T_target_host:-}" ]; then
+				l_context_label_role="target"
 			fi
 		fi
 		;;
 	esac
 
-	if [ -n "$l_label_host_spec" ]; then
-		printf '%s: %s\n' "$l_label_role" "$l_label_host_spec"
+	if [ -n "$l_context_label_host_spec" ]; then
+		g_zxfer_remote_command_context_label_result="$l_context_label_role: $l_context_label_host_spec"
 	else
-		printf '%s\n' "$l_label_role"
+		g_zxfer_remote_command_context_label_result=$l_context_label_role
 	fi
+}
+
+# Purpose: Label a remote command with its role and host spec for -V output.
+# Usage: zxfer_get_remote_command_context_label HOST_SPEC [source|destination|other];
+# prints "origin: HOST", "target: HOST", "origin/target: HOST" or "remote: HOST".
+zxfer_get_remote_command_context_label() {
+	zxfer_get_remote_command_context_label_into_result "$@"
+	printf '%s\n' "$g_zxfer_remote_command_context_label_result"
 }
 
 # Purpose: Print one remote command under -V.
@@ -309,11 +332,14 @@ zxfer_get_remote_command_context_label() {
 # renders nothing unless -V is on.
 zxfer_echoV_remote_command_for_host() {
 	[ "${g_option_V_very_verbose:-0}" -eq 1 ] || return 0
-	l_echo_host_spec=$1
-	l_echo_profile_side=$2
+	l_echo_remote_host_spec=$1
+	l_echo_remote_profile_side=$2
 	shift 2
 
-	zxfer_echoV "Running remote command [$(zxfer_get_remote_command_context_label "$l_echo_host_spec" "$l_echo_profile_side")]: $(zxfer_render_command_for_report "" "$@")"
+	zxfer_get_remote_command_context_label_into_result \
+		"$l_echo_remote_host_spec" "$l_echo_remote_profile_side"
+	zxfer_render_command_for_report_into_result "" "$@" || :
+	zxfer_echoV "Running remote command [$g_zxfer_remote_command_context_label_result]: $g_zxfer_rendered_report_command_result"
 }
 
 # Purpose: Build the ssh argv for one host spec and remote shell command, then
@@ -389,13 +415,9 @@ zxfer_build_remote_sh_c_command() {
 	l_shc_script=$1
 	l_shc_lc_all_set=${LC_ALL+1}
 	l_shc_lc_all=${LC_ALL-}
-	# In the C locale each `?` below matches exactly one byte, and every
-	# quote byte is escaped.
+	# In the C locale each `?` in ZXFER_SSH_SH_C_*_PATTERN matches exactly
+	# one byte, and every quote byte is escaped.
 	LC_ALL=C
-	l_shc_chunk_pattern='????????????????????????????????'
-	l_shc_chunk_pattern=$l_shc_chunk_pattern$l_shc_chunk_pattern$l_shc_chunk_pattern$l_shc_chunk_pattern
-	l_shc_plain_pattern=$l_shc_chunk_pattern$l_shc_chunk_pattern$l_shc_chunk_pattern
-	l_shc_plain_pattern=$l_shc_plain_pattern$l_shc_plain_pattern
 	l_shc_chunked=1
 
 	case $l_shc_script in
@@ -404,7 +426,7 @@ zxfer_build_remote_sh_c_command() {
 		zxfer_render_shell_command_from_argv sh -c "$l_shc_script"
 		# The whole command, not just the script, must stay within 768 bytes.
 		case $g_zxfer_shell_command_result in
-		$l_shc_plain_pattern?*) ;;
+		$ZXFER_SSH_SH_C_PLAIN_PATTERN?*) ;;
 		*) l_shc_chunked=0 ;;
 		esac
 		;;
@@ -430,11 +452,11 @@ zxfer_build_remote_sh_c_command() {
 			esac
 			l_shc_chunk=${l_shc_script%%"$ZXFER_LF"*}
 			case $l_shc_chunk in
-			$l_shc_chunk_pattern?*)
+			$ZXFER_SSH_SH_C_CHUNK_PATTERN?*)
 				# The unquoted pattern strips exactly 128 bytes; the quoted
 				# remainder then trims the chunk to them.
 				# shellcheck disable=SC2295
-				l_shc_tail=${l_shc_chunk#$l_shc_chunk_pattern}
+				l_shc_tail=${l_shc_chunk#$ZXFER_SSH_SH_C_CHUNK_PATTERN}
 				l_shc_chunk=${l_shc_chunk%"$l_shc_tail"}
 				;;
 			esac
@@ -762,7 +784,9 @@ zxfer_run_ssh_control_socket_action() {
 
 	if [ "$l_socket_action" = open ]; then
 		if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
-			zxfer_echoV "Opening ssh control socket [$(zxfer_get_remote_command_context_label "$l_socket_host_spec")]: $(zxfer_render_command_for_report "" "$@")"
+			zxfer_get_remote_command_context_label_into_result "$l_socket_host_spec"
+			zxfer_render_command_for_report_into_result "" "$@" || :
+			zxfer_echoV "Opening ssh control socket [$g_zxfer_remote_command_context_label_result]: $g_zxfer_rendered_report_command_result"
 		fi
 		"$@" &
 		g_zxfer_ssh_control_socket_action_pid=$!

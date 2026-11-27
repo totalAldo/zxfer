@@ -528,7 +528,7 @@ test_zxfer_capture_remote_probe_output_throws_before_staging_or_running_ssh() {
 			(
 				[ "$l_capture_case" != policy ] ||
 					ZXFER_SSH_USER_KNOWN_HOSTS_FILE=relative/known_hosts
-				zxfer_get_temp_file() {
+				zxfer_ensure_runtime_artifact_file() {
 					printf 'staged\n'
 				}
 				zxfer_invoke_ssh_shell_command_for_host() {
@@ -601,6 +601,98 @@ test_zxfer_capture_remote_probe_output_reports_stderr_capture_failures() {
 		"$output" "stdout=<>"
 	assertContains "A failed capture should explain what could not be read." \
 		"$output" "stderr=<Failed to read remote probe stderr capture from local staging.>"
+}
+
+test_zxfer_capture_remote_probe_output_reuses_and_truncates_stderr_file_across_probes() {
+	output=$(
+		(
+			set +e
+			g_option_O_origin_host=origin.example
+			g_option_V_very_verbose=1
+			l_probe_err_log="$TEST_TMPDIR/probe-reuse-V.err"
+			: >"$l_probe_err_log"
+			l_probe_turn=0
+			zxfer_invoke_ssh_shell_command_for_host() {
+				if [ "$l_probe_turn" -eq 1 ]; then
+					printf 'first-out\n'
+					printf 'first stderr warning\n' >&2
+					return 255
+				elif [ "$l_probe_turn" -eq 2 ]; then
+					printf 'second-out\n'
+					return 0
+				else
+					printf 'third-out\n'
+					printf 'third stderr detail\n' >&2
+					return 7
+				fi
+			}
+
+			l_probe_turn=1
+			zxfer_capture_remote_probe_output "origin.example" "'true'" source 2>>"$l_probe_err_log"
+			l_status1=$?
+			l_path1=$g_zxfer_remote_probe_stderr_file
+			l_counter1=$g_zxfer_run_tmp_counter
+			l_err1=$g_zxfer_remote_probe_stderr
+			l_label1=$g_zxfer_remote_command_context_label_result
+
+			l_probe_turn=2
+			zxfer_capture_remote_probe_output "origin.example" "'true'" source 2>>"$l_probe_err_log"
+			l_status2=$?
+			l_path2=$g_zxfer_remote_probe_stderr_file
+			l_counter2=$g_zxfer_run_tmp_counter
+			l_err2=$g_zxfer_remote_probe_stderr
+
+			l_probe_turn=3
+			zxfer_capture_remote_probe_output "origin.example" "'true'" source 2>>"$l_probe_err_log"
+			l_status3=$?
+			l_path3=$g_zxfer_remote_probe_stderr_file
+			l_counter3=$g_zxfer_run_tmp_counter
+			l_err3=$g_zxfer_remote_probe_stderr
+
+			same_path=no
+			[ "$l_path1" = "$l_path2" ] && [ "$l_path2" = "$l_path3" ] && same_path=yes
+			same_counter=no
+			[ "$l_counter1" = "$l_counter2" ] && [ "$l_counter2" = "$l_counter3" ] && same_counter=yes
+
+			zxfer_reset_remote_host_state
+			printf 'same_path=%s same_counter=%s label=<%s>\n' "$same_path" "$same_counter" "$l_label1"
+			printf 'p1=%s:<%s>\n' "$l_status1" "$l_err1"
+			printf 'p2=%s:<%s>\n' "$l_status2" "$l_err2"
+			printf 'p3=%s:<%s>\n' "$l_status3" "$l_err3"
+			printf 'after_reset=<%s>\n' "$g_zxfer_remote_probe_stderr_file"
+			printf 'err_line1=%s\n' "$(sed -n '1p' "$l_probe_err_log")"
+		)
+	)
+
+	assertEquals "Consecutive remote probes should reuse one stderr capture file, truncate stale bytes before ssh, render the -V label in-shell, and reset the handle." \
+		"same_path=yes same_counter=yes label=<origin: origin.example>
+p1=255:<first stderr warning
+>
+p2=0:<>
+p3=7:<third stderr detail
+>
+after_reset=<>
+err_line1=Running remote probe [origin: origin.example]: 'true'" "$output"
+
+	trunc_output=$(
+		(
+			set +e
+			zxfer_write_runtime_artifact_file() {
+				return 13
+			}
+			zxfer_invoke_ssh_shell_command_for_host() {
+				printf 'ssh ran\n'
+			}
+			zxfer_throw_error() {
+				printf 'throw=%s:%s\n' "${2:-1}" "$1"
+				exit "${2:-1}"
+			}
+			zxfer_capture_remote_probe_output "origin.example" "'true'" source
+		) 2>&1
+	)
+	trunc_status=$?
+	assertEquals "A failed stderr-file truncation must fail closed before ssh runs." \
+		"13|throw=13:Error creating temporary file." "$trunc_status|$trunc_output"
 }
 
 test_zxfer_emit_remote_probe_failure_message_prefers_staged_stderr() {

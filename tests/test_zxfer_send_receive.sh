@@ -56,6 +56,7 @@ test_calculate_size_estimate_reads_every_probe_output_shape_and_fails_closed_oth
 			g_option_O_origin_host=""
 			g_option_T_target_host=""
 			g_option_j_jobs=1
+			g_cmd_awk=/nonexistent/awk
 			zxfer_run_source_zfs_cmd() {
 				printf '%b\n' "$SIZE_PROBE_OUTPUT"
 				[ -z "$SIZE_PROBE_STDERR" ] || printf '%s\n' "$SIZE_PROBE_STDERR" >&2
@@ -73,6 +74,8 @@ test_calculate_size_estimate_reads_every_probe_output_shape_and_fails_closed_oth
 	done <<'EOF'
 |full\ttank/src@snap2\t13424\nsize\t13424||0|size=13424
 |full send estimate\nsize\t8192\r||0|size=8192
+|size   4096   extra\r||0|size=4096
+|size\t0||0|size=0
 |2048\r||0|size=2048
 tank/src@snap1|size\t4096||0|size=4096
 tank/src@snap1|incremental\ttank/src@snap1\ttank/src@snap2\t2048\nsize\t2048||1|size=2048
@@ -80,6 +83,9 @@ tank/src@snap1|incremental\ttank/src@snap1\ttank/src@snap2\t2048\nsize\t2048||1|
 tank/src@snap1|probe failed|stderr-detail|41|error=41:Error calculating incremental estimate: probe failed\nstderr-detail
 |probe failed||1|error=1:Error calculating estimate: probe failed
 tank/src@snap1|size\tnot-a-number||0|error=1:Error parsing incremental estimate: size\tnot-a-number
+|size\t*||0|error=1:Error parsing estimate: size\t*
+|2048 extra||0|error=1:Error parsing estimate: 2048 extra
+|size\t4096\nsize\t||0|error=1:Error parsing estimate: size\t4096\nsize\t
 |full\ttank/src@snap2\tinvalid||0|error=1:Error parsing estimate: full\ttank/src@snap2\tinvalid
 EOF
 }

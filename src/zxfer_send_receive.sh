@@ -135,11 +135,22 @@ zxfer_calculate_size_estimate() {
 	fi
 	# The size is the -P "size" row, or a bare number on the last line. A
 	# failed probe that still printed a size is accepted.
-	# shellcheck disable=SC2016  # $0/$1/$2 are awk fields.
-	l_size_value=$(printf '%s\n' "$l_size_output" | "${g_cmd_awk:-awk}" '
-		{ sub(/\r$/, ""); last = $0 }
-		$1 == "size" { size = $2 }
-		END { print (size != "" ? size : last) }')
+	l_size_parsed=""
+	l_size_last=""
+	while IFS=" $ZXFER_TAB" read -r l_size_f1 l_size_f2 l_size_f3; do
+		if [ -z "$l_size_f2" ] && [ -z "$l_size_f3" ]; then
+			l_size_last=${l_size_f1%"$ZXFER_CR"}
+		else
+			l_size_last=""
+		fi
+		l_size_f1=${l_size_f1%"$ZXFER_CR"}
+		if [ "$l_size_f1" = size ]; then
+			l_size_parsed=${l_size_f2%"$ZXFER_CR"}
+		fi
+	done <<EOF
+$l_size_output
+EOF
+	l_size_value=${l_size_parsed:-$l_size_last}
 	if zxfer_is_uint "$l_size_value"; then
 		g_zxfer_progress_size_estimate_result=$l_size_value
 		return 0
@@ -380,7 +391,7 @@ zxfer_send_job_conflicts_with_destination() {
 	g_zxfer_send_job_conflict_dest_dataset=""
 	[ -n "$l_conflict_dest" ] || return 1
 	[ -n "${g_zxfer_send_jobs:-}" ] || return 1
-	while IFS='	' read -r l_conflict_job_id l_conflict_pid l_conflict_job_dest l_conflict_rest; do
+	while IFS="$ZXFER_TAB" read -r l_conflict_job_id l_conflict_pid l_conflict_job_dest l_conflict_rest; do
 		[ -n "$l_conflict_job_id" ] || continue
 		case $l_conflict_dest in
 		"$l_conflict_job_dest" | "$l_conflict_job_dest"/*) ;;
@@ -444,8 +455,7 @@ exit \"\$zxfer_job_status\""
 		zxfer_throw_error "Failed to start the send/receive job for [$l_spawn_send_job_snapshot -> $l_spawn_send_job_dest]." "$l_spawn_send_job_status"
 		return "$l_spawn_send_job_status"
 	fi
-	g_zxfer_send_jobs=${g_zxfer_send_jobs:+$g_zxfer_send_jobs
-}"$l_spawn_send_job_id	$g_last_background_pid	$l_spawn_send_job_dest	$l_spawn_send_job_status_file	$l_spawn_send_job_snapshot	$g_zxfer_background_shell_scope"
+	g_zxfer_send_jobs=${g_zxfer_send_jobs:+$g_zxfer_send_jobs$ZXFER_LF}$l_spawn_send_job_id$ZXFER_TAB$g_last_background_pid$ZXFER_TAB$l_spawn_send_job_dest$ZXFER_TAB$l_spawn_send_job_status_file$ZXFER_TAB$l_spawn_send_job_snapshot$ZXFER_TAB$g_zxfer_background_shell_scope
 	g_count_zfs_send_jobs=$((g_count_zfs_send_jobs + 1))
 }
 
@@ -499,7 +509,7 @@ zxfer_reap_send_job() {
 		while IFS= read -r l_reap_job_row; do
 			[ -n "$l_reap_job_row" ] || continue
 			case $l_reap_job_row in
-			"$l_reap_send_job_id	"*) continue ;;
+			"$l_reap_send_job_id$ZXFER_TAB"*) continue ;;
 			esac
 			l_reap_remaining_jobs=${l_reap_remaining_jobs:+$l_reap_remaining_jobs$ZXFER_LF}$l_reap_job_row
 		done <<EOF
@@ -536,34 +546,34 @@ EOF
 # Usage: zxfer_wait_for_any_send_job REASON; called when the job limit or a
 # destination-ancestry conflict blocks the next transfer.
 zxfer_wait_for_any_send_job() {
-	l_wait_any_send_job_reason=$1
+	l_wait_job_reason=$1
 
 	[ -n "${g_zxfer_send_jobs:-}" ] || return 0
-	[ -z "$l_wait_any_send_job_reason" ] ||
-		zxfer_echoV "Waiting for zfs send/receive jobs ($l_wait_any_send_job_reason)."
+	[ -z "$l_wait_job_reason" ] ||
+		zxfer_echoV "Waiting for zfs send/receive jobs ($l_wait_job_reason)."
 	while :; do
 		# Some shells keep dead children as zombies until jobs/wait updates
 		# their table; kill -0 alone would then mistake SIGKILL for liveness.
 		if command -v jobs >/dev/null 2>&1; then
 			command jobs >/dev/null 2>&1 || :
 		fi
-		l_wait_any_send_job_reaped=0
-		while IFS='	' read -r l_wait_any_send_job_id l_wait_any_send_job_pid l_wait_any_send_job_dest l_wait_any_send_job_status_file l_wait_any_send_job_snapshot l_wait_any_send_job_scope; do
-			[ -n "$l_wait_any_send_job_id" ] || continue
-			if [ -s "$l_wait_any_send_job_status_file" ] ||
-				! kill -s 0 "$l_wait_any_send_job_pid" 2>/dev/null; then
+		l_wait_job_reaped=0
+		while IFS="$ZXFER_TAB" read -r l_wait_job_id l_wait_job_pid l_wait_job_dest l_wait_job_status_file l_wait_job_snapshot l_wait_job_scope; do
+			[ -n "$l_wait_job_id" ] || continue
+			if [ -s "$l_wait_job_status_file" ] ||
+				! kill -s 0 "$l_wait_job_pid" 2>/dev/null; then
 				# The -T convergence check runs ssh, which must not read
 				# the remaining rows from this loop's stdin.
-				zxfer_reap_send_job "$l_wait_any_send_job_id" \
-					"$l_wait_any_send_job_pid" "$l_wait_any_send_job_dest" \
-					"$l_wait_any_send_job_status_file" "$l_wait_any_send_job_snapshot" \
+				zxfer_reap_send_job "$l_wait_job_id" \
+					"$l_wait_job_pid" "$l_wait_job_dest" \
+					"$l_wait_job_status_file" "$l_wait_job_snapshot" \
 					</dev/null || return "$?"
-				l_wait_any_send_job_reaped=1
+				l_wait_job_reaped=1
 			fi
 		done <<EOF
 $g_zxfer_send_jobs
 EOF
-		[ "$l_wait_any_send_job_reaped" -eq 0 ] || return 0
+		[ "$l_wait_job_reaped" -eq 0 ] || return 0
 		zxfer_init_send_job_poll_interval
 		sleep "$g_zxfer_send_job_poll_seconds"
 	done
@@ -618,63 +628,63 @@ zxfer_signal_send_job() {
 zxfer_abort_all_send_jobs() {
 	g_zxfer_send_job_abort_failure_message=""
 	[ -n "${g_zxfer_send_jobs:-}" ] || return 0
-	l_abort_send_jobs_rows=$g_zxfer_send_jobs
-	l_abort_send_jobs_status=0
+	l_abort_job_rows=$g_zxfer_send_jobs
+	l_abort_job_status=0
 
-	while IFS='	' read -r l_abort_send_jobs_id l_abort_send_jobs_pid l_abort_send_jobs_dest l_abort_send_jobs_status_file l_abort_send_jobs_snapshot l_abort_send_jobs_scope; do
-		[ -n "$l_abort_send_jobs_id" ] || continue
-		zxfer_signal_send_job "$l_abort_send_jobs_pid" "$l_abort_send_jobs_scope" \
-			"$l_abort_send_jobs_status_file" TERM || :
+	while IFS="$ZXFER_TAB" read -r l_abort_job_id l_abort_job_pid l_abort_job_dest l_abort_job_status_file l_abort_job_snapshot l_abort_job_scope; do
+		[ -n "$l_abort_job_id" ] || continue
+		zxfer_signal_send_job "$l_abort_job_pid" "$l_abort_job_scope" \
+			"$l_abort_job_status_file" TERM || :
 	done <<EOF
-$l_abort_send_jobs_rows
+$l_abort_job_rows
 EOF
 
 	# Poll rather than sleep the whole grace window so an interrupted run
 	# exits as soon as the running job shells are gone.
 	zxfer_init_send_job_poll_interval
-	l_abort_send_jobs_ticks=${g_zxfer_send_job_abort_grace_seconds:-1}
-	zxfer_is_uint "$l_abort_send_jobs_ticks" || l_abort_send_jobs_ticks=1
+	l_abort_job_ticks=${g_zxfer_send_job_abort_grace_seconds:-1}
+	zxfer_is_uint "$l_abort_job_ticks" || l_abort_job_ticks=1
 	[ "$g_zxfer_send_job_poll_seconds" != 0.2 ] ||
-		l_abort_send_jobs_ticks=$((l_abort_send_jobs_ticks * 5))
-	while [ "$l_abort_send_jobs_ticks" -gt 0 ]; do
-		l_abort_send_jobs_live=0
-		while IFS='	' read -r l_abort_send_jobs_id l_abort_send_jobs_pid l_abort_send_jobs_dest l_abort_send_jobs_status_file l_abort_send_jobs_snapshot l_abort_send_jobs_scope; do
-			[ -n "$l_abort_send_jobs_id" ] || continue
-			[ ! -s "$l_abort_send_jobs_status_file" ] || continue
-			if kill -s 0 "$l_abort_send_jobs_pid" 2>/dev/null; then
-				l_abort_send_jobs_live=1
+		l_abort_job_ticks=$((l_abort_job_ticks * 5))
+	while [ "$l_abort_job_ticks" -gt 0 ]; do
+		l_abort_job_live=0
+		while IFS="$ZXFER_TAB" read -r l_abort_job_id l_abort_job_pid l_abort_job_dest l_abort_job_status_file l_abort_job_snapshot l_abort_job_scope; do
+			[ -n "$l_abort_job_id" ] || continue
+			[ ! -s "$l_abort_job_status_file" ] || continue
+			if kill -s 0 "$l_abort_job_pid" 2>/dev/null; then
+				l_abort_job_live=1
 				break
 			fi
 		done <<EOF
-$l_abort_send_jobs_rows
+$l_abort_job_rows
 EOF
-		[ "$l_abort_send_jobs_live" -eq 1 ] || break
+		[ "$l_abort_job_live" -eq 1 ] || break
 		sleep "$g_zxfer_send_job_poll_seconds"
-		l_abort_send_jobs_ticks=$((l_abort_send_jobs_ticks - 1))
+		l_abort_job_ticks=$((l_abort_job_ticks - 1))
 	done
 
 	l_abort_surviving_rows=""
 	l_abort_surviving_count=0
-	while IFS='	' read -r l_abort_send_jobs_id l_abort_send_jobs_pid l_abort_send_jobs_dest l_abort_send_jobs_status_file l_abort_send_jobs_snapshot l_abort_send_jobs_scope; do
-		[ -n "$l_abort_send_jobs_id" ] || continue
-		l_abort_send_jobs_signal_status=0
-		zxfer_signal_send_job "$l_abort_send_jobs_pid" "$l_abort_send_jobs_scope" \
-			"$l_abort_send_jobs_status_file" KILL || l_abort_send_jobs_signal_status=$?
-		if [ "$l_abort_send_jobs_signal_status" -ne 0 ]; then
-			if [ "$l_abort_send_jobs_status" -eq 0 ]; then
-				l_abort_send_jobs_status=$l_abort_send_jobs_signal_status
-				g_zxfer_send_job_abort_failure_message="Failed to stop send/receive job [$l_abort_send_jobs_snapshot -> $l_abort_send_jobs_dest] (PID $l_abort_send_jobs_pid)."
+	while IFS="$ZXFER_TAB" read -r l_abort_job_id l_abort_job_pid l_abort_job_dest l_abort_job_status_file l_abort_job_snapshot l_abort_job_scope; do
+		[ -n "$l_abort_job_id" ] || continue
+		l_abort_job_signal_status=0
+		zxfer_signal_send_job "$l_abort_job_pid" "$l_abort_job_scope" \
+			"$l_abort_job_status_file" KILL || l_abort_job_signal_status=$?
+		if [ "$l_abort_job_signal_status" -ne 0 ]; then
+			if [ "$l_abort_job_status" -eq 0 ]; then
+				l_abort_job_status=$l_abort_job_signal_status
+				g_zxfer_send_job_abort_failure_message="Failed to stop send/receive job [$l_abort_job_snapshot -> $l_abort_job_dest] (PID $l_abort_job_pid)."
 			fi
-			l_abort_surviving_rows=${l_abort_surviving_rows:+$l_abort_surviving_rows$ZXFER_LF}$l_abort_send_jobs_id$ZXFER_TAB$l_abort_send_jobs_pid$ZXFER_TAB$l_abort_send_jobs_dest$ZXFER_TAB$l_abort_send_jobs_status_file$ZXFER_TAB$l_abort_send_jobs_snapshot$ZXFER_TAB$l_abort_send_jobs_scope
+			l_abort_surviving_rows=${l_abort_surviving_rows:+$l_abort_surviving_rows$ZXFER_LF}$l_abort_job_id$ZXFER_TAB$l_abort_job_pid$ZXFER_TAB$l_abort_job_dest$ZXFER_TAB$l_abort_job_status_file$ZXFER_TAB$l_abort_job_snapshot$ZXFER_TAB$l_abort_job_scope
 			l_abort_surviving_count=$((l_abort_surviving_count + 1))
 			continue
 		fi
-		wait "$l_abort_send_jobs_pid" 2>/dev/null || :
+		wait "$l_abort_job_pid" 2>/dev/null || :
 	done <<EOF
-$l_abort_send_jobs_rows
+$l_abort_job_rows
 EOF
 	g_zxfer_send_jobs=$l_abort_surviving_rows
 	g_count_zfs_send_jobs=$l_abort_surviving_count
 
-	return "$l_abort_send_jobs_status"
+	return "$l_abort_job_status"
 }

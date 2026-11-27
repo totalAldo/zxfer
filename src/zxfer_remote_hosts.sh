@@ -42,7 +42,8 @@
 #   selected slot g_zxfer_remote_capability_slot_result, parser scratch OS and
 #   tool records, and g_zxfer_resolved_cli_command_result (a resolved,
 #   quoted local or remote command, or its lookup diagnostic); the
-#   probe results g_zxfer_remote_probe_stdout, _stderr and _capture_failed;
+#   probe results g_zxfer_remote_probe_stdout, _stderr and _capture_failed,
+#   the reusable stderr capture path g_zxfer_remote_probe_stderr_file;
 #   and the endpoint reset defaults (g_destination_operating_system and
 #   g_{origin,target}_cmd_zfs), published by session initialization.
 # reads globals: -O/-T and the options that shape the tool scope (-j, -e, -k,
@@ -78,6 +79,7 @@ zxfer_reset_remote_host_state() {
 	g_zxfer_remote_capability_probe_script_result=""
 	g_zxfer_remote_probe_stdout=""
 	g_zxfer_remote_probe_stderr=""
+	g_zxfer_remote_probe_stderr_file=""
 	g_zxfer_remote_probe_capture_failed=0
 	g_destination_operating_system=""
 	g_origin_cmd_zfs=$g_cmd_zfs
@@ -105,17 +107,6 @@ zxfer_fast_recursive_noop_options_are_eligible() {
 	return 0
 }
 
-# Purpose: Append the first literal token of CODEC_CMD to l_scope_candidates
-# when -z compression is active.
-# Usage: zxfer_append_remote_codec_head CODEC_CMD; internal to
-# zxfer_get_remote_capability_requested_tools_for_host.
-zxfer_append_remote_codec_head() {
-	[ "${g_option_z_compress:-0}" -eq 1 ] && [ -n "${1:-}" ] &&
-		zxfer_check_literal_token_string "$1" || return 0
-	zxfer_split_tokens_into_result "$1"
-	l_scope_candidates="$l_scope_candidates ${g_zxfer_split_tokens_result%%"$ZXFER_LF"*}"
-}
-
 # Purpose: Work out which helpers one capability probe asks a host about.
 # Usage: zxfer_get_remote_capability_requested_tools_for_host HOST_SPEC [TOOL];
 # publishes the space-separated list in
@@ -139,12 +130,20 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 		fi
 		[ "${g_option_e_restore_property_mode:-0}" -ne 1 ] ||
 			l_scope_candidates="$l_scope_candidates cat"
-		zxfer_append_remote_codec_head "${g_cmd_compress:-}"
+		if [ "${g_option_z_compress:-0}" -eq 1 ] && [ -n "${g_cmd_compress:-}" ] &&
+			zxfer_check_literal_token_string "$g_cmd_compress"; then
+			zxfer_split_tokens_into_result "$g_cmd_compress"
+			l_scope_candidates="$l_scope_candidates ${g_zxfer_split_tokens_result%%"$ZXFER_LF"*}"
+		fi
 	fi
 	if [ -n "${g_option_T_target_host:-}" ] && [ "$l_scope_host" = "$g_option_T_target_host" ]; then
 		[ "${g_option_k_backup_property_mode:-0}" -ne 1 ] ||
 			l_scope_candidates="$l_scope_candidates cat"
-		zxfer_append_remote_codec_head "${g_cmd_decompress:-}"
+		if [ "${g_option_z_compress:-0}" -eq 1 ] && [ -n "${g_cmd_decompress:-}" ] &&
+			zxfer_check_literal_token_string "$g_cmd_decompress"; then
+			zxfer_split_tokens_into_result "$g_cmd_decompress"
+			l_scope_candidates="$l_scope_candidates ${g_zxfer_split_tokens_result%%"$ZXFER_LF"*}"
+		fi
 	fi
 	zxfer_split_begin
 	# shellcheck disable=SC2086 # Space-separated tool names.
@@ -344,10 +343,16 @@ zxfer_capture_remote_probe_output() {
 	# report's last command.
 	zxfer_profile_record_ssh_invocation "$1" "${3:-}"
 	zxfer_ssh_shell_command_for_host record "$1" "$2" "${3:-}" || return
-	zxfer_get_temp_file
-	l_probe_stderr_file=$g_zxfer_runtime_artifact_path_result
+	zxfer_ensure_runtime_artifact_file "${g_zxfer_remote_probe_stderr_file:-}" \
+		remote-probe-stderr ||
+		zxfer_throw_error "Error creating temporary file." "$?"
+	g_zxfer_remote_probe_stderr_file=$g_zxfer_runtime_artifact_path_result
+	zxfer_write_runtime_artifact_file "$g_zxfer_remote_probe_stderr_file" "" ||
+		zxfer_throw_error "Error creating temporary file." "$?"
+	l_probe_stderr_file=$g_zxfer_remote_probe_stderr_file
 	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
-		zxfer_echoV "Running remote probe [$(zxfer_get_remote_command_context_label "$1" "${3:-}")]: $2"
+		zxfer_get_remote_command_context_label_into_result "$1" "${3:-}"
+		zxfer_echoV "Running remote probe [$g_zxfer_remote_command_context_label_result]: $2"
 	fi
 	l_probe_status=0
 	if [ -n "${4:-}" ]; then
@@ -585,26 +590,28 @@ zxfer_resolve_remote_required_tool() {
 	g_zxfer_required_tool_result=""
 	[ -n "$l_tool_host" ] || return 1
 
+	l_tool_found_in_cache=0
 	if zxfer_ensure_remote_host_capabilities "$l_tool_host" "$l_tool_side" \
-		"$l_tool_name" >/dev/null && {
+		"$l_tool_name" >/dev/null; then
+		l_tool_slot_records=""
 		case $g_zxfer_remote_capability_slot_result in
-		origin)
-			zxfer_get_parsed_remote_capability_tool_record "$l_tool_name" \
-				"$g_origin_remote_capabilities_tool_records"
-			;;
-		target)
-			zxfer_get_parsed_remote_capability_tool_record "$l_tool_name" \
-				"$g_target_remote_capabilities_tool_records"
-			;;
-		*) false ;;
+		origin) l_tool_slot_records=$g_origin_remote_capabilities_tool_records ;;
+		target) l_tool_slot_records=$g_target_remote_capabilities_tool_records ;;
 		esac
-	} then
-		l_tool_status=$g_zxfer_remote_capability_tool_status_result
-	else
+		if [ -n "$l_tool_slot_records" ] &&
+			zxfer_get_parsed_remote_capability_tool_record "$l_tool_name" \
+				"$l_tool_slot_records"; then
+			l_tool_status=$g_zxfer_remote_capability_tool_status_result
+			l_tool_found_in_cache=1
+		fi
+	fi
+	if [ "$l_tool_found_in_cache" -eq 0 ]; then
 		g_zxfer_profile_remote_cli_tool_direct_probes=$((g_zxfer_profile_remote_cli_tool_direct_probes + 1))
 		zxfer_escape_single_quotes_into_result "$l_tool_name"
-		zxfer_run_remote_probe_script "$l_tool_host" "$l_tool_side" \
-			"l_path=\$(command -v '$g_zxfer_escaped_single_quotes_result' 2>/dev/null); l_status=\$?; if [ \"\$l_status\" -eq 0 ]; then printf '%s\n' \"\$l_path\"; elif [ \"\$l_status\" -eq 1 ]; then exit 10; else exit \"\$l_status\"; fi"
+		l_tool_probe_cmd="l_path=\$(command -v '$g_zxfer_escaped_single_quotes_result' 2>/dev/null); l_status=\$?;"
+		l_tool_probe_cmd="$l_tool_probe_cmd if [ \"\$l_status\" -eq 0 ]; then printf '%s\n' \"\$l_path\";"
+		l_tool_probe_cmd="$l_tool_probe_cmd elif [ \"\$l_status\" -eq 1 ]; then exit 10; else exit \"\$l_status\"; fi"
+		zxfer_run_remote_probe_script "$l_tool_host" "$l_tool_side" "$l_tool_probe_cmd"
 		case $? in
 		0)
 			zxfer_validate_resolved_tool_path "$g_zxfer_remote_probe_stdout" \

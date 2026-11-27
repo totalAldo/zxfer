@@ -1647,6 +1647,48 @@ $$	self helper"
 	assertContains "Cleanup termination should remove the processed helper without treating malformed or self rows as signal targets." \
 		"$output" "remaining=<abc	forged helper
 $$	self helper>"
+
+	invalid_only_output=$(
+		(
+			g_zxfer_cleanup_pid_records="abc	forged helper
+*	glob helper
+$$	self helper"
+			g_zxfer_cleanup_pid_abort_failure_message="stale failure"
+			l_grace_called=0
+			zxfer_cleanup_pid_abort_grace_wait() {
+				l_grace_called=1
+			}
+			zxfer_abort_cleanup_pid() {
+				printf 'unexpected_abort=%s\n' "$1"
+			}
+			zxfer_kill_registered_cleanup_pids
+			printf 'status=%s grace=%s msg=<%s>\n' "$?" "$l_grace_called" \
+				"$g_zxfer_cleanup_pid_abort_failure_message"
+		)
+	)
+	assertEquals "Cleanup termination with only invalid or self rows should skip grace wait, avoid glob expansion, and clear stale failure state." \
+		"status=0 grace=0 msg=<>" "$invalid_only_output"
+}
+
+test_runtime_artifact_helpers_do_not_clobber_generic_caller_locals() {
+	output=$(
+		(
+			l_prefix="caller-prefix"
+			l_artifact_name="caller-name"
+			l_artifact_path="caller-path"
+			l_run_tmp_root="caller-root"
+			zxfer_create_private_temp_dir "helper-dir" || exit 11
+			zxfer_create_runtime_artifact_file "helper-file" || exit 12
+			zxfer_runtime_artifact_path_is_run_root_child \
+				"$g_zxfer_runtime_artifact_path_result" || exit 13
+			printf '%s|%s|%s|%s\n' "$l_prefix" "$l_artifact_name" \
+				"$l_artifact_path" "$l_run_tmp_root"
+		)
+	)
+	status=$?
+
+	assertEquals "Runtime artifact helpers should preserve generic caller local names." \
+		"0|caller-prefix|caller-name|caller-path|caller-root" "$status|$output"
 }
 
 # The candidates stand in for a memory-backed default listed first and a
