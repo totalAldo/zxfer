@@ -541,9 +541,9 @@ zxfer_all_destination_snapshot_delete_is_safe() {
 	[ -n "$l_delete_safety_source_dataset" ] || return 0
 
 	l_delete_safety_live_status=0
-	l_delete_safety_live_snapshots=$(zxfer_run_source_zfs_cmd \
+	l_delete_safety_live_snapshots=$(zxfer_run_zfs_cmd_capturing_stderr source merge \
 		list -H -d 1 -o name -t snapshot \
-		"$l_delete_safety_source_dataset" 2>&1) ||
+		"$l_delete_safety_source_dataset") ||
 		l_delete_safety_live_status=$?
 	if [ "$l_delete_safety_live_status" -ne 0 ]; then
 		zxfer_throw_error "Failed to re-verify source snapshots for [$l_delete_safety_source_dataset] before deleting all destination snapshots: $l_delete_safety_live_snapshots" \

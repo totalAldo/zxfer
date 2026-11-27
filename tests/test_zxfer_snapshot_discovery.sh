@@ -3249,5 +3249,24 @@ test_full_discovery_batches_delta_cleanup_and_skips_reused_destination_timer() {
 		"clean_calls=1 start_calls=1 dest_ms=0" "$batched_output"
 }
 
+test_stop_background_producer_ignores_empty_or_non_uint_pids() {
+	output=$(
+		(
+			g_last_background_pid="12345"
+			called=0
+			zxfer_signal_background_producer() { called=$((called + 1)); }
+			zxfer_cleanup_pid_abort_grace_wait() { called=$((called + 1)); }
+			zxfer_unregister_cleanup_pid() { called=$((called + 1)); }
+			zxfer_stop_background_producer "" "empty test"
+			s1=$?
+			zxfer_stop_background_producer "not-a-pid" "non-uint test"
+			s2=$?
+			printf 's1=%s s2=%s called=%s pid=%s\n' "$s1" "$s2" "$called" "$g_last_background_pid"
+		)
+	)
+	assertEquals "Empty or non-uint PIDs must return 0 immediately without waiting or mutating state." \
+		"s1=0 s2=0 called=0 pid=12345" "$output"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

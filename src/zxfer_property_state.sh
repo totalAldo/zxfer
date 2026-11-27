@@ -695,8 +695,8 @@ zxfer_read_one_property() {
 	l_one_status=0
 	# A user property name may start with "-" (for example -x:y), which zfs
 	# would parse as an option, so -- ends the options first.
-	l_one_output=$(zxfer_run_zfs_cmd_for_role "$1" get "$4" property,value,source -- "$3" "$2" \
-		2>"$g_zxfer_property_read_workspace.error" </dev/null) || l_one_status=$?
+	l_one_output=$(zxfer_run_zfs_cmd_capturing_stderr "$1" "$g_zxfer_property_read_workspace.error" \
+		get "$4" property,value,source -- "$3" "$2" </dev/null) || l_one_status=$?
 	if [ "$l_one_status" -ne 0 ]; then
 		zxfer_read_runtime_artifact_file_trimmed "$g_zxfer_property_read_workspace.error" || :
 		g_zxfer_property_error_result=$g_zxfer_runtime_artifact_read_result
@@ -807,12 +807,15 @@ zxfer_read_live_dataset_properties() {
 
 	zxfer_prepare_property_read_files || return "$?"
 	l_live_status=0
-	zxfer_run_zfs_cmd_for_role "$l_live_side" get -Hpo property,value,source all "$l_live_dataset" \
-		>"$g_zxfer_property_read_workspace.machine" 2>"$g_zxfer_property_read_workspace.error" </dev/null &&
-		zxfer_run_zfs_cmd_for_role "$l_live_side" get -Ho property,value,source all "$l_live_dataset" \
-			>"$g_zxfer_property_read_workspace.human" 2>"$g_zxfer_property_read_workspace.error" </dev/null &&
-		zxfer_run_zfs_cmd_for_role "$l_live_side" get -Ho property all "$l_live_dataset" \
-			>"$g_zxfer_property_read_workspace" 2>"$g_zxfer_property_read_workspace.error" </dev/null ||
+	zxfer_run_zfs_cmd_capturing_stderr "$l_live_side" "$g_zxfer_property_read_workspace.error" \
+		get -Hpo property,value,source all "$l_live_dataset" \
+		>"$g_zxfer_property_read_workspace.machine" </dev/null &&
+		zxfer_run_zfs_cmd_capturing_stderr "$l_live_side" "$g_zxfer_property_read_workspace.error" \
+			get -Ho property,value,source all "$l_live_dataset" \
+			>"$g_zxfer_property_read_workspace.human" </dev/null &&
+		zxfer_run_zfs_cmd_capturing_stderr "$l_live_side" "$g_zxfer_property_read_workspace.error" \
+			get -Ho property all "$l_live_dataset" \
+			>"$g_zxfer_property_read_workspace" </dev/null ||
 		l_live_status=$?
 	if [ "$l_live_status" -ne 0 ]; then
 		zxfer_read_runtime_artifact_file_trimmed "$g_zxfer_property_read_workspace.error" || :

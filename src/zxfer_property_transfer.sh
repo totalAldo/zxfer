@@ -51,7 +51,7 @@
 #   counts), cleared before planning. It also writes the property state module's
 #   failure text g_zxfer_property_error_result.
 # reads globals: the property CLI options, the destination platform and -m
-#   state, g_initial_source, g_actual_dest, g_zxfer_run_umask, the recursive
+#   state, g_initial_source, g_actual_dest, the recursive
 #   source and destination lists, the property tables and row directory, the
 #   restore metadata, and the rendered -T command in
 #   g_zxfer_shell_command_result.
@@ -1059,36 +1059,28 @@ zxfer_prepare_batch_property_plans() {
 			'__ZXFER_BATCH_END__' >|"$g_zxfer_property_batch_plan_base"
 	} 2>/dev/null || return 1
 
-	# Create batch plan files 0600; never restore an empty umask (ksh reads it
-	# as 0777).
-	l_batch_prep_umask=${g_zxfer_run_umask:-}
-	case $l_batch_prep_umask in
-	'' | *[!01234567]*) l_batch_prep_umask=$(umask) ;;
-	esac
+	# Create batch plan files 0600 inside the subshell so the parent shell's
+	# umask is never mutated.
 	l_batch_prep_status=0
-	umask 077
 	l_batch_prep_output=$(
-		ZXFER_PROPERTY_INPUT_FILE=$g_zxfer_property_input_file \
-			ZXFER_AWK_ROW_DIR=$g_zxfer_property_row_dir \
-			ZXFER_AWK_PLAN_BASE=$g_zxfer_property_batch_plan_base \
-			ZXFER_AWK_INITIAL_SOURCE=$g_initial_source \
-			ZXFER_AWK_DESTINATION_ROOT=$l_batch_prep_dest_root \
-			ZXFER_AWK_REMOVE_LIST="$g_zxfer_property_readonly_policy,$g_option_I_ignore_properties" \
-			ZXFER_AWK_UNSUPPORTED_LIST='' \
-			ZXFER_AWK_UNSUPPORTED_FILESYSTEM_LIST=$l_batch_prep_unsup_fs \
-			ZXFER_AWK_UNSUPPORTED_VOLUME_LIST=$l_batch_prep_unsup_vol \
-			"${g_cmd_awk:-awk}" \
-			-v transfer_all_flag="$g_option_P_transfer_property" \
-			-v required_creation_properties="$ZXFER_REQUIRED_CREATION_PROPERTIES" \
-			-v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
-			-v verbose="${g_option_v_verbose:-0}" \
-			-v very_verbose="${g_option_V_very_verbose:-0}" \
-			"$ZXFER_PROPERTY_INPUT_AWK$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK$ZXFER_PROPERTY_PLAN_CORE_AWK$ZXFER_PROPERTY_BATCH_PLAN_AWK"
+		umask 077 &&
+			ZXFER_PROPERTY_INPUT_FILE=$g_zxfer_property_input_file \
+				ZXFER_AWK_ROW_DIR=$g_zxfer_property_row_dir \
+				ZXFER_AWK_PLAN_BASE=$g_zxfer_property_batch_plan_base \
+				ZXFER_AWK_INITIAL_SOURCE=$g_initial_source \
+				ZXFER_AWK_DESTINATION_ROOT=$l_batch_prep_dest_root \
+				ZXFER_AWK_REMOVE_LIST="$g_zxfer_property_readonly_policy,$g_option_I_ignore_properties" \
+				ZXFER_AWK_UNSUPPORTED_LIST='' \
+				ZXFER_AWK_UNSUPPORTED_FILESYSTEM_LIST=$l_batch_prep_unsup_fs \
+				ZXFER_AWK_UNSUPPORTED_VOLUME_LIST=$l_batch_prep_unsup_vol \
+				"${g_cmd_awk:-awk}" \
+				-v transfer_all_flag="$g_option_P_transfer_property" \
+				-v required_creation_properties="$ZXFER_REQUIRED_CREATION_PROPERTIES" \
+				-v noninheritable_properties="$ZXFER_NONINHERITABLE_PROPERTIES" \
+				-v verbose="${g_option_v_verbose:-0}" \
+				-v very_verbose="${g_option_V_very_verbose:-0}" \
+				"$ZXFER_PROPERTY_INPUT_AWK$ZXFER_PROPERTY_AWK_LIB$ZXFER_PROPERTY_RULES_AWK$ZXFER_PROPERTY_PLAN_CORE_AWK$ZXFER_PROPERTY_BATCH_PLAN_AWK"
 	) || l_batch_prep_status=$?
-	case $l_batch_prep_umask in
-	'' | *[!01234567]*) ;;
-	*) umask "$l_batch_prep_umask" ;;
-	esac
 	zxfer_write_runtime_artifact_file "$g_zxfer_property_batch_plan_base" "" || :
 	[ "$l_batch_prep_status" -eq 0 ] || return "$l_batch_prep_status"
 

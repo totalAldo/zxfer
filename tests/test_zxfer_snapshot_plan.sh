@@ -1139,5 +1139,64 @@ snap1:111|snap2:222 snap3:333 snap4:444|-|-|snap1:111 snap2:222 snap3:333 snap4:
 EOF
 }
 
+test_all_destination_snapshot_delete_is_safe_isolates_very_verbose_remote_command_traces() {
+	l_fake_ssh="$TEST_TMPDIR/fake_ssh_delete_safe_v"
+	cat >"$l_fake_ssh" <<'EOF'
+#!/bin/sh
+for l_arg in "$@"; do
+	l_cmd=$l_arg
+done
+case $l_cmd in
+*"'list' '-H' '-d' '1' '-o' 'name' '-t' 'snapshot' 'tank/empty'"*)
+	exit 0
+	;;
+*"'list' '-H' '-d' '1' '-o' 'name' '-t' 'snapshot' 'tank/nonempty'"*)
+	printf 'tank/nonempty@s1\n'
+	exit 0
+	;;
+*"'list' '-H' '-d' '1' '-o' 'name' '-t' 'snapshot' 'tank/fail'"*)
+	printf "cannot open 'tank/fail': dataset does not exist\n" >&2
+	exit 7
+	;;
+*)
+	printf 'unexpected remote cmd: %s\n' "$l_cmd" >&2
+	exit 9
+	;;
+esac
+EOF
+	chmod 755 "$l_fake_ssh"
+
+	(
+		g_cmd_ssh=$l_fake_ssh
+		g_cmd_zfs=/sbin/zfs
+		g_origin_cmd_zfs=/sbin/zfs
+		g_option_O_origin_host="origin.example"
+		g_option_V_very_verbose=1
+		g_option_v_verbose=1
+
+		zxfer_all_destination_snapshot_delete_is_safe "tank/empty"
+		printf 'empty=%s\n' "$?"
+		l_nonempty_status=0
+		zxfer_all_destination_snapshot_delete_is_safe "tank/nonempty" || l_nonempty_status=$?
+		printf 'nonempty=%s\n' "$l_nonempty_status"
+		zxfer_throw_error() {
+			printf 'THROW:%s:%s\n' "${2:-1}" "$1"
+			exit "${2:-1}"
+		}
+		zxfer_all_destination_snapshot_delete_is_safe "tank/fail"
+	) >"$TEST_TMPDIR/delete_safe_v.stdout" 2>"$TEST_TMPDIR/delete_safe_v.stderr"
+	l_run_status=$?
+	assertEquals "Failure recheck must preserve the remote zfs exit status." 7 "$l_run_status"
+	assertEquals "Recheck decisions and failure report text must exclude Running remote command traces." \
+		"empty=0
+nonempty=1
+THROW:7:Failed to re-verify source snapshots for [tank/fail] before deleting all destination snapshots: cannot open 'tank/fail': dataset does not exist" \
+		"$(cat "$TEST_TMPDIR/delete_safe_v.stdout")"
+	assertContains "Recheck -V remote command trace must remain on stderr." \
+		"$(cat "$TEST_TMPDIR/delete_safe_v.stderr")" "Running remote command [origin: origin.example]:"
+	assertContains "Non-empty recheck warning must still print on stderr." \
+		"$(cat "$TEST_TMPDIR/delete_safe_v.stderr")" "WARNING: skipping destination snapshot deletion for [tank/nonempty]"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

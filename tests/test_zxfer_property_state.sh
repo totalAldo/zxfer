@@ -1040,5 +1040,85 @@ test_property_state_helpers_preserve_caller_ifs_and_globbing() {
 	assertEquals "," "$l_ifs_after"
 }
 
+test_property_reads_isolate_very_verbose_remote_command_traces_from_captured_stderr() {
+	l_fake_ssh="$TEST_TMPDIR/fake_ssh_prop_state_v"
+	cat >"$l_fake_ssh" <<'EOF'
+#!/bin/sh
+for l_arg in "$@"; do
+	l_cmd=$l_arg
+done
+case $l_cmd in
+*"'get' '-Hpo' 'property,value,source' 'all' 'tank/src'"* | *"'get' '-Ho' 'property,value,source' 'all' 'tank/src'"*)
+	printf 'compression\tlz4\tlocal\n'
+	;;
+*"'get' '-Ho' 'property' 'all' 'tank/src'"*)
+	printf 'compression\n'
+	;;
+*"'get' '-Hpo' 'property,value,source' 'all' 'tank/missing'"*)
+	printf "cannot open 'tank/missing': dataset does not exist\n" >&2
+	exit 1
+	;;
+*"'get' '-Hpo' 'property,value,source' '--' 'user:note' 'backup/dst'"*)
+	printf 'user:note\tok\tlocal\n'
+	;;
+*"'get' '-Hpo' 'property,value,source' '--' 'user:note' 'backup/missing'"*)
+	printf "cannot open 'backup/missing': dataset does not exist\n" >&2
+	exit 2
+	;;
+*)
+	printf 'unexpected remote cmd: %s\n' "$l_cmd" >&2
+	exit 9
+	;;
+esac
+EOF
+	chmod 755 "$l_fake_ssh"
+
+	(
+		g_cmd_ssh=$l_fake_ssh
+		g_cmd_zfs=/sbin/zfs
+		g_origin_cmd_zfs=/sbin/zfs
+		g_target_cmd_zfs=/sbin/zfs
+		g_option_O_origin_host="origin.example"
+		g_option_T_target_host="target.example"
+		g_option_V_very_verbose=1
+		g_option_v_verbose=1
+
+		zxfer_read_live_dataset_properties "tank/src" source
+		l_live_ok_status=$?
+		l_live_ok_err_nonempty=0
+		[ ! -s "$g_zxfer_property_read_workspace.error" ] || l_live_ok_err_nonempty=1
+		printf 'live_ok=%s err_nonempty=%s props=%s\n' \
+			"$l_live_ok_status" "$l_live_ok_err_nonempty" "$g_zxfer_normalized_dataset_properties"
+
+		l_live_fail_status=0
+		zxfer_read_live_dataset_properties "tank/missing" source || l_live_fail_status=$?
+		printf 'live_fail=%s err=<%s>\n' "$l_live_fail_status" "$g_zxfer_property_error_result"
+
+		zxfer_read_one_property destination "backup/dst" "user:note" -Hpo
+		l_one_ok_status=$?
+		l_one_ok_err_nonempty=0
+		[ ! -s "$g_zxfer_property_read_workspace.error" ] || l_one_ok_err_nonempty=1
+		printf 'one_ok=%s err_nonempty=%s val=%s src=%s\n' \
+			"$l_one_ok_status" "$l_one_ok_err_nonempty" \
+			"$g_zxfer_property_record_value" "$g_zxfer_property_record_source"
+
+		l_one_fail_status=0
+		zxfer_read_one_property destination "backup/missing" "user:note" -Hpo || l_one_fail_status=$?
+		printf 'one_fail=%s err=<%s>\n' "$l_one_fail_status" "$g_zxfer_property_error_result"
+	) >"$TEST_TMPDIR/prop_state_v_remote.stdout" 2>"$TEST_TMPDIR/prop_state_v_remote.stderr"
+	l_run_status=$?
+	assertEquals "Property read -V isolation subshell must succeed." 0 "$l_run_status"
+	assertEquals "Captured .error files stay clean on success and hold only zfs stderr on failure." \
+		"live_ok=0 err_nonempty=0 props=compression=lz4=local
+live_fail=1 err=<cannot open 'tank/missing': dataset does not exist>
+one_ok=0 err_nonempty=0 val=ok src=local
+one_fail=2 err=<cannot open 'backup/missing': dataset does not exist>" \
+		"$(cat "$TEST_TMPDIR/prop_state_v_remote.stdout")"
+	assertContains "Origin -V remote command trace must remain on stderr." \
+		"$(cat "$TEST_TMPDIR/prop_state_v_remote.stderr")" "Running remote command [origin: origin.example]:"
+	assertContains "Target -V remote command trace must remain on stderr." \
+		"$(cat "$TEST_TMPDIR/prop_state_v_remote.stderr")" "Running remote command [target: target.example]:"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

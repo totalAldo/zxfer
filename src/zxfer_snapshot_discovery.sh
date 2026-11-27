@@ -306,6 +306,7 @@ zxfer_signal_background_producer() {
 # Usage: zxfer_stop_background_producer PID PURPOSE [SCOPE]; clears
 # g_last_background_pid only after teardown succeeds.
 zxfer_stop_background_producer() {
+	zxfer_is_uint "${1:-}" || return 0
 	zxfer_signal_background_producer "$1" TERM "$2" "${3:-pid}" || return 1
 	# A group leader can exit on TERM while descendants keep running.
 	zxfer_cleanup_pid_abort_grace_wait

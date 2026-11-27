@@ -200,6 +200,49 @@ before publishing action/override counts or applying it, rejecting missing
 markers, malformed records and trailing data. A valid empty plan contains only
 the final marker. A creation-time mismatch retains its separate error path.
 
+For recursive runs without `-e` where both prefetched tables hold at least two
+existing `(source_row, dest_row)` pairs, `zxfer_prepare_batch_property_plans`
+stages a manifest in `g_zxfer_property_batch_plan_base` containing four
+delimited sections:
+
+```text
+__ZXFER_BATCH_SOURCE__
+<source table lines: ROW<TAB>DATASET>
+__ZXFER_BATCH_DEST__
+<destination table lines: ROW<TAB>DATASET>
+__ZXFER_BATCH_DEST_LIST__
+<existing destination dataset names>
+__ZXFER_BATCH_END__
+```
+
+One single-FD `close()`-checked AWK (`ZXFER_PROPERTY_BATCH_PLAN_AWK`) runs
+under subshell `umask 077`, writes each eligible dataset's `0600` plan file at
+`<base>.<POS>.p`, and prints an index followed by a completion marker on stdout:
+
+```text
+<POS>:<SROW>:<DROW><TAB><SOURCE>
+__ZXFER_PROPERTY_BATCH_PLAN__
+```
+
+Batch plan files use the same action-file grammar as single-dataset plans
+except that `create<TAB>...` rows are rejected and two deferred diagnostic
+record types are permitted so warnings and creation-time refusals occur at that
+dataset's exact turn:
+
+```text
+warn<TAB><property>=<encoded value>
+error<TAB>3<TAB><property>
+```
+
+When `zxfer_try_use_prepared_property_plan` confirms that the policy/endpoint
+context fingerprint and live `(SROW, DROW)` entries in both property tables
+still match, it validates `<base>.<POS>.p` through
+`zxfer_validate_property_plan FILE batch`. In `batch` mode, any `error<TAB>3`
+row must appear with zero action/view rows; after the full file validates up to
+`__ZXFER_PROPERTY_ACTIONS__`, `batch` mode decodes and replays each `warn` row
+to stderr and then throws the creation-time usage error if an `error<TAB>3` row
+was recorded.
+
 ## Property Backup Metadata
 
 [Backup metadata](../src/zxfer_backup_metadata.sh) owns format version 2 and

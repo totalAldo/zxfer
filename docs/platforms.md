@@ -36,6 +36,15 @@ bash 3.2, macOS's `/bin/sh`, and ksh93 on macOS match a bracket range such
 as `[0-9]` in a `case` pattern by locale collation under UTF-8, whereas dash,
 bash 5 and zsh compare code points; both `src/` and `tests/` spell out explicit
 ASCII character lists (`[0123456789]`) instead.
+Dynamic AWK inputs — including `-x` exclude patterns in
+`ZXFER_SNAPSHOT_RECORD_AWK` — travel through exported `ENVIRON[...]` entries
+rather than `awk -v` so regex backslash escapes (such as `\.`) stay literal
+across BSD, illumos, and GNU `awk`.
+Background process-group teardown trims leading and trailing spaces and tabs
+from `LC_ALL=C ps -o pgid=` output before numeric comparison, preserves any
+pre-existing `set -m` shell option around monitor-mode spawns, and refreshes
+shell child-table zombies with `command jobs` before checking liveness with
+`kill -0`.
 Pre-OpenZFS 2.0 behavior, Solaris Express-era property profiles, and older
 backup metadata layouts are intentionally outside the supported platform
 surface.
@@ -147,8 +156,10 @@ root under a set-group-ID `TMPDIR` (mode 2700) is accepted. The
 `ZXFER_ERROR_LOG` link-count check uses field 3 of the same `ls -ldin` record
 as its owner and mode checks; newly created logs get a fresh mode read after
 `chmod`. Local backup files likewise share one owner/mode read. The
-remote backup programs read the owner from field 3 of `ls -ldn` on the
-remote host.
+remote backup directory prep script (`zxfer_build_remote_backup_dir_prepare_cmd`)
+matches local `zxfer_ensure_local_backup_dir` by rejecting a target symlink
+(`[ -L ]`) and verifying directory ownership from field 3 of `ls -ldn` before
+running `chmod 700` on the remote host.
 
 ## Remote Hosts
 
@@ -253,6 +264,11 @@ has yet to confirm. `zfs set` and `zfs inherit` do not get `--` (see
 prints `PROP<TAB>-<TAB>-` and exits 0 on OpenZFS 2.4.1 (Ubuntu) and FreeBSD,
 and zxfer leaves such a property out; `hostile_property_record_shaped_value_test`
 checks that answer, which the OmniOS lane has yet to confirm.
+Batch property planning (`ZXFER_PROPERTY_BATCH_PLAN_AWK`) opens and closes each
+prefetched row file and per-dataset plan file sequentially with checked
+`close()` calls (at most one open file descriptor at a time for illumos/BSD
+`awk` FD limits) inside a command substitution with `umask 077` so `0600` plan
+files are created without mutating the parent shell's `umask`.
 
 zxfer-managed ssh transports pass `BatchMode=yes` and
 `StrictHostKeyChecking=yes` by default. `ZXFER_SSH_BATCH_MODE` and

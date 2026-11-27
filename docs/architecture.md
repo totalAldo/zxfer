@@ -80,15 +80,17 @@ module or a chain of setters.
   single-subshell TMPDIR candidate check, and symlink-aware trusted-path
   validation for the backup metadata and `ZXFER_ERROR_LOG` paths
 - [../src/zxfer_quoting.sh](../src/zxfer_quoting.sh): literal token splitting,
-  single-quote escaping, and argv-to-shell rendering primitives; the
+  single-quote escaping, literal substring replacement
+  (`zxfer_replace_all_into_result`), and argv-to-shell rendering primitives; the
   line-control constants, `zxfer_split_begin`/`zxfer_split_end`, and the
   `*_into_result` helpers run in the current shell without command
   substitutions
 - [../src/zxfer_reporting.sh](../src/zxfer_reporting.sh): structured failure
-  reporting and its validated `ZXFER_ERROR_LOG` append, bounded in-shell
-  report-value escaping for `\`, TAB, CR, and LF, in-shell `*_into_result`
-  command renderers, verbose output helpers, usage errors, and operator-facing
-  status
+  reporting and its validated `ZXFER_ERROR_LOG` append, unified single-`LC_ALL=C`-scope
+  bounded in-shell report-value escaping and token quoting
+  (`zxfer_escape_or_quote_report_value`) for `\`, TAB, CR, and LF, in-shell
+  `*_into_result` command renderers, verbose output helpers, usage errors, and
+  operator-facing status
 - [../src/zxfer_profile.sh](../src/zxfer_profile.sh): the `-V` counters
   (plain globals that each producer bumps inline and the session reset
   zeroes first), the attribution rules for zfs and ssh calls, stage timers
@@ -117,7 +119,10 @@ module or a chain of setters.
   control socket and the remote command retained in dispatcher scratch,
   direct argv invocation versus rendered shell-pipeline
   channels, the csh-safe `sh -c` rendering, an argv-preserving zfs role runner
-  and renderer, active remote ZFS routing, and the per-run control sockets
+  and renderer, `zxfer_run_zfs_cmd_capturing_stderr` plus `run_quiet`/`echoV`
+  modes that emit `-V` `Running remote command [...]` traces on unredirected
+  stderr without contaminating captured stderr, active remote ZFS routing, and
+  the per-run control sockets
   with the short socket directory it creates and removes when a long TMPDIR
   would pass the `sun_path` limit. Renderers publish the canonical quoting
   result (`g_zxfer_shell_command_result`), including csh-safe programs and
@@ -166,8 +171,11 @@ module or a chain of setters.
   (CLI validation prepares the override policy before any zfs command;
   a malformed item or a property named twice is a usage error), the
   readonly policy prepared after endpoint initialization, the `-U` destination-support scan,
-  source collection (with `-e` restore) and create-time metadata, one plan
-  `awk` per dataset (derive the apply and creation lists with the
+  source collection (with `-e` restore) and create-time metadata, lazy batch
+  planning (`zxfer_prepare_batch_property_plans` /
+  `zxfer_try_use_prepared_property_plan` / `ZXFER_PROPERTY_BATCH_PLAN_AWK`) for
+  `>= 2` existing prefetched `(source_row, dest_row)` pairs with single-dataset
+  plan-`awk` fallback (derive the apply and creation lists with the
   readonly/`-I`/`-U` filters, validate all creation constraints, then use named
   root/child decisions over ordered encoded records and first-provenance maps
   to emit selected actions), destination creation, set/inherit execution, child-inherit
@@ -656,7 +664,25 @@ values; an empty destination view still represents an existing dataset when
 its flag is 1. Run-wide `-P`, validated `-o`, readonly and `-I` policies come
 from session state rather than being repeated in each call. The operation
 retains destination values across helper calls alongside its source views.
-The property planner reads
+When `-e` is inactive and both prefetched property tables hold at least two
+existing `(source_row, dest_row)` pairs, `zxfer_try_use_prepared_property_plan`
+lazily invokes `zxfer_prepare_batch_property_plans` once per destination-cache
+iteration. That helper stages the source/destination row indexes and
+`g_recursive_dest_list` into `g_zxfer_property_batch_plan_base` alongside the
+shared override input file (`g_zxfer_property_input_file`) and runs
+`ZXFER_PROPERTY_BATCH_PLAN_AWK` in one single-FD `close()`-checked AWK pass
+under subshell `umask 077`, writing `0600` per-dataset plan files and publishing
+a `POS:SROW:DROW<TAB>SOURCE` index. Consumption verifies the policy/endpoint
+context fingerprint, destination mapping, and live `(source_row, dest_row)`
+provenance in both tables (so ancestor mutations, tombstones, and post-seed or
+iteration cache resets invalidate stale rows cleanly), then validates the plan
+in `batch` mode, replaying deferred `-U` warnings (`warn<TAB>...`) and
+creation-time mismatches (`error<TAB>3<TAB>...`) in single-dataset order at
+that dataset's turn. Missing destinations, `-e` restores, datasets missing
+required creation-time properties that need live backfill, and invalidated or
+unmatched pairs fall back to the single-dataset planner.
+
+For single-dataset planning, the property planner reads
 encoded source, destination and override lists from one run-root-enforced
 reusable private input file (`g_zxfer_property_input_file`); only its path
 crosses the environment. One batched AWK writes selected
@@ -672,8 +698,9 @@ only if the actual parent supplies its value; existing-child reconciliation also
 preserves matching inheritable override requests. Reads still occur after prior
 mutations and cache invalidation. It processes original sets before inherits to
 preserve each resulting command order. Working memory is limited to the current
-dataset; the three scratch files are reused across datasets and passes, and the
-run root owns their release.
+dataset; the three single-dataset scratch files (plus the reusable batch-plan
+base stem when batch planning runs) are reused across datasets and passes, and
+the run root owns their release.
 
 When planning yields zero actions and no parent reconciliation ran,
 `zxfer_transfer_properties` verifies that the retained plan file exists and is
@@ -793,21 +820,29 @@ zfs never returns) says nothing about the dataset, so the run stops with
 that status without probing over the same connection. After the diff, the
 recursive dataset inventory is listed only when later work reads it
 (transfers, `-d` deletes, property work), so a clean `-T` no-op lists no
-inventory; a missing destination root is bootstrapped only after the live
+inventory; `zxfer_collect_destination_dataset_inventory` streams the inventory
+directly into shell memory (reusing `g_zxfer_destination_listing_error_file`
+while recording parent `-V` counters and the remote SSH command); a missing
+destination root is bootstrapped only after the live
 pool probe lists its pool. Snapshot-list stderr precedes the `Failed to
 retrieve snapshot list from the destination.` report, locally and over `-T`.
 
 Full discovery compares the two sorted listings produced by the source and
-destination stages. It allocates filtered copies only for `-x`. One AWK pass
-extracts transfer datasets, extra destination datasets and any needed source
-inventory. It emits one tagged row per consecutive dataset in each list. A
-C-locale unique sort orders the dataset names, including parents and children.
-The current shell publishes each list without splitting names on spaces. Empty recursive work skips extraction
-entirely. Delta splitting publishes provenanced missing/extra snapshot counts
-that `zxfer_report_recursive_snapshot_delta` consumes on entry (clearing
-provenance across all branches, checking readability so vanished or unreadable
-files still fail closed through `awk`, fast-pathing empty readable files to
-0/0, and counting final post-filter/-prune dataset lists in the shell). Record
+destination stages. It allocates filtered copies only for `-x`. One unified
+helper (`zxfer_collect_snapshot_delta_lists`) splits the diff into `.missing`
+and `.extra` files with `close()`-checked writes, extracts tagged transfer,
+extra, and optional source-inventory dataset rows in the same AWK pass,
+publishes `"MISSING EXTRA"` counts in `g_zxfer_snapshot_delta_counts_result`,
+and runs one `LC_ALL=C sort -u` to order the dataset names (including parents
+and children). The current shell publishes each list without splitting names on
+spaces, and skips extraction when recursive work is empty.
+`zxfer_set_g_recursive_source_list` passes those explicit missing/extra counts
+to `zxfer_report_recursive_snapshot_delta`, which verifies readability of both
+files (falling back to `awk` so vanished or unreadable files fail closed),
+fast-paths empty readable files to 0/0, and counts final post-filter/-prune
+dataset lists in the shell. When called from `zxfer_run_full_snapshot_discovery`,
+`discovery-delta` scratch cleanup is deferred and batched into the owner's
+single end-of-discovery cleanup call. Record
 exclusions retain AWK's regex semantics and dataset exclusions
 retain grep's regex semantics. Snapshot identity validation and the live-source
 inventory guard for `-d` still precede any destructive work.
@@ -1058,8 +1093,7 @@ proportional to the largest row. Publication follows successful validation and
 every checked row write, populating named result channels
 (`g_zxfer_backup_view_dir_result`, `g_zxfer_backup_view_source_root_result`,
 `g_zxfer_backup_view_destination_root_result`, and
-`g_zxfer_backup_view_index_result`) alongside the legacy combined
-`g_zxfer_backup_view_result` so callers consume fields directly without
+`g_zxfer_backup_view_index_result`) so callers consume fields directly without
 re-splitting lines. Restore refreshes retire the previous view. Forwarded
 aliases retain their own directories and positive or negative memo entries for
 the session, so property-pass resets cannot overwrite them.
@@ -1086,7 +1120,7 @@ flowchart LR
     F --> G["Check every -o property against the initial source, before any destination property is read or changed (-d may already have destroyed destination-only snapshots)"]
     G --> I{"Does the destination exist (recursive listing, else a live probe)?"}
     I -- "no" --> J["Plan with destination-exists=0 and session policy: stage encoded inputs, write selected create actions in one AWK, validate the file, and create the destination (a child drops inheritable -o overrides its parent already supplies)"]
-    I -- "yes" --> K["Retain destination properties and plan with destination-exists=1 and session policy: stage encoded inputs, check all creation constraints before named root/child decisions emit actions in one AWK; validate the file, resolve child inheritance against the late parent read, then apply set and ordered inherits"]
+    I -- "yes" --> K["Retain destination properties and plan with destination-exists=1 and session policy: consume a provenance/context-verified lazy batch plan (for >= 2 existing prefetched pairs, validating deferred -U warnings and creation mismatches) or fall back to single-dataset AWK; resolve child inheritance against the late parent read, then apply set and ordered inherits"]
     J --> L{"-k backup mode?"}
     K --> L
     L -- "no" --> O{"Later, did a seed receive require post-seed reconcile?"}

@@ -63,10 +63,14 @@ same relative mapping, and each dataset gets its own snapshot and property plan.
    and re-sorting it and releases `.destination` afterward.
    Each owner keeps one workspace stem and its allocated path list; names such
    as `STEM.error` and `STEM.raw` identify each file's purpose. Delta processing
-   publishes provenanced missing/extra counts that delta reporting consumes on
-   entry (checking readability and counting final dataset lists in-shell),
-   extracts the transfer, extra and optional full-source dataset lists together,
-   sorts them once by role and dataset, then publishes each list in the shell.
+   runs `zxfer_collect_snapshot_delta_lists` to split the diff, emit
+   `g_zxfer_snapshot_delta_counts_result`, and extract the transfer, extra, and
+   optional full-source dataset lists in one AWK pass, sorts them once by role
+   and dataset, publishes each list in the shell, and passes those explicit
+   counts to `zxfer_report_recursive_snapshot_delta` (which checks readability
+   and counts final dataset lists in-shell). Full discovery batches
+   `discovery-delta` cleanup into its end-of-discovery release and streams
+   `zxfer_collect_destination_dataset_inventory` directly into memory.
    Its destination-inventory decision also governs snapshot-record retention;
    nonrecursive runs retain records even when no inventory is needed. Parallel
    accounting follows the listing mode: the proof ignores `-j`, and full
@@ -74,7 +78,9 @@ same relative mapping, and each dataset gets its own snapshot and property plan.
    first pass's preparation and rediscovery here, before the dataset queue;
    migration services owns only service stopping and recovery.
 3. **Visit each dataset.** `zxfer_copy_filesystems` builds the iteration list
-   and, for multi-dataset queues or `-g`, prepares its snapshot plans in one
+   via `zxfer_build_replication_iteration_list` (which handles empty and
+   single-dataset queues in-shell without forking `awk`) and, for multi-dataset
+   queues or `-g`, prepares its snapshot plans in one
    grouped traversal before passing it to the ready queue; single-dataset
    queues without `-g` clear stale slices (`zxfer_forget_snapshot_slices`) and
    plan directly. The `-g` preflight loads the snapshot-work subset in its
@@ -109,7 +115,15 @@ same relative mapping, and each dataset gets its own snapshot and property plan.
    number of arguments. Property reads reuse one workspace: the stem holds the
    property-name skeleton, with `.machine`, `.human`, `.error` and `.wanted`
    siblings for the value views, diagnostics and recursive dataset filter.
-   One AWK consumes staged encoded inputs from a run-root-enforced reusable
+   For `>= 2` existing prefetched `(source_row, dest_row)` pairs without `-e`,
+   `zxfer_try_use_prepared_property_plan` lazily invokes
+   `zxfer_prepare_batch_property_plans` once per destination-cache iteration to
+   plan all eligible pairs in one single-FD `awk` pass under subshell
+   `umask 077`, validating policy/endpoint context, live `(source_row, dest_row)`
+   provenance, and deferred warnings/errors at each dataset's turn. Missing
+   destinations, `-e` restores, datasets needing creation-property backfill,
+   and invalidated rows fall back to single-dataset planning, where one AWK
+   consumes staged encoded inputs from a run-root-enforced reusable
    file (`g_zxfer_property_input_file`) and writes selected actions
    into a reusable private file, keeping values out of the command environment.
    The operation validates the file before mutation, resolves child inheritance
@@ -128,8 +142,8 @@ same relative mapping, and each dataset gets its own snapshot and property plan.
    `zxfer_load_backup_metadata_view`: guarded reads stay in private staging,
    validation keeps keys and counts, and payload rows are written after the
    file passes validation, publishing named
-   `g_zxfer_backup_view_{dir,source_root,destination_root,index}_result` fields
-   alongside the legacy combined view. Dataset lookups use the shared row reader.
+   `g_zxfer_backup_view_{dir,source_root,destination_root,index}_result` fields.
+   Dataset lookups use the shared row reader.
    Restore views refresh per pass; alias views survive for the session.
 6. **Transfer snapshots.** `zxfer_copy_snapshots` chooses the seed or
    incremental path and delegates transport to

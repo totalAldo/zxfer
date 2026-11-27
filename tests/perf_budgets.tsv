@@ -31,7 +31,7 @@
 # The history of every ratchet is in CHANGELOG.txt. On 2026-09-26 (W10) the
 # file kept only these rows of the 450 it had: the full-fixture rows were
 # never enforced, and the per-helper rows duplicated TOTAL.
-noop_small	TOTAL	21
+noop_small	TOTAL	19
 noop_small	ssh_connections	0
 noop_small	ssh_master_opens	0
 noop_small	profile:zfs_list_calls	0
@@ -43,25 +43,25 @@ dryrun_incr_small	ssh_master_opens	0
 dryrun_incr_small	profile:zfs_list_calls	0
 dryrun_incr_small	profile:zfs_send_calls	0
 dryrun_incr_small	profile:zfs_receive_calls	0
-incr_small	TOTAL	63
+incr_small	TOTAL	51
 incr_small	ssh_connections	0
 incr_small	ssh_master_opens	0
 incr_small	profile:zfs_list_calls	2
 incr_small	profile:zfs_send_calls	11
 incr_small	profile:zfs_receive_calls	11
-remote_noop_small	TOTAL	29
+remote_noop_small	TOTAL	23
 remote_noop_small	ssh_connections	1
 remote_noop_small	ssh_master_opens	1
 remote_noop_small	profile:zfs_list_calls	2
 remote_noop_small	profile:zfs_send_calls	0
 remote_noop_small	profile:zfs_receive_calls	0
-remote_incr_small	TOTAL	56
+remote_incr_small	TOTAL	46
 remote_incr_small	ssh_connections	1
 remote_incr_small	ssh_master_opens	1
 remote_incr_small	profile:zfs_list_calls	3
 remote_incr_small	profile:zfs_send_calls	11
 remote_incr_small	profile:zfs_receive_calls	11
-props_small	TOTAL	71
+props_small	TOTAL	55
 props_small	ssh_connections	0
 props_small	ssh_master_opens	0
 props_small	profile:zfs_list_calls	3
