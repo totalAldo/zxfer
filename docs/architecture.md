@@ -85,12 +85,16 @@ module or a chain of setters.
   `*_into_result` helpers run in the current shell without command
   substitutions
 - [../src/zxfer_reporting.sh](../src/zxfer_reporting.sh): structured failure
-  reporting and its validated `ZXFER_ERROR_LOG` append, report-value
-  escaping, verbose output helpers, usage errors, and operator-facing status
+  reporting and its validated `ZXFER_ERROR_LOG` append, bounded in-shell
+  report-value escaping for `\`, TAB, CR, and LF, in-shell `*_into_result`
+  command renderers, verbose output helpers, usage errors, and operator-facing
+  status
 - [../src/zxfer_profile.sh](../src/zxfer_profile.sh): the `-V` counters
   (plain globals that each producer bumps inline and the session reset
   zeroes first), the attribution rules for zfs and ssh calls, stage timers
   that read the clock in the current shell, and the end-of-run summary
+  (`zxfer_profile_emit_summary`, which reuses the shutdown clock reading when
+  provided)
 - [../src/zxfer_exec.sh](../src/zxfer_exec.sh): the single `eval` site that
   runs a rendered command (`zxfer_execute_rendered_shell_command`), the
   once-per-process choice of background isolation (`setsid`, shell job
@@ -117,12 +121,16 @@ module or a chain of setters.
   with the short socket directory it creates and removes when a long TMPDIR
   would pass the `sun_path` limit. Renderers publish the canonical quoting
   result (`g_zxfer_shell_command_result`), including csh-safe programs and
-  backup dry-run previews; callers retain it before any further rendering.
+  backup dry-run previews; callers retain it before any further rendering, and
+  `zxfer_get_remote_command_context_label_into_result` formats remote context
+  labels in the current shell.
   Wrapper-aware preparation still encloses the whole remote
   pipeline in `sh -c` before the dispatcher adds `doas` or `pfexec`.
 - [../src/zxfer_remote_hosts.sh](../src/zxfer_remote_hosts.sh): local/remote CLI
   command-head resolution and quoting, remote helper resolution, one fail-closed capability probe per host and requested tool
-  set, kept for the run in one in-memory slot per role (origin, target), either
+  set (capturing probe stderr in the reusable run-root file
+  `g_zxfer_remote_probe_stderr_file`), kept for the run in one in-memory slot
+  per role (origin, target), either
   of which answers a lookup for the same host and tools, resolved remote
   OS/tool selections, and the option gate of the fast no-op proof; it
   consumes the SSH transport API but does not own transport state
@@ -350,8 +358,13 @@ paths such as `STEM.error`, `STEM.sorted` and `STEM.raw` in their arguments.
 The fast proof's one owner,
 `zxfer_try_fast_recursive_noop_discovery`, keeps timers, PIDs and statuses in
 distinct `l_fast_noop_owner_*` scratch names; its helpers never write them.
+On a clean unfiltered (`-x` unset) fallback where destination normalization
+succeeded, it retains both its raw listing (`.raw`) and its pre-sorted
+normalized listing (`.destination`) through multi-retain cleanup.
 Full discovery has the same ownership model in `zxfer_run_full_snapshot_discovery`,
 with four core workspace files, a raw file when the proof did not supply one,
+optional reuse of `.destination` (skipping re-normalization and re-sorting and
+always releasing `.destination` on completion or failure),
 and distinct `l_full_owner_*` timer/status scratch.
 It coordinates destination collection, source validation,
 publication and release directly. Substantive helpers receive their resources
@@ -360,22 +373,25 @@ inventory decision also governs record retention: after a successful inventory
 attempt, retain the record files; nonrecursive runs retain them even without an
 inventory attempt. There is no second work predicate or cached retention flag.
 Published record caches,
-the raw destination-listing handoff, and the registered source PID keep their
+the destination-listing handoff(s), and the registered source PID keep their
 shared ownership because later planning or EXIT teardown needs them. Validation returns its status
 and diagnostic before that release. Full discovery defers release when its
 source producer is unreaped; EXIT teardown stops registered producers before
 removing the root. The fast proof parses its completed destination status record once,
 using it both to retain a successful listing for fallback and to validate the
 proof. Discovery owns the flat source/destination record files
-that survive for later lookups. The snapshot plan module owns a reusable plan
-file, a reusable creation-time file and a reusable slice file, the
-destination-state module the reusable depth-1 listing file, and discovery a
-reusable destination-listing stderr file; all five are reused
-for the whole run (across datasets or passes), are not cleared by a
-per-dataset state reset, and are reused only when they lie under the run's
-private temp root.
+that survive for later lookups. Several modules keep reusable run-root scratch
+files across datasets or passes: snapshot planning owns reusable plan,
+creation-time, and slice files; destination state owns the reusable depth-1
+listing file; discovery owns the reusable destination-listing stderr file;
+remote hosts owns the reusable `g_zxfer_remote_probe_stderr_file`; and
+property transfer owns reusable `g_zxfer_property_input_file`, action-plan,
+and parent-work files. None are cleared by per-dataset state resets, and each
+is reused only when it lies under the run's private temp root.
 `zxfer_ensure_runtime_artifact_file` in runtime reuses or allocates their paths
-through the same artifact-path result. Each domain keeps its durable path;
+through the same artifact-path result, and
+`zxfer_cleanup_runtime_artifact_path_list` supports retaining multiple paths
+when releasing a workspace list. Each domain keeps its durable path;
 runtime does not adopt its lifecycle. A live destination listing's path remains
 available after failure for reuse, so planning consumes its contents only after
 the listing succeeds. Cache lookup and live existence probes share one result,
@@ -395,8 +411,11 @@ original destination absent. If the walk cannot prove absence, the first
 parent's diagnostic is retained and replication stops before mutation.
 
 `zxfer_build_replication_iteration_list` prepares the full dataset queue once
-per live pass, including property-only work. `zxfer_prepare_snapshot_plans`
-keys both record files by queue position and sorts the keyed rows. Its grouped
+per live pass, including property-only work. For multi-dataset queues or when
+`-g` is active, `zxfer_prepare_snapshot_plans` keys both record files by queue
+position and sorts the keyed rows; a single-dataset queue without `-g` skips
+that grouped split pass, clears any stale slices via
+`zxfer_forget_snapshot_slices`, and plans that dataset directly. Its grouped
 consumer uses the same planning algorithm as a single live recheck, writing
 `BASE.N.p` (prepared plan) and `BASE.N.s` (source rows, newest first). The key
 index holds one entry per queued dataset; planner arrays hold only the current
@@ -638,8 +657,9 @@ its flag is 1. Run-wide `-P`, validated `-o`, readonly and `-I` policies come
 from session state rather than being repeated in each call. The operation
 retains destination values across helper calls alongside its source views.
 The property planner reads
-encoded source, destination and override lists from one reusable private input
-file; only its path crosses the environment. One batched AWK writes selected
+encoded source, destination and override lists from one run-root-enforced
+reusable private input file (`g_zxfer_property_input_file`); only its path
+crosses the environment. One batched AWK writes selected
 create/set/inherit action records, retaining the first source and override value
 needed for late parent reconciliation. A checked close and final record precede
 publication of the small action/override counts. Full diagnostic CSV views are
@@ -655,11 +675,15 @@ preserve each resulting command order. Working memory is limited to the current
 dataset; the three scratch files are reused across datasets and passes, and the
 run root owns their release.
 
-One command consumer decodes selected rows into individual arguments for create
-and the single batched set, then executes ordered individual inherits. It keeps
-`create -p` property-free, volume sizes explicit, remote argument boundaries,
-and mutation invalidation. `-v`/`-V` diagnostic lists are reconstructed only for
-display. Raw/effective property reads, capture, and backup format v2 are unchanged.
+When planning yields zero actions and no parent reconciliation ran,
+`zxfer_transfer_properties` verifies that the retained plan file exists and is
+readable (failing closed if missing) and skips invoking the command consumer.
+Otherwise, one command consumer decodes selected rows into individual arguments
+for create and the single batched set, then executes ordered individual
+inherits. It keeps `create -p` property-free, volume sizes explicit, remote
+argument boundaries, and mutation invalidation. `-v`/`-V` diagnostic lists are
+reconstructed only for display. Raw/effective property reads, capture, and
+backup format v2 are unchanged.
 
 ## Execution Lifecycle Diagrams
 
@@ -711,7 +735,7 @@ flowchart TD
     R --> S["First pass only: optional preflight snapshot via -s or migration prep via -m"]
     S --> U["Run zxfer_copy_filesystems()"]
     N --> V{"Repeat pass?"}
-    U --> U1["Number queue; prepare range summaries, exact identities and source slices in one traversal"]
+    U --> U1["Number queue; prepare grouped plans and source slices in one traversal (single-dataset queues without -g clear stale slices and plan directly)"]
     U1 --> T["-g preflight: load snapshot-work plans in original order, refuse divergence and protected deletes before execution"]
     T --> W["Fill a ready queue with background send/receive jobs, skipping blocked destination descendants while independent work exists"]
     W --> X["Reap completed send jobs, then run deferred post-seed property reconcile"]
@@ -748,10 +772,14 @@ consume those checks. A mismatch, missing destination, excluded-dataset
 uncertainty, or stream failure falls back to full discovery or fails through the
 same staged stderr paths used by the normal discovery flow. A proven clean no-op
 never runs the creation-order source listing. When the proof declines after a
-successful destination listing, full discovery normalizes that raw listing
-instead of listing again. A full-discovery listing checks destination
-existence only when the listing itself fails. The destination producer writes
-its listing exit status to its status file before normalizing and sorting.
+successful destination listing, full discovery reuses that raw listing instead
+of listing again; when `-x` is unset and normalization also succeeded, the
+proof hands over its pre-sorted normalized `.destination` file too, so full
+discovery skips re-normalizing and re-sorting it and always releases
+`.destination` on completion or failure. A full-discovery listing checks
+destination existence only when the listing itself fails. The destination
+producer writes its listing exit status to its status file before normalizing
+and sorting.
 
 A `-T` destination takes the same full-discovery path as a local one. Every
 destination `zfs list` goes through `zxfer_run_destination_zfs_cmd`, which
@@ -775,7 +803,12 @@ extracts transfer datasets, extra destination datasets and any needed source
 inventory. It emits one tagged row per consecutive dataset in each list. A
 C-locale unique sort orders the dataset names, including parents and children.
 The current shell publishes each list without splitting names on spaces. Empty recursive work skips extraction
-entirely. Record exclusions retain AWK's regex semantics and dataset exclusions
+entirely. Delta splitting publishes provenanced missing/extra snapshot counts
+that `zxfer_report_recursive_snapshot_delta` consumes on entry (clearing
+provenance across all branches, checking readability so vanished or unreadable
+files still fail closed through `awk`, fast-pathing empty readable files to
+0/0, and counting final post-filter/-prune dataset lists in the shell). Record
+exclusions retain AWK's regex semantics and dataset exclusions
 retain grep's regex semantics. Snapshot identity validation and the live-source
 inventory guard for `-d` still precede any destructive work.
 
@@ -801,11 +834,11 @@ flowchart TD
     B -- "yes" --> C["Start one source name,guid snapshot producer"]
     C --> D["Start normalized destination name,guid snapshot producer"]
     D --> E["Sort both streams into per-run temp files"]
-    E --> E1["Wait for both producers and parse the destination status record once; retain a successful raw listing for fallback"]
+    E --> E1["Wait for both producers and parse the destination status record once; retain a successful raw listing (and pre-sorted .destination when -x is unset and normalization succeeded) for fallback"]
     E1 --> F{"Sorted identity records are identical?"}
     F -- "yes" --> F1["Validate producer results and check the sorted source file for snapshots"]
     F1 --> G["Publish clean no-op; EXIT removes the proof files"]
-    F -- "different" --> H["Release proof scratch, retain the reusable listing, then run full discovery"]
+    F -- "different" --> H["Release proof scratch via multi-retain cleanup, keeping the reusable listing(s), then run full discovery"]
     F1 -- "missing destination or excluded empty source" --> H
     C -- "fatal launch failure" --> E2["Operation owner releases proof scratch and reports the original diagnostic/status; EXIT tears down registered producers and removes the root"]
     D -- "fatal launch failure" --> E2
@@ -813,7 +846,7 @@ flowchart TD
     F1 -- "validation failure" --> E2
     B -- "no (-T, -P, -k, ...)" --> H
     H --> H1["Full discovery owner retains a named workspace and timer/status scratch; start the creation-order source listing as a registered background producer (fanned out through parallel with -j)"]
-    H1 --> L["Reuse the proof's raw destination listing, or list the destination through zxfer_run_destination_zfs_cmd, locally or over the -T master (exact existence probe only on a zfs failure; ssh's 255 stops the run), then normalize its prefixes"]
+    H1 --> L["Reuse the proof's raw destination listing (and pre-sorted .destination when handed off), or list the destination through zxfer_run_destination_zfs_cmd, locally or over the -T master (exact existence probe only on a zfs failure; ssh's 255 stops the run), then normalize and sort only when needed"]
     L --> M["Wait for the source producer by PID, then diff the sorted listings and sort one tagged row per dataset and role"]
     M --> M1["For recursive -d delete work, list source datasets and exclude target-only datasets with a notice; failed or rootless inventories stop the run"]
     M1 --> I{"Transfers, -d deletes, or property work pending?"}
@@ -953,7 +986,9 @@ sequenceDiagram
 ```
 
 On a fast-proof mismatch, full discovery reuses a successful raw destination
-listing. With `-j`, full source discovery can fan out per-dataset listings
+listing (and its pre-sorted normalized listing when `-x` is unset and
+normalization succeeded), skipping re-normalization and re-sorting while always
+releasing the pre-sorted file afterward. With `-j`, full source discovery can fan out per-dataset listings
 through parallel; remote-origin parallel is resolved only when needed. A `-T`
 listing's SSH status 255 stops the run without an existence probe over the
 failed connection. Under `-z`, the source compresses and the destination
@@ -1016,12 +1051,18 @@ This describes the property-management branch for `-k` backup and `-e`
 restore, including the deferred reconcile path used after an initial seed into
 an empty destination.
 
-Metadata reads use one checked staging file and one shared loader. Validation
-retains keys and counts; a second pass writes payload rows individually, keeping
-payload memory proportional to the largest row. Restore refreshes retire the
-previous view. Forwarded aliases retain their own directories and positive or
-negative memo entries for the session, so property-pass resets cannot overwrite
-them. Publication follows successful validation and every checked row write.
+Metadata reads use one checked staging file and one shared loader
+(`zxfer_load_backup_metadata_view`). Validation retains keys and counts; a
+second pass writes payload rows individually, keeping payload memory
+proportional to the largest row. Publication follows successful validation and
+every checked row write, populating named result channels
+(`g_zxfer_backup_view_dir_result`, `g_zxfer_backup_view_source_root_result`,
+`g_zxfer_backup_view_destination_root_result`, and
+`g_zxfer_backup_view_index_result`) alongside the legacy combined
+`g_zxfer_backup_view_result` so callers consume fields directly without
+re-splitting lines. Restore refreshes retire the previous view. Forwarded
+aliases retain their own directories and positive or negative memo entries for
+the session, so property-pass resets cannot overwrite them.
 
 ```mermaid
 flowchart LR

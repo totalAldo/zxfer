@@ -645,17 +645,17 @@ EOF
 	done
 }
 
-# Roughly 640 kB lists exceed exec-size limits; only file paths cross the
-# environment. A 1-property diff keeps the AWK staging path exercised.
+# Matching roughly 640 kB lists exceed exec-size limits; only file paths cross
+# the environment. An ordinary no-op retains neither payload nor diagnostic rows.
 test_property_planners_accept_large_lists_without_exporting_values() {
 	l_large_list=$(awk 'BEGIN {
 		for (i = 0; i < 8000; i++) value = value "x"
 		for (i = 0; i < 80; i++) printf "%suser:p%d=%s=local", (i ? "," : ""), i, value
 	}')
-	zxfer_property_test_plan 1 "$l_large_list,compression=lz4=local" "" 1 filesystem "" "" "" "$l_large_list,compression=off=local"
+	zxfer_property_test_plan 1 "$l_large_list" "" 1 filesystem "" "" "" "$l_large_list"
 	l_large_input_file=$g_zxfer_property_input_file
-	assertEquals '1 0' "$g_zxfer_property_plan_summary_result"
-	assertEquals "set${ZXFER_TAB}compression=lz4=local=${ZXFER_LF}__ZXFER_PROPERTY_ACTIONS__" "$(cat "$g_zxfer_property_plan_file")"
+	assertEquals '0 0' "$g_zxfer_property_plan_summary_result"
+	assertEquals __ZXFER_PROPERTY_ACTIONS__ "$(cat "$g_zxfer_property_plan_file")"
 	zxfer_property_test_write_actions inherit "compression=lz4" "" "compression=lz4=inherited"
 	zxfer_resolve_parent_property_plan "$g_zxfer_property_plan_file" "$l_large_list,compression=lz4=local" "" apply
 	assertEquals "Large parent reconciliation reuses the staged input." "$l_large_input_file" "$g_zxfer_property_input_file"
@@ -1196,90 +1196,6 @@ Failed to reconcile inherited child properties for destination [backup/dst/child
 			;;
 		esac
 	done
-}
-
-test_property_plan_identical_fast_path_skips_awk_and_fails_closed_on_write_errors() {
-	l_identical_list='compression=lz4=local,atime=off=inherited,quota=none=default'
-	(
-		g_cmd_awk="$TEST_TMPDIR/missing-awk"
-		g_option_P_transfer_property=1
-		g_option_o_override_property=""
-		g_zxfer_property_override_policy=""
-		g_option_e_restore_property_mode=0
-		g_option_V_very_verbose=0
-		zxfer_plan_property_changes 1 1 filesystem "$l_identical_list" "$l_identical_list" ""
-		l_fast_status=$?
-		printf 'status=%s summary=%s plan=%s\n' "$l_fast_status" \
-			"$g_zxfer_property_plan_summary_result" "$(cat "$g_zxfer_property_plan_file")"
-	) >"$TEST_TMPDIR/plan-fast-path.out"
-	assertEquals "Identical source and destination lists bypass AWK when all 7 gates hold." \
-		"status=0 summary=0 0 plan=__ZXFER_PROPERTY_ACTIONS__" "$(cat "$TEST_TMPDIR/plan-fast-path.out")"
-
-	# Turning off any of the 7 gates must still route through AWK.
-	for l_gate in missing_dest transfer_off override_opt override_policy unsupported restore very_verbose diff_lists; do
-		(
-			g_cmd_awk="$TEST_TMPDIR/missing-awk"
-			g_option_P_transfer_property=1
-			g_option_o_override_property=""
-			g_zxfer_property_override_policy=""
-			g_option_e_restore_property_mode=0
-			g_option_V_very_verbose=0
-			l_gate_exists=1
-			l_gate_dest=$l_identical_list
-			l_gate_unsupported=""
-			case $l_gate in
-			missing_dest) l_gate_exists=0 ;;
-			transfer_off) g_option_P_transfer_property=0 ;;
-			override_opt) g_option_o_override_property="compression=gzip" ;;
-			override_policy) g_zxfer_property_override_policy="compression=gzip=override" ;;
-			unsupported) l_gate_unsupported="overlay" ;;
-			restore) g_option_e_restore_property_mode=1 ;;
-			very_verbose) g_option_V_very_verbose=1 ;;
-			diff_lists) l_gate_dest='compression=off=local' ;;
-			esac
-			zxfer_throw_error() { exit 29; }
-			zxfer_plan_property_changes 1 "$l_gate_exists" filesystem "$l_identical_list" "$l_gate_dest" "$l_gate_unsupported" 2>/dev/null
-		)
-		assertEquals "Fast path must not trigger when gate [$l_gate] fails." 29 "$?"
-	done
-
-	# Allocation and write failures on the fast path still fail closed and clear summary.
-	(
-		g_cmd_awk="$TEST_TMPDIR/missing-awk"
-		g_option_P_transfer_property=1
-		g_option_o_override_property=""
-		g_zxfer_property_override_policy=""
-		g_option_e_restore_property_mode=0
-		g_option_V_very_verbose=0
-		zxfer_ensure_runtime_artifact_file() { return 41; }
-		zxfer_throw_error() {
-			printf '%s|%s|<%s>\n' "$1" "$2" "$g_zxfer_property_plan_summary_result"
-			exit "$2"
-		}
-		g_zxfer_property_plan_summary_result=stale
-		zxfer_plan_property_changes 1 1 filesystem "$l_identical_list" "$l_identical_list" ""
-	) >"$TEST_TMPDIR/plan-fast-alloc.out"
-	assertEquals 41 "$?"
-	assertEquals 'Failed to plan dataset properties.|41|<>' "$(cat "$TEST_TMPDIR/plan-fast-alloc.out")"
-
-	(
-		g_cmd_awk="$TEST_TMPDIR/missing-awk"
-		g_option_P_transfer_property=1
-		g_option_o_override_property=""
-		g_zxfer_property_override_policy=""
-		g_option_e_restore_property_mode=0
-		g_option_V_very_verbose=0
-		g_zxfer_property_plan_file=$g_zxfer_run_tmp_root
-		zxfer_ensure_runtime_artifact_file() { g_zxfer_runtime_artifact_path_result=$1; }
-		zxfer_throw_error() {
-			printf '%s|%s|<%s>\n' "$1" "$2" "$g_zxfer_property_plan_summary_result"
-			exit "$2"
-		}
-		g_zxfer_property_plan_summary_result=stale
-		zxfer_plan_property_changes 1 1 filesystem "$l_identical_list" "$l_identical_list" ""
-	) >"$TEST_TMPDIR/plan-fast-write.out"
-	assertEquals 1 "$?"
-	assertEquals 'Failed to plan dataset properties.|1|<>' "$(cat "$TEST_TMPDIR/plan-fast-write.out")"
 }
 
 # A staged-file read failure belongs to the operation: never continue into

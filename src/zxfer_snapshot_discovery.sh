@@ -874,13 +874,21 @@ zxfer_write_snapshot_delta_files() {
 # Purpose: Print the recursive delta summary and snapshot identities under
 # -v, and the raw normalized delta records as well under -V.
 # Usage: zxfer_report_recursive_snapshot_delta MISSING EXTRA; call once the
-# recursive dataset lists are final. Reuses provenanced split counts from
-# zxfer_write_snapshot_delta_files, fast-paths empty readable files to 0/0,
-# counts final dataset lists in-shell, and falls back to awk for standalone
-# callers without matching provenance.
+# recursive dataset lists are final. Consumes any provenanced split counts from
+# zxfer_write_snapshot_delta_files on entry, fast-paths empty readable files to
+# 0/0, counts final dataset lists in-shell, and falls back to awk when files
+# are unreadable or lack matching provenance.
 zxfer_report_recursive_snapshot_delta() {
 	l_report_delta_missing_file=$1
 	l_report_delta_extra_file=$2
+	l_report_delta_prov_missing_count=${g_zxfer_delta_missing_count:-}
+	l_report_delta_prov_extra_count=${g_zxfer_delta_extra_count:-}
+	l_report_delta_prov_missing_file=${g_zxfer_delta_count_missing_file:-}
+	l_report_delta_prov_extra_file=${g_zxfer_delta_count_extra_file:-}
+	g_zxfer_delta_missing_count=""
+	g_zxfer_delta_extra_count=""
+	g_zxfer_delta_count_missing_file=""
+	g_zxfer_delta_count_extra_file=""
 
 	if [ "${g_option_v_verbose:-0}" -ne 1 ] && [ "${g_option_V_very_verbose:-0}" -ne 1 ]; then
 		return 0
@@ -890,16 +898,14 @@ zxfer_report_recursive_snapshot_delta() {
 		[ -r "$l_report_delta_extra_file" ] && [ ! -s "$l_report_delta_extra_file" ]; then
 		l_report_delta_missing_count=0
 		l_report_delta_extra_count=0
-	elif [ -n "${g_zxfer_delta_missing_count:-}" ] &&
-		[ -n "${g_zxfer_delta_extra_count:-}" ] &&
-		[ "${g_zxfer_delta_count_missing_file:-}" = "$l_report_delta_missing_file" ] &&
-		[ "${g_zxfer_delta_count_extra_file:-}" = "$l_report_delta_extra_file" ]; then
-		l_report_delta_missing_count=$g_zxfer_delta_missing_count
-		l_report_delta_extra_count=$g_zxfer_delta_extra_count
-		g_zxfer_delta_missing_count=""
-		g_zxfer_delta_extra_count=""
-		g_zxfer_delta_count_missing_file=""
-		g_zxfer_delta_count_extra_file=""
+	elif [ -r "$l_report_delta_missing_file" ] &&
+		[ -r "$l_report_delta_extra_file" ] &&
+		[ -n "$l_report_delta_prov_missing_count" ] &&
+		[ -n "$l_report_delta_prov_extra_count" ] &&
+		[ "$l_report_delta_prov_missing_file" = "$l_report_delta_missing_file" ] &&
+		[ "$l_report_delta_prov_extra_file" = "$l_report_delta_extra_file" ]; then
+		l_report_delta_missing_count=$l_report_delta_prov_missing_count
+		l_report_delta_extra_count=$l_report_delta_prov_extra_count
 	else
 		# Standalone callers without provenance count the delta files directly.
 		# shellcheck disable=SC2016  # awk program should see literal ARGV/FILENAME.

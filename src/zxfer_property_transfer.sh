@@ -729,25 +729,6 @@ zxfer_plan_property_changes() {
 	g_zxfer_property_plan_summary_result=""
 	[ "$#" -eq 6 ] || zxfer_throw_error "Failed to plan dataset properties."
 	case $1:$2 in 0:0 | 0:1 | 1:0 | 1:1) ;; *) zxfer_throw_error "Failed to plan dataset properties." ;; esac
-	# Live `zfs get all` skeletons enforce unique property keys when -e is off
-	# and never emit `override` provenance, so identical source and destination
-	# lists with no overrides, -U drops, or -V views need no actions.
-	if [ "$2" -eq 1 ] &&
-		[ "${g_option_P_transfer_property:-0}" -eq 1 ] &&
-		[ -z "${g_option_o_override_property:-}" ] &&
-		[ -z "${g_zxfer_property_override_policy:-}" ] &&
-		[ -z "$6" ] &&
-		[ "${g_option_e_restore_property_mode:-0}" -eq 0 ] &&
-		[ "${g_option_V_very_verbose:-0}" -eq 0 ] &&
-		[ "$4" = "$5" ]; then
-		zxfer_ensure_runtime_artifact_file "${g_zxfer_property_plan_file:-}" property-plan ||
-			zxfer_throw_error "Failed to plan dataset properties." "$?"
-		g_zxfer_property_plan_file=$g_zxfer_runtime_artifact_path_result
-		zxfer_write_runtime_artifact_file "$g_zxfer_property_plan_file" "__ZXFER_PROPERTY_ACTIONS__$ZXFER_LF" ||
-			zxfer_throw_error "Failed to plan dataset properties." "$?"
-		g_zxfer_property_plan_summary_result="0 0"
-		return 0
-	fi
 	zxfer_stage_property_inputs "source$ZXFER_TAB$4" \
 		"override$ZXFER_TAB$g_zxfer_property_override_policy" "destination$ZXFER_TAB$5" ||
 		zxfer_throw_error "Failed to stage property planner input." "$?"

@@ -94,7 +94,6 @@ Current runtime inventory:
 - `sleep`
 - `sort`
 - `tee`
-- `tr`
 - `uname`
 
 On FreeBSD, these are expected from base and usually do not belong in

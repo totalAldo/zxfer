@@ -25,10 +25,13 @@ supported train.
 
 The project targets POSIX `/bin/sh`, so portability depends more on shell and
 tool behavior than on GNU-specific scripting features.
-Failure-report and `-v` command quoting prints plain printable ASCII tokens
-without spawning `awk` only when the shell's `case` patterns support
-`[[:print:]]`; zxfer checks this once at load, and shells without that support
-(such as `posh`) keep the `awk` escaping path for every token.
+Failure-report and `-v` command quoting avoids spawning `awk` for plain
+printable ASCII tokens, and for bounded values (at most 4096 bytes under
+`LC_ALL=C`) containing only printable ASCII plus `\`, TAB, CR, or LF, when the
+shell's `case` patterns support `[[:print:]]`; zxfer checks this once at load.
+Values with other C0 bytes, DEL, or bytes `>= 0x80`, escaped values over 4096
+bytes, and shells without `[[:print:]]` support (such as `posh`) keep the `awk`
+escaping path.
 bash 3.2, macOS's `/bin/sh`, and ksh93 on macOS match a bracket range such
 as `[0-9]` in a `case` pattern by locale collation under UTF-8, whereas dash,
 bash 5 and zsh compare code points; both `src/` and `tests/` spell out explicit

@@ -589,6 +589,101 @@ test_report_recursive_snapshot_delta_reuses_split_counts_and_fast_paths_empty_fi
 		"$empty_output" "====== Extra Destination snapshots not in source ======"
 }
 
+test_report_recursive_snapshot_delta_clears_provenance_and_checks_readability() {
+	source_file="$TEST_TMPDIR/p2_prov_source.txt"
+	dest_file="$TEST_TMPDIR/p2_prov_dest.txt"
+	missing_file="$TEST_TMPDIR/p2_prov_missing.txt"
+	extra_file="$TEST_TMPDIR/p2_prov_extra.txt"
+	scratch_file="$TEST_TMPDIR/p2_prov_scratch.txt"
+	stdout_file="$TEST_TMPDIR/p2_prov_stdout.txt"
+	stderr_file="$TEST_TMPDIR/p2_prov_stderr.txt"
+	printf 'tank/src@s1\t1\n' >"$source_file"
+	printf 'tank/src@s1\t1\n' >"$dest_file"
+
+	# (a1) Empty-file fast path clears 0/0 provenance so a later non-empty write
+	# to the same paths is recounted instead of reusing stale 0/0 counts.
+	empty_recount_output=$(
+		zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+		g_option_v_verbose=1
+		g_option_V_very_verbose=0
+		g_recursive_source_list=""
+		g_recursive_destination_extra_dataset_list=""
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+		printf 'after_empty=<%s|%s|%s|%s>\n' \
+			"$g_zxfer_delta_missing_count" "$g_zxfer_delta_extra_count" \
+			"$g_zxfer_delta_count_missing_file" "$g_zxfer_delta_count_extra_file"
+		printf 'tank/src@s2\t2\n' >"$missing_file"
+		g_recursive_source_list="tank/src"
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+	)
+	l_empty_recount_status=$?
+	assertEquals "Recount after empty-file delta report should succeed." 0 "$l_empty_recount_status"
+	assertContains "Empty-file delta report must clear all four provenance globals." \
+		"$empty_recount_output" "after_empty=<|||>"
+	assertContains "Subsequent non-empty write to same paths must be recounted accurately." \
+		"$empty_recount_output" "Recursive snapshot delta summary: snapshots_missing_on_destination=1 snapshots_missing_on_source=0 source_datasets=1 destination_extra_datasets=0"
+	assertContains "Recounted delta must list the newly written snapshot identity." \
+		"$empty_recount_output" "tank/src@s2 (GUID: 2)"
+
+	# (a2) Quiet early return (-v=0 -V=0) also clears provenance so a later verbose
+	# call on overwritten files recounts accurately.
+	quiet_recount_output=$(
+		zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+		g_option_v_verbose=0
+		g_option_V_very_verbose=0
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+		printf 'after_quiet=<%s|%s|%s|%s>\n' \
+			"$g_zxfer_delta_missing_count" "$g_zxfer_delta_extra_count" \
+			"$g_zxfer_delta_count_missing_file" "$g_zxfer_delta_count_extra_file"
+		printf 'tank/src@s2\t2\ntank/src@s3\t3\n' >"$missing_file"
+		g_option_v_verbose=1
+		g_recursive_source_list="tank/src"
+		g_recursive_destination_extra_dataset_list=""
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+	)
+	l_quiet_recount_status=$?
+	assertEquals "Recount after quiet delta report should succeed." 0 "$l_quiet_recount_status"
+	assertContains "Quiet delta report must clear all four provenance globals." \
+		"$quiet_recount_output" "after_quiet=<|||>"
+	assertContains "Verbose delta report after quiet call must recount updated files." \
+		"$quiet_recount_output" "Recursive snapshot delta summary: snapshots_missing_on_destination=2 snapshots_missing_on_source=0 source_datasets=1 destination_extra_datasets=0"
+
+	# (b) A vanished or unreadable file under matching 0/0 provenance must fail
+	# closed through the awk branch instead of trusting cached 0/0 counts.
+	capture_removed_provenanced_case() {
+		zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+		rm -f "$missing_file"
+		g_option_v_verbose=1
+		g_option_V_very_verbose=0
+		g_recursive_source_list=""
+		g_recursive_destination_extra_dataset_list=""
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+	}
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_removed_provenanced_case
+	assertNotEquals "A removed delta file under matching 0/0 provenance must fail closed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "A removed provenanced delta file must report the counting failure." \
+		"$(cat "$stderr_file")" "Failed to count the recursive snapshot delta."
+	assertNotContains "A removed provenanced delta file must not emit a summary." \
+		"$(cat "$stdout_file")" "Recursive snapshot delta summary"
+
+	if [ "$(id -u)" -ne 0 ]; then
+		capture_unreadable_provenanced_case() {
+			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+			chmod 000 "$extra_file"
+			g_option_v_verbose=1
+			g_option_V_very_verbose=0
+			g_recursive_source_list=""
+			g_recursive_destination_extra_dataset_list=""
+			zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+		}
+		zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_unreadable_provenanced_case
+		chmod 600 "$extra_file" 2>/dev/null || :
+		assertNotEquals "An unreadable delta file under matching 0/0 provenance must fail closed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
+		assertContains "An unreadable provenanced delta file must report the counting failure." \
+			"$(cat "$stderr_file")" "Failed to count the recursive snapshot delta."
+	fi
+}
+
 test_set_g_recursive_source_list_reports_recursive_snapshot_diff_failures() {
 	source_tmp="$TEST_TMPDIR/recursive_diff_failure_source.txt"
 	dest_tmp="$TEST_TMPDIR/recursive_diff_failure_dest.txt"
