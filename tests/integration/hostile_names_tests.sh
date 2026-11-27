@@ -554,7 +554,7 @@ $output"
 			[ "$status" -eq 0 ] || break
 			l_source=$src_root$l_suffix
 			dest_dataset=$dest_root/${src_root##*/}$l_suffix
-			for l_view in type names local; do
+			for l_view in "type" "names" "local"; do
 				[ "$l_view$l_suffix" != local ] || continue
 				case $l_view in
 				type)

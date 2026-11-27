@@ -868,8 +868,10 @@ EOF
 		fi
 		# Compare full name/GUID identities: a name collision with a different
 		# GUID appears on both sides. Destination delta rows use source paths;
-		# map them back for the operator without another ZFS listing.
-		for l_report_delta_side in source destination; do
+		# map them back for the operator without another ZFS listing. Quote
+		# "source": after `EOF` + `fi`, ksh93's lexer can alias-expand a bare
+		# word after `for ... in` via its built-in `source='command .'` alias.
+		for l_report_delta_side in "source" "destination"; do
 			case $l_report_delta_side in
 			source)
 				l_report_delta_records_file=$l_report_delta_missing_file

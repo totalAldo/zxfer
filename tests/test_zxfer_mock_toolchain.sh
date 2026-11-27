@@ -673,16 +673,22 @@ test_mock_manifest_index_preserves_glob_precedence_escapes_and_long_utf8_keys() 
 	{
 		printf 'list -H early/exact\texact.txt\t0\n'
 		printf 'list -H empty/exact\t\t42\n'
+		printf 'list -H slash\\\\name\tescaped.txt\t0\n'
 		printf 'list -H override/*\tglob.txt\t7\n'
 		printf 'list -H empty/glob*\t\t43\n'
 		printf 'list -H bracket/[ab]\tglob.txt\t9\n'
 		printf 'list -H override/child\texact.txt\t0\n'
-		printf 'list -H slash\\\\name\tescaped.txt\t0\n'
 		printf '%s\tutf8.txt\t0\n' "$l_long_utf8"
 	} >"$l_idx_state/manifest"
 
+	l_unidx_state="$TEST_TMPDIR/mock_manifest_unindexed"
+	mkdir -p "$l_unidx_state"
+	cp "$l_idx_state"/* "$l_unidx_state/"
+
 	zxfer_mockbin_index_manifest "$l_idx_state"
 	assertEquals "Manifest indexing should succeed on >255-byte UTF-8 keys." 0 "$?"
+	assertFalse "Backslash-containing rules must route to .globs rather than .exact." \
+		"[ -e '$l_idx_state/.exact/list -H slash\\\\name' ] || [ -e '$l_idx_state/.exact/list -H slash\\name' ]"
 
 	l_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H early/exact)
 	assertEquals "Exact rules before the first glob should resolve from .exact." \
@@ -712,9 +718,22 @@ test_mock_manifest_index_preserves_glob_precedence_escapes_and_long_utf8_keys() 
 		7 "$l_status"
 	assertEquals "Earlier glob rule fixture must win." "glob-wins" "$l_out"
 
-	l_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H 'slash\name')
-	assertEquals "Backslash-escaped pattern in manifest must match single literal backslash." \
-		"escaped-backslash" "$l_out"
+	l_matched_backslash=0
+	for l_slash_arg in 'slash\name' 'slash\\name'; do
+		l_idx_status=0
+		l_idx_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H "$l_slash_arg" 2>/dev/null) ||
+			l_idx_status=$?
+		l_unidx_status=0
+		l_unidx_out=$(MOCK_ZFS_FIXTURE_DIR="$l_unidx_state" "$l_mock_zfs" list -H "$l_slash_arg" 2>/dev/null) ||
+			l_unidx_status=$?
+		assertEquals "Indexed backslash lookup status must match unindexed manifest [$l_slash_arg]." \
+			"$l_unidx_status" "$l_idx_status"
+		assertEquals "Indexed backslash lookup output must match unindexed manifest [$l_slash_arg]." \
+			"$l_unidx_out" "$l_idx_out"
+		[ "$l_idx_out" != "escaped-backslash" ] || l_matched_backslash=1
+	done
+	assertEquals "Backslash manifest rule must match under the host shell's case semantics." \
+		1 "$l_matched_backslash"
 
 	l_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H "${l_long_utf8#list -H }")
 	assertEquals "Keys exceeding 200 UTF-8 bytes must fall back cleanly to .globs." \

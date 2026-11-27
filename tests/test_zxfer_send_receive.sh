@@ -399,7 +399,7 @@ result=prepared ssh | gunzip" "$l_wrap_output"
 }
 
 test_wrap_command_with_ssh_clears_stale_results_on_rejected_input() {
-	for l_wrap_empty_part in host command; do
+	for l_wrap_empty_part in "host" "command"; do
 		g_zxfer_shell_command_result="stale command"
 		if [ "$l_wrap_empty_part" = host ]; then
 			zxfer_wrap_command_with_ssh "zfs send tank/src@snap" "" 0 send

@@ -2761,5 +2761,62 @@ EOF
 		"$(cat "$realistic_ssh_log")" "'sh' '-c'"
 }
 
+test_report_recursive_snapshot_delta_emits_source_and_destination_under_ksh_source_alias() {
+	l_missing_file="$TEST_TMPDIR/report_delta.missing"
+	l_extra_file="$TEST_TMPDIR/report_delta.extra"
+	printf 'tank/src@snap2\tguid-s2\ntank/src/child@snap2\tguid-c2\n' >"$l_missing_file"
+	printf 'tank/src@extra1\tguid-e1\n' >"$l_extra_file"
+
+	l_out=$(
+		g_option_v_verbose=1
+		g_option_V_very_verbose=0
+		g_option_R_recursive=""
+		g_option_d_delete_destination_snapshots=0
+		g_initial_source="tank/src"
+		g_destination="backup/dst"
+		g_initial_source_had_trailing_slash=0
+		g_recursive_source_list="tank/src${ZXFER_LF}tank/src/child"
+		g_recursive_destination_extra_dataset_list="tank/src"
+		zxfer_report_recursive_snapshot_delta "$l_missing_file" "$l_extra_file"
+	)
+	assertContains "Delta report must include the missing-on-destination header." \
+		"$l_out" "Recursive source snapshots absent from destination (name/GUID):"
+	assertContains "Delta report must include the root missing snapshot." \
+		"$l_out" "  tank/src@snap2 (GUID: guid-s2)"
+	assertContains "Delta report must explain nonrecursive descendant exclusion." \
+		"$l_out" "    Not scheduled: nonrecursive mode (-N) selects only [tank/src]; this descendant is outside the dataset queue."
+	assertContains "Delta report must include the absent-from-source header." \
+		"$l_out" "Recursive destination snapshots absent from source (name/GUID):"
+	assertContains "Delta report must map destination snapshot names." \
+		"$l_out" "  backup/dst/src@extra1 (GUID: guid-e1)"
+
+	l_ksh_bin=$(command -v ksh 2>/dev/null || :)
+	if [ -n "$l_ksh_bin" ]; then
+		l_ksh_out=$("$l_ksh_bin" -c '
+			ZXFER_SOURCE_MODULES_ROOT=$1
+			. "$1/src/zxfer_quoting.sh"
+			. "$1/src/zxfer_reporting.sh"
+			. "$1/src/zxfer_destination_state.sh"
+			# Source zxfer_snapshot_discovery.sh directly with ksh93 default aliases
+			# still active to verify the quoted for-loop words resist source="command .".
+			. "$1/src/zxfer_snapshot_discovery.sh"
+			g_option_v_verbose=1
+			g_option_V_very_verbose=0
+			g_option_R_recursive=""
+			g_option_d_delete_destination_snapshots=0
+			g_initial_source="tank/src"
+			g_destination="backup/dst"
+			g_initial_source_had_trailing_slash=0
+			g_recursive_source_list="tank/src
+tank/src/child"
+			g_recursive_destination_extra_dataset_list=""
+			zxfer_report_recursive_snapshot_delta "$2" "$3"
+		' ksh "$ZXFER_ROOT" "$l_missing_file" "$l_extra_file")
+		assertEquals "Direct ksh93 execution of delta report must succeed." 0 "$?"
+		assertContains "Direct ksh93 parse must not alias-expand source in the delta side loop." \
+			"$l_ksh_out" "Recursive source snapshots absent from destination (name/GUID):"
+	fi
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"
