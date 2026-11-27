@@ -420,8 +420,7 @@ EOF
 	append_data_to_dataset "$send_src_dataset" "file.txt" "pending send"
 	zfs snap -r "$send_src_dataset@trap1"
 
-	before_tmp=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type f -name 'zxfer.*' 2>/dev/null || true)
-	before_sockets=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'zxfer_ssh_control_socket.*' 2>/dev/null || true)
+	before_temp_snapshot=$(capture_zxfer_temp_snapshot)
 
 	set +e
 	ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -T localhost -R "$list_src_dataset" "$list_dest_root" >/dev/null 2>&1 &
@@ -481,30 +480,7 @@ EOF
 	wait "$zxfer_pid"
 	set -e
 
-	after_tmp=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type f -name 'zxfer.*' 2>/dev/null || true)
-	after_sockets=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'zxfer_ssh_control_socket.*' 2>/dev/null || true)
-
-	tmp_leaks=""
-	for f in $after_tmp; do
-		case " $before_tmp " in
-		*" $f "*) continue ;;
-		esac
-		tmp_leaks="$tmp_leaks $f"
-	done
-	socket_leaks=""
-	for dir in $after_sockets; do
-		case " $before_sockets " in
-		*" $dir "*) continue ;;
-		esac
-		socket_leaks="$socket_leaks $dir"
-	done
-
-	if [ -n "$tmp_leaks" ]; then
-		fail "Temporary files leaked after SIGINT: $tmp_leaks"
-	fi
-	if [ -n "$socket_leaks" ]; then
-		fail "SSH control sockets leaked after SIGINT: $socket_leaks"
-	fi
+	assert_no_zxfer_temp_leaks "$before_temp_snapshot" "Temporary artifacts or SSH control sockets leaked after SIGINT"
 
 	if [ -f "$send_shell_pid_file" ] &&
 		kill -s 0 "$(cat "$send_shell_pid_file")" >/dev/null 2>&1; then
@@ -534,31 +510,7 @@ migration_service_success_test() {
 
 	mock_path="$WORKDIR/mock_svcadm_success"
 	prepare_mock_bin_dir "$mock_path" zfs
-	cat >"$mock_path/svcadm" <<'EOF'
-#!/bin/sh
-log=${MOCK_SVCADM_LOG:-}
-cmd=$1
-shift
-service=""
-if [ "$cmd" = "disable" ]; then
-	if [ "$1" = "-st" ]; then
-		service=$2
-		shift 2
-	else
-		service=$1
-		shift
-	fi
-	[ -n "$log" ] && printf 'disable:%s\n' "$service" >>"$log"
-	exit 0
-fi
-if [ "$cmd" = "enable" ]; then
-	service=$1
-	[ -n "$log" ] && printf 'enable:%s\n' "$service" >>"$log"
-	exit 0
-fi
-exit 0
-EOF
-	chmod +x "$mock_path/svcadm"
+	write_mock_svcadm_script "$mock_path/svcadm" 0
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 	svc_log="$WORKDIR/svcadm_success.log"
 	safe_rm_f "$svc_log"
@@ -609,29 +561,7 @@ migration_yield_test() {
 
 	mock_path="$WORKDIR/mock_svcadm_yield"
 	prepare_mock_bin_dir "$mock_path" zfs
-	cat >"$mock_path/svcadm" <<'EOF'
-#!/bin/sh
-log=${MOCK_SVCADM_LOG:-}
-cmd=$1
-shift
-service=""
-if [ "$cmd" = "disable" ]; then
-	if [ "$1" = "-st" ]; then
-		service=$2
-	else
-		service=$1
-	fi
-	[ -n "$log" ] && printf 'disable:%s\n' "$service" >>"$log"
-	exit 0
-fi
-if [ "$cmd" = "enable" ]; then
-	service=$1
-	[ -n "$log" ] && printf 'enable:%s\n' "$service" >>"$log"
-	exit 0
-fi
-exit 0
-EOF
-	chmod +x "$mock_path/svcadm"
+	write_mock_svcadm_script "$mock_path/svcadm" 0
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 	svc_log="$WORKDIR/svcadm_yield.log"
 	safe_rm_f "$svc_log"
@@ -703,29 +633,7 @@ migration_service_failure_test() {
 
 	mock_path="$WORKDIR/mock_svcadm_failure"
 	prepare_mock_bin_dir "$mock_path" zfs
-	cat >"$mock_path/svcadm" <<'EOF'
-#!/bin/sh
-log=${MOCK_SVCADM_LOG:-}
-cmd=$1
-shift
-service=""
-if [ "$cmd" = "disable" ]; then
-	if [ "$1" = "-st" ]; then
-		service=$2
-	else
-		service=$1
-	fi
-	[ -n "$log" ] && printf 'disable:%s\n' "$service" >>"$log"
-	exit 1
-fi
-if [ "$cmd" = "enable" ]; then
-	service=$1
-	[ -n "$log" ] && printf 'enable:%s\n' "$service" >>"$log"
-	exit 0
-fi
-exit 0
-EOF
-	chmod +x "$mock_path/svcadm"
+	write_mock_svcadm_script "$mock_path/svcadm" 1
 	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 	svc_log="$WORKDIR/svcadm_failure.log"
 	safe_rm_f "$svc_log"
@@ -757,40 +665,6 @@ EOF
 	fi
 
 	log "Migration service failure test passed"
-}
-
-get_os_detection_test() {
-	log "Starting zxfer_get_os detection test"
-
-	mock_path="$WORKDIR/mock_get_os"
-	safe_rm_rf "$mock_path"
-	mkdir -p "$mock_path"
-
-	cat >"$mock_path/uname" <<'EOF'
-#!/bin/sh
-echo "MockLocalOS"
-EOF
-	chmod +x "$mock_path/uname"
-	write_mock_ssh_script "$mock_path/ssh"
-
-	local_os=$(ZXFER_SECURE_PATH="$mock_path" PATH="$mock_path:$PATH" sh -c 'ZXFER_SOURCE_MODULES_ROOT=.; . ./src/zxfer_modules.sh; zxfer_load_modules zxfer_remote_hosts.sh; zxfer_get_os ""')
-	if [ "$local_os" != "MockLocalOS" ]; then
-		fail "Expected MockLocalOS from local zxfer_get_os, got $local_os"
-	fi
-
-	remote_os=$(MOCK_SSH_FORCE_UNAME="MockRemoteOS" ZXFER_SECURE_PATH="$mock_path" PATH="$mock_path:$PATH" sh -c '
-		# shellcheck source=src/zxfer_modules.sh
-		ZXFER_SOURCE_MODULES_ROOT=.
-		. ./src/zxfer_modules.sh
-		zxfer_load_modules zxfer_remote_hosts.sh
-		g_cmd_ssh="'"$mock_path"'/ssh"
-		zxfer_get_os "remotehost"
-	')
-	if [ "$remote_os" != "MockRemoteOS" ]; then
-		fail "Expected MockRemoteOS from remote zxfer_get_os, got $remote_os"
-	fi
-
-	log "Get_os detection test passed"
 }
 
 beep_handling_test() {

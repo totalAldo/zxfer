@@ -448,5 +448,22 @@ tank/app.v1|0|backup/dst|tank/appXv1/releases.2026|backup/dst/app.v1
 EOF
 }
 
+test_probe_destination_existence_returns_without_throwing_under_very_verbose_on_bad_ssh_policy() {
+	l_probe_output=$(
+		g_option_T_target_host="user@host"
+		g_option_V_very_verbose=1
+		ZXFER_SSH_BATCH_MODE="invalid"
+		export ZXFER_SSH_BATCH_MODE
+		zxfer_reset_ssh_transport_state
+		l_probe_status=0
+		zxfer_probe_destination_existence "backup/dst" live >/dev/null 2>&1 ||
+			l_probe_status=$?
+		printf 'returned=%s error=%s\n' "$l_probe_status" \
+			"${g_zxfer_destination_exists_error:+present}"
+	)
+	assertEquals "zxfer_probe_destination_existence must return non-zero without exiting under -V." \
+		"returned=1 error=present" "$l_probe_output"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$TESTS_DIR/shunit2/shunit2"

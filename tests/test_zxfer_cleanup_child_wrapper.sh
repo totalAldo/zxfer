@@ -716,5 +716,42 @@ test_cleanup_child_wrapper_signal_kills_term_resistant_direct_child() {
 		"kill -s 0 '$child_pid' 2>/dev/null"
 }
 
+test_cleanup_child_wrapper_record_loops_survive_set_e_after_exited_descendant() {
+	signal_log="$TEST_TMPDIR/cleanup_child_wrapper.sete_signals"
+	: >"$signal_log"
+	capture_case() {
+		set -e
+		zxfer_cleanup_child_wrapper_get_process_start_token() {
+			case "$1" in
+			702) printf '%s\n' "lstart:live-token" ;;
+			*) return 1 ;;
+			esac
+		}
+		kill() {
+			if [ "$2" = "0" ]; then
+				[ "$3" = "702" ]
+				return "$?"
+			fi
+			printf 'signal:%s:%s\n' "$2" "$3" >>"$signal_log"
+			return 0
+		}
+		ps() { printf '%s\n' " S"; }
+
+		records="701	lstart:exited-token
+702	lstart:live-token"
+		zxfer_cleanup_child_wrapper_signal_descendant_records "$records" TERM
+		roots=$(zxfer_cleanup_child_wrapper_build_validated_descendant_roots "$records")
+		printf 'roots=<%s>\n' "$roots"
+	}
+	zxfer_test_capture_subshell capture_case
+
+	assertEquals "Descendant record loops must not abort under set -e when an earlier PID already exited." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertEquals "Live descendants after an exited record must still be signalled under set -e." \
+		"signal:TERM:702" "$(cat "$signal_log")"
+	assertEquals "Validated roots after an exited record must still include live matches under set -e." \
+		"roots=<$$ 702>" "$ZXFER_TEST_CAPTURE_OUTPUT"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

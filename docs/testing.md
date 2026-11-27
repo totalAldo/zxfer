@@ -10,9 +10,8 @@ belong here.
 - Contract suites (`tests/test_contract_*.sh`) run the real `./zxfer`
   launcher against the canned zfs of `tests/mock_toolchain_helper.sh` and pin
   what an operator sees: argv, output, exit codes and failure reports.
-- Module suites (`tests/test_zxfer_*.sh`) unit-test `src/` functions. The
-  send/receive entry includes the job-supervision fragment with its own
-  spawn/status-file fixture, alongside pipeline preparation tests.
+- Module suites (`tests/test_zxfer_*.sh`) unit-test `src/` functions directly
+  with one self-contained suite per owning module.
 - Tool self-tests (`tests/test_run_*.sh`, `tests/test_validate.sh`,
   `tests/test_ci_*.sh`, `tests/test_generate_solaris_manpage.sh`) test the
   runners, `validate.sh`, the CI workflow contracts and the man-page
@@ -73,8 +72,7 @@ neither it nor `tests/validation_map.tsv` is evaluated as shell.
   runs the offline budget check and the selected unit suites, and prints but
   never runs integration, performance and documentation follow-ups. A change
   to `src/zxfer_NAME.sh` selects `tests/test_zxfer_NAME.sh` and every
-  contract suite by name; a `tests/suites/*` fragment selects the entry suite
-  whose literal source statement names it. Every path must also match
+  contract suite by name. Every path must also match
   a row of `tests/validation_map.tsv` (first match wins; an unmatched path
   stops `quick`), which adds exception suites (`@contract` means every
   contract suite, `@self` the changed suite), integration groups, perf cases
@@ -117,7 +115,7 @@ suite at the unit runner's default (the CPU count, at most 4), which
   FreeBSD, OmniOS and xcode-27 CI lanes use it; the tool suites run on
   ubuntu-26.04 and macos-26.
 - `--list-suites` (alias `--list`) and `--list-tests SUITE` print without
-  running anything; `--list-tests` also reads the fragments an entry names.
+  running anything.
 - `--suite SUITE --test NAME ...` runs named tests. Names are validated
   before any suite starts, a repeated `--suite` merges into its first
   position, and `--test NAME SUITE` still works for one positional suite.
@@ -158,22 +156,15 @@ Contract suites come first:
 | `test_contract_send_receive.sh` | Seeding, the re-plan after a `-d` destroy, `-n`/`-s`/`-m`/`-Y` passes, the post-seed property pass, `-j` scheduling and job failures, `-D` progress templates, probes and failures, and `-z` across every ssh hop. |
 | `test_contract_verbose.sh` | `-v`/`-V` output for hostile property values, and `-V` counters that start at zero whatever the environment holds. |
 
-Every `src/zxfer_NAME.sh` has one home: `tests/test_zxfer_NAME.sh` and the
-fragments it runs from `tests/suites/zxfer_NAME_TOPIC_tests.sh`.
-`test_zxfer_launcher.sh` also covers the `src/zxfer_modules.sh` loader, and
-`test_zxfer_cleanup_child_wrapper.sh` covers the standalone wrapper.
-`test_zxfer_mock_toolchain.sh` tests the canned zfs and
-`test_zxfer_microbench_budgets.sh` the spawn budgets.
-
-A fragment's literal `. "$TESTS_DIR/suites/NAME.sh"` source statement is its
-single membership declaration. Quote the entire path and keep the ShellCheck
-source annotation above it. `tests/helpers/test_catalog.sh` reads the statements
-for registration, `--list-tests`, and `validate.sh quick` without evaluating the
-entry script.
-`suite() { zxfer_test_register_suite_tests "$0"; }` registers the entry's tests
-followed by each fragment's tests in source order. A fragment keeps the fixture its cases were
-written for: the entry's `setUp` asks `zxfer_test_running_test_is_in FILE`
-(`tests/helpers/loader.sh`) and applies it to that fragment's cases only.
+Every `src/zxfer_NAME.sh` module has one self-contained unit suite at
+`tests/test_zxfer_NAME.sh` (the small primitives in `src/zxfer_quoting.sh`
+and `src/zxfer_profile.sh` have their own suites as well).
+`test_zxfer_launcher.sh` covers the `./zxfer` launcher and
+`src/zxfer_modules.sh` loader, `test_zxfer_cleanup_child_wrapper.sh` covers
+the standalone wrapper, `test_zxfer_mock_toolchain.sh` tests the canned zfs,
+and `test_zxfer_microbench_budgets.sh` checks the spawn budgets.
+`tests/helpers/test_catalog.sh` discovers `test_*` functions directly from each
+suite file without evaluating it.
 
 `tests/test_helper.sh` loads every module in `src/zxfer_modules.sh` order, so
 every suite sees the whole function set, and provides the lifecycle and
@@ -186,7 +177,8 @@ A suite that needs clean module state calls
 resets without creating a run root or narrowing PATH. Stub `src/` functions
 inside a subshell. Domain fixtures are opt-in files in
 `tests/helpers/*_fixtures.sh` (`exec`, `remote_host`, `runtime`, `send_job`,
-`property`, `replication`, `snapshot_discovery`, `fake_tool`, `backup`);
+`property`, `replication`, `snapshot_discovery`, `fake_tool`, `backup`), and
+validation/runner scripts share `tests/helpers/runner_common.sh`;
 contract suites share `tests/helpers/blackbox.sh` (the fixture tree, canned
 zfs wrappers, and mock ssh, parallel, zstd and `svcadm`). Use
 `planning_run_recursive STATE_DIR [OPTION...]` to replicate between the

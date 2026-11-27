@@ -25,6 +25,8 @@ TEST_POOL_RUN_PROP="org.zxfer:run"
 TEST_POOL_VDEV_PROP="org.zxfer:vdev"
 TEST_RUN_ID=""
 
+# shellcheck source=tests/helpers/runner_common.sh
+. "$TESTS_DIR/helpers/runner_common.sh"
 # shellcheck source=tests/helpers/zfs_test_reporting.sh
 . "$TESTS_DIR/helpers/zfs_test_reporting.sh"
 # shellcheck source=tests/helpers/zfs_test_host.sh
@@ -87,62 +89,23 @@ zxfer_perf_warn() {
 }
 
 zxfer_perf_append_names() {
-	l_current=$1
-	l_spec=$2
-	l_result=$l_current
-
-	[ -n "$l_spec" ] || {
-		printf '%s\n' "$l_result"
-		return
-	}
-
-	for l_name in $(printf '%s\n' "$l_spec" | tr ',' ' '); do
-		[ -n "$l_name" ] || continue
-		if ! zxfer_perf_list_contains "$l_result" "$l_name"; then
-			if [ -n "$l_result" ]; then
-				l_result="$l_result $l_name"
-			else
-				l_result=$l_name
-			fi
-		fi
-	done
-
-	printf '%s\n' "$l_result"
+	zxfer_runner_append_csv_words "$1" "$2"
 }
 
 zxfer_perf_list_contains() {
-	l_list=$1
-	l_want=$2
-
-	case " $l_list " in
-	*" $l_want "*) return 0 ;;
-	esac
-	return 1
+	zxfer_runner_list_contains "$1" "$2"
 }
 
 zxfer_perf_positive_integer_p() {
-	case ${1:-} in
-	'' | *[!0-9]*) return 1 ;;
-	esac
-	[ "$1" -gt 0 ]
+	zxfer_runner_positive_integer_p "${1:-}"
 }
 
 zxfer_perf_nonnegative_integer_p() {
-	case ${1:-} in
-	'' | *[!0-9]*) return 1 ;;
-	esac
-	[ "$1" -ge 0 ]
+	zxfer_runner_nonnegative_integer_p "${1:-}"
 }
 
 zxfer_perf_count_words() {
-	l_perf_count_words_count=0
-
-	for l_perf_count_words_word in $1; do
-		[ -n "$l_perf_count_words_word" ] || continue
-		l_perf_count_words_count=$((l_perf_count_words_count + 1))
-	done
-
-	printf '%s\n' "$l_perf_count_words_count"
+	zxfer_runner_count_words "$1"
 }
 
 zxfer_perf_parse_args() {
@@ -299,15 +262,11 @@ zxfer_perf_now_ms() {
 		return "$?"
 	fi
 	l_now_ms=$(date '+%s%3N' 2>/dev/null || :)
-	case "$l_now_ms" in
-	'' | *[!0-9]*)
+	if ! zxfer_runner_nonnegative_integer_p "$l_now_ms"; then
 		l_now_epoch=$(date '+%s' 2>/dev/null || :)
-		case "$l_now_epoch" in
-		'' | *[!0-9]*) return 1 ;;
-		esac
+		zxfer_runner_nonnegative_integer_p "$l_now_epoch" || return 1
 		l_now_ms=$((l_now_epoch * 1000))
-		;;
-	esac
+	fi
 	printf '%s\n' "$l_now_ms"
 }
 
@@ -353,8 +312,18 @@ zxfer_perf_cleanup() {
 	set +e
 	l_cleanup_ok=1
 
-	destroy_test_pool_if_owned "source" "${SRC_POOL:-}" "${SRC_POOL_CREATED:-0}" "${SRC_IMG:-}" || l_cleanup_ok=0
-	destroy_test_pool_if_owned "destination" "${DEST_POOL:-}" "${DEST_POOL_CREATED:-0}" "${DEST_IMG:-}" || l_cleanup_ok=0
+	if [ -n "${TEST_RUN_ID:-}" ]; then
+		l_perf_job_pids=$(ps -o pid= -o ppid= 2>/dev/null | awk -v ppid="$$" '
+			$2 == ppid { print $1 }
+		' || true)
+		if [ -n "$l_perf_job_pids" ]; then
+			# shellcheck disable=SC2086  # split into individual PIDs on purpose
+			kill $l_perf_job_pids 2>/dev/null || true
+			# shellcheck disable=SC2086  # wait accepts individual PIDs
+			wait $l_perf_job_pids 2>/dev/null || true
+		fi
+	fi
+	destroy_owned_test_pool_pair || l_cleanup_ok=0
 	if [ -n "${WORKDIR:-}" ]; then
 		if [ "$l_cleanup_ok" -eq 1 ]; then
 			safe_rm_rf "$WORKDIR" || l_cleanup_ok=0
@@ -368,6 +337,12 @@ zxfer_perf_cleanup() {
 	fi
 
 	return "$l_exit_status"
+}
+
+zxfer_perf_handle_signal() {
+	l_perf_signal=$1
+	trap - HUP INT QUIT TERM
+	exit "$(zxfer_runner_signal_exit_status "$l_perf_signal" 1)"
 }
 
 zxfer_perf_setup_pools() {
@@ -386,25 +361,13 @@ zxfer_perf_setup_pools() {
 	WORKDIR=$(cd -P "$WORKDIR" && pwd)
 	TEST_RUN_ID="$(date +%s).$$"
 	trap zxfer_perf_cleanup EXIT
+	trap 'zxfer_perf_handle_signal HUP' HUP
+	trap 'zxfer_perf_handle_signal INT' INT
+	trap 'zxfer_perf_handle_signal QUIT' QUIT
+	trap 'zxfer_perf_handle_signal TERM' TERM
 
 	SPARSE_SIZE_MB=$ZXFER_PERF_SPARSE_SIZE_MB
-	SRC_POOL=$(generate_test_pool_name "perf_src")
-	DEST_POOL=$(generate_test_pool_name "perf_dest")
-	SRC_MOUNT_ROOT="$WORKDIR/mnt/src"
-	DEST_MOUNT_ROOT="$WORKDIR/mnt/dest"
-	mkdir -p "$SRC_MOUNT_ROOT" "$DEST_MOUNT_ROOT"
-
-	SRC_IMG="$WORKDIR/${SRC_POOL}.img"
-	DEST_IMG="$WORKDIR/${DEST_POOL}.img"
-	create_sparse_file "$SRC_IMG" "$SPARSE_SIZE_MB"
-	create_sparse_file "$DEST_IMG" "$SPARSE_SIZE_MB"
-
-	log_summary "Creating performance source pool $SRC_POOL"
-	create_test_pool "source" "$SRC_POOL" "$SRC_IMG" "$SRC_MOUNT_ROOT"
-	SRC_POOL_CREATED=1
-	log_summary "Creating performance destination pool $DEST_POOL"
-	create_test_pool "destination" "$DEST_POOL" "$DEST_IMG" "$DEST_MOUNT_ROOT"
-	DEST_POOL_CREATED=1
+	create_test_pool_pair "perf_src" "perf_dest" "$SPARSE_SIZE_MB" log_summary "performance "
 }
 
 zxfer_perf_tsv_value() {

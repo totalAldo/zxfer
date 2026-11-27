@@ -11,20 +11,6 @@
 # shellcheck source=tests/helpers/fake_tool_fixtures.sh
 . "$TESTS_DIR/helpers/fake_tool_fixtures.sh"
 
-create_parallel_bin() {
-	l_path=$1
-	l_version_line=$2
-	cat >"$l_path" <<EOF
-#!/bin/sh
-if [ "\$1" = "--version" ]; then
-	printf '%s\n' "$l_version_line"
-	exit 0
-fi
-exit 0
-EOF
-	chmod +x "$l_path"
-}
-
 create_selective_awk_failure_bin() {
 	l_path=$1
 	l_exit_status=$2
@@ -62,8 +48,7 @@ zxfer_test_start_fast_noop_destination_fifo_producer() {
 	l_raw_payload=${ZXFER_TEST_FAST_NOOP_DESTINATION_RAW-}
 	l_err_payload=${ZXFER_TEST_FAST_NOOP_DESTINATION_STDERR-}
 	l_list_status=${ZXFER_TEST_FAST_NOOP_DESTINATION_LIST_STATUS:-0}
-	l_normalize_status=${ZXFER_TEST_FAST_NOOP_DESTINATION_NORMALIZE_STATUS:-0}
-	l_stream_status=${ZXFER_TEST_FAST_NOOP_DESTINATION_STREAM_STATUS:-${ZXFER_TEST_FAST_NOOP_DESTINATION_SORT_STATUS:-0}}
+	l_stream_status=${ZXFER_TEST_FAST_NOOP_DESTINATION_STREAM_STATUS:-${ZXFER_TEST_FAST_NOOP_DESTINATION_SORT_STATUS:-${ZXFER_TEST_FAST_NOOP_DESTINATION_NORMALIZE_STATUS:-0}}}
 
 	if [ "${ZXFER_TEST_FAST_NOOP_DESTINATION_SETUP_STATUS:-0}" -ne 0 ]; then
 		return "$ZXFER_TEST_FAST_NOOP_DESTINATION_SETUP_STATUS"
@@ -83,7 +68,11 @@ zxfer_test_start_fast_noop_destination_fifo_producer() {
 		if [ -n "$l_raw_file" ] && [ -n "$l_raw_payload" ]; then
 			printf '%s\n' "$l_raw_payload" >"$l_raw_file"
 		fi
-		printf '%s %s %s\n' "$l_list_status" "$l_normalize_status" "$l_stream_status" >"$l_status_file"
+		printf '%s\n' "$l_list_status" >"$l_status_file"
+		case $l_stream_status in
+		'' | *[!0123456789]*) printf '%s\n' "$l_stream_status" >"$l_status_file" ;;
+		*) exit "$l_stream_status" ;;
+		esac
 	) &
 	g_last_background_pid=$!
 	zxfer_register_cleanup_pid "$g_last_background_pid" "test destination snapshot no-op proof helper"
@@ -93,8 +82,9 @@ zxfer_test_start_fast_noop_destination_fifo_producer() {
 # Usage: zxfer_test_snapshot_discovery_fixture_write_tools, from oneTimeSetUp
 # after zxfer_test_create_tmpdir.
 zxfer_test_snapshot_discovery_fixture_write_tools() {
-	PARALLEL_BIN="$TEST_TMPDIR/parallel"
-	FAKE_SSH_BIN="$TEST_TMPDIR/fake_ssh"
+	mkdir -p "$TEST_TMPDIR/.discovery_tools"
+	PARALLEL_BIN="$TEST_TMPDIR/.discovery_tools/parallel"
+	FAKE_SSH_BIN="$TEST_TMPDIR/.discovery_tools/fake_ssh"
 	create_parallel_bin "$PARALLEL_BIN" "parallel (fake)"
 	create_fake_ssh_bin "$FAKE_SSH_BIN"
 }
@@ -132,6 +122,8 @@ zxfer_test_reset_snapshot_discovery_remote_capability_fixture() {
 # Usage: Called by zxfer_test_snapshot_discovery_fixture_setup before
 # producer, SSH, and ZFS command tests.
 zxfer_test_reset_snapshot_discovery_command_fixture() {
+	PARALLEL_BIN="$TEST_TMPDIR/.discovery_tools/parallel"
+	FAKE_SSH_BIN="$TEST_TMPDIR/.discovery_tools/fake_ssh"
 	g_cmd_parallel="$PARALLEL_BIN"
 	g_origin_parallel_cmd=""
 	g_origin_parallel_cmd_host=""

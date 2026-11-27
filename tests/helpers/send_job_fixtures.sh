@@ -1,7 +1,7 @@
 #!/bin/sh
-# The unit fixture of tests/suites/zxfer_send_receive_jobs_tests.sh, shared with the
-# background-shell fragment of tests/test_zxfer_exec.sh: quiet options, two
-# jobs, a fresh run root, and cleared send-job, spawn-mode and failure state.
+# Shared unit fixture for tests/test_zxfer_send_receive.sh and
+# tests/test_zxfer_exec.sh: quiet options, two jobs, a fresh run root, and
+# cleared send-job, spawn-mode and failure state.
 # shellcheck disable=SC2034,SC2317,SC2329
 
 # Purpose: Reset the job supervisor and the background-shell spawn mode.

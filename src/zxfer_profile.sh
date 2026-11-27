@@ -281,7 +281,7 @@ zxfer_profile_emit_summary() {
 		"diverged_snapshot_warnings=${g_zxfer_profile_diverged_snapshot_warnings:-0}"
 	# Counts are plain decimals, so a count above 0 starts with 1-9.
 	case ${g_zxfer_profile_has_data:-0}$* in
-	1* | *=[1-9]*) ;;
+	1* | *=[123456789]*) ;;
 	*) return 0 ;;
 	esac
 	g_zxfer_profile_summary_emitted=1

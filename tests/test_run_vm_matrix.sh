@@ -81,60 +81,48 @@ test_vm_guest_manifest_resolves_all_existing_guest_contract_fields() {
 	zxfer_vm_require_guest_manifest ||
 		fail "The checked-in VM guest manifest should validate."
 
-	resolved=$(
-		printf 'guests=%s\n' "$(zxfer_vm_guest_names | awk 'BEGIN { separator = "" } { printf "%s%s", separator, $0; separator = "," } END { print "" }')"
-		printf 'profiles=%s\n' "$(zxfer_vm_profile_names | awk 'BEGIN { separator = "" } { printf "%s%s", separator, $0; separator = "," } END { print "" }')"
-		for profile in smoke local full ci; do
-			printf 'profile|%s|%s\n' "$profile" "$(zxfer_vm_profile_guests "$profile")"
-		done
-		for guest in ubuntu freebsd omnios; do
-			zxfer_vm_load_guest "$guest" any || exit 1
-			printf 'guest|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-				"$guest" \
-				"$g_vm_guest_label" \
-				"$g_vm_guest_profiles" \
-				"$g_vm_guest_shell" \
-				"$g_vm_guest_ssh_ready_timeout_seconds" \
-				"$g_vm_guest_ssh_ready_probe_count" \
-				"$g_vm_guest_shunit_jobs" \
-				"$g_vm_guest_shunit_mode" \
-				"$g_vm_guest_provisioner" \
-				"$g_vm_guest_cloud_init_style" \
-				"$g_vm_guest_strict_qemu_profiles"
+	assertEquals "The guest catalog should list Ubuntu, FreeBSD, and OmniOS in manifest order." \
+		"ubuntu,freebsd,omnios" \
+		"$(zxfer_vm_guest_names | awk 'BEGIN { s = "" } { printf "%s%s", s, $0; s = "," } END { print "" }')"
+	assertEquals "The profile catalog should list smoke, local, full, and ci in manifest order." \
+		"smoke,local,full,ci" \
+		"$(zxfer_vm_profile_names | awk 'BEGIN { s = "" } { printf "%s%s", s, $0; s = "," } END { print "" }')"
+	assertEquals "ubuntu" "$(zxfer_vm_profile_guests smoke)"
+	assertEquals "ubuntu freebsd" "$(zxfer_vm_profile_guests local)"
+	assertEquals "ubuntu freebsd omnios" "$(zxfer_vm_profile_guests full)"
+	assertEquals "ubuntu freebsd omnios" "$(zxfer_vm_profile_guests ci)"
+
+	manifest_path=$(zxfer_vm_guest_manifest_path)
+	expected_rows=$(awk -F '\t' '
+		NR > 1 {
+			label = ($2 == "-" ? "" : $2)
+			min_disk = ($10 == "-" ? "" : $10)
+			strict = ($19 == "-" ? "" : $19)
+			base_img = $5
+			if ($8 == "xz") sub(/\.xz$/, "", base_img)
+			printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n",
+				$1, label, $3, $4, $5, $6, $7, $8, base_img, $9, min_disk,
+				$11, $12, $13, $14, $15, $16, $17, $18, strict
+		}
+	' "$manifest_path")
+	actual_rows=$(
+		for guest in $(zxfer_vm_guest_names); do
 			for arch in amd64 arm64; do
-				if ! zxfer_vm_load_guest "$guest" "$arch"; then
-					continue
-				fi
-				printf 'arch|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-					"$guest" "$arch" \
-					"$g_vm_guest_image_filename" \
-					"$g_vm_guest_image_url" \
-					"$g_vm_guest_checksum_url" \
-					"$g_vm_guest_archive_compression" \
-					"$g_vm_guest_base_image_name" \
-					"$g_vm_guest_base_format" \
-					"$g_vm_guest_min_disk_size" \
-					"$g_vm_guest_seed_transport"
+				zxfer_vm_load_guest "$guest" "$arch" || continue
+				printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+					"$g_vm_guest_name" "$g_vm_guest_label" "$g_vm_guest_profiles" "$g_vm_guest_arch" \
+					"$g_vm_guest_image_filename" "$g_vm_guest_image_url" "$g_vm_guest_checksum_url" \
+					"$g_vm_guest_archive_compression" "$g_vm_guest_base_image_name" "$g_vm_guest_base_format" \
+					"$g_vm_guest_min_disk_size" "$g_vm_guest_shell" "$g_vm_guest_seed_transport" \
+					"$g_vm_guest_ssh_ready_timeout_seconds" "$g_vm_guest_ssh_ready_probe_count" \
+					"$g_vm_guest_shunit_jobs" "$g_vm_guest_shunit_mode" "$g_vm_guest_provisioner" \
+					"$g_vm_guest_cloud_init_style" "$g_vm_guest_strict_qemu_profiles"
 			done
 		done
 	)
-	expected='guests=ubuntu,freebsd,omnios
-profiles=smoke,local,full,ci
-profile|smoke|ubuntu
-profile|local|ubuntu freebsd
-profile|full|ubuntu freebsd omnios
-profile|ci|ubuntu freebsd omnios
-guest|ubuntu|Ubuntu 26.04|smoke,local,full,ci|/bin/sh|1800|1|4|native|apt-zfs|default|ci
-arch|ubuntu|amd64|ubuntu-26.04-server-cloudimg-amd64.img|https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img|https://cloud-images.ubuntu.com/releases/26.04/release/SHA256SUMS|none|ubuntu-26.04-server-cloudimg-amd64.img|qcow2|16G|smbios-nocloud-net
-arch|ubuntu|arm64|ubuntu-26.04-server-cloudimg-arm64.img|https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-arm64.img|https://cloud-images.ubuntu.com/releases/26.04/release/SHA256SUMS|none|ubuntu-26.04-server-cloudimg-arm64.img|qcow2|16G|smbios-nocloud-net
-guest|freebsd|FreeBSD 15.1|local,full,ci|/bin/sh|1800|3|2|native|freebsd-pkg|root-login|
-arch|freebsd|amd64|FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/CHECKSUM.SHA256|xz|FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2|qcow2||disk-cidata
-arch|freebsd|arm64|FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/aarch64/Latest/FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2.xz|https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/aarch64/Latest/CHECKSUM.SHA256|xz|FreeBSD-15.1-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-zfs.qcow2|qcow2||disk-cidata
-guest|omnios|OmniOS r151058|full,ci|/usr/xpg4/bin/sh|1800|3|2|bash-posix|omnios-pkg|default|
-arch|omnios|amd64|omnios-r151058.cloud.qcow2|https://downloads.omnios.org/media/stable/omnios-r151058.cloud.qcow2|https://downloads.omnios.org/media/stable/omnios-r151058.cloud.qcow2.sha256|none|omnios-r151058.cloud.qcow2|qcow2||smbios-nocloud-net'
 
-	assertEquals "The validated manifest should preserve every existing guest, profile, architecture, and resolved runtime field." \
-		"$expected" "$resolved"
+	assertEquals "zxfer_vm_load_guest should round-trip every row and field of guest_manifest.tsv." \
+		"$expected_rows" "$actual_rows"
 }
 
 test_vm_guest_manifest_validation_rejects_schema_duplicates_and_inconsistent_guest_rows() {
@@ -403,6 +391,40 @@ test_vm_download_and_verify_file_marks_cached_state() {
 		"cached" "$ZXFER_VM_LAST_DOWNLOAD_ACTION"
 	assertEquals "Cache hit state should record the on-disk file size." \
 		"8" "$ZXFER_VM_LAST_DOWNLOAD_SIZE_BYTES"
+}
+
+test_vm_download_and_verify_file_fails_closed_under_if_and_preserves_cache_when_sha_tool_fails() {
+	cached_file="$TEST_TMPDIR/cached-preserve.img"
+	printf '%s\n' "cached-payload" >"$cached_file"
+	expected_sha=$(zxfer_vm_sha256_file "$cached_file")
+
+	l_empty_expected_status=0
+	(
+		set -eu
+		if zxfer_vm_download_and_verify_file "https://example.invalid/cached.img" "$cached_file" "" 2>/dev/null; then
+			exit 0
+		fi
+		exit 1
+	) || l_empty_expected_status=$?
+	assertEquals "Empty expected SHA-256 must fail closed even inside an if condition." \
+		1 "$l_empty_expected_status"
+	assertTrue "Empty expected SHA-256 must preserve the cached file." "[ -f '$cached_file' ]"
+
+	l_missing_tool_status=0
+	(
+		set -eu
+		zxfer_vm_sha256_file() {
+			zxfer_vm_die "A SHA-256 tool is required (sha256sum or shasum)."
+		}
+		if zxfer_vm_download_and_verify_file "https://example.invalid/cached.img" "$cached_file" "$expected_sha" 2>/dev/null; then
+			exit 0
+		fi
+		exit 1
+	) || l_missing_tool_status=$?
+	assertEquals "SHA-256 tool failure in command substitution must fail closed even under an if condition." \
+		1 "$l_missing_tool_status"
+	assertTrue "SHA-256 tool failure must not delete an existing cached guest image." \
+		"[ -f '$cached_file' ]"
 }
 
 test_vm_refresh_cached_download_uses_cached_copy_when_refresh_fails() {

@@ -201,92 +201,39 @@ zxfer_vm_qemu_start_guest() {
 	l_artifact_dir=$6
 	l_seed_transport=$7
 	l_seed_image_path=${8:-}
-	l_machine=
 
-	case "$l_guest_arch" in
-	amd64)
-		l_machine=$(zxfer_vm_qemu_machine_arg "$l_guest_arch" "$l_accel") ||
-			zxfer_vm_die "Unsupported qemu machine selection for guest architecture: $l_guest_arch"
-		case "$l_seed_transport" in
-		disk-cidata)
-			qemu-system-x86_64 \
-				-daemonize \
-				-pidfile "$ZXFER_VM_QEMU_PID_FILE" \
-				-display none \
-				-monitor none \
-				-serial file:"$l_artifact_dir/serial.log" \
-				-machine "$l_machine" \
-				-cpu max \
-				-smp 4 \
-				-m 4096 \
-				-device virtio-rng-pci \
-				-nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:"$l_ssh_port"-:22 \
-				-drive if=virtio,format=qcow2,file="$l_overlay_path" \
-				-drive if=virtio,media=cdrom,format=raw,readonly=on,file="$l_seed_image_path"
-			;;
-		*)
-			qemu-system-x86_64 \
-				-daemonize \
-				-pidfile "$ZXFER_VM_QEMU_PID_FILE" \
-				-display none \
-				-monitor none \
-				-serial file:"$l_artifact_dir/serial.log" \
-				-machine "$l_machine" \
-				-cpu max \
-				-smp 4 \
-				-m 4096 \
-				-device virtio-rng-pci \
-				-nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:"$l_ssh_port"-:22 \
-				-drive if=virtio,format=qcow2,file="$l_overlay_path" \
-				-smbios type=1,serial="ds=nocloud-net;s=http://10.0.2.2:$l_http_port/"
-			;;
-		esac
-		;;
-	arm64)
-		l_machine=$(zxfer_vm_qemu_machine_arg "$l_guest_arch" "$l_accel") ||
-			zxfer_vm_die "Unsupported qemu machine selection for guest architecture: $l_guest_arch"
-		l_efi_firmware=$(zxfer_vm_qemu_resolve_aarch64_efi)
-		case "$l_seed_transport" in
-		disk-cidata)
-			qemu-system-aarch64 \
-				-daemonize \
-				-pidfile "$ZXFER_VM_QEMU_PID_FILE" \
-				-display none \
-				-monitor none \
-				-serial file:"$l_artifact_dir/serial.log" \
-				-machine "$l_machine" \
-				-cpu max \
-				-smp 4 \
-				-m 4096 \
-				-bios "$l_efi_firmware" \
-				-device virtio-rng-pci \
-				-nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:"$l_ssh_port"-:22 \
-				-drive if=virtio,format=qcow2,file="$l_overlay_path" \
-				-drive if=virtio,media=cdrom,format=raw,readonly=on,file="$l_seed_image_path"
-			;;
-		*)
-			qemu-system-aarch64 \
-				-daemonize \
-				-pidfile "$ZXFER_VM_QEMU_PID_FILE" \
-				-display none \
-				-monitor none \
-				-serial file:"$l_artifact_dir/serial.log" \
-				-machine "$l_machine" \
-				-cpu max \
-				-smp 4 \
-				-m 4096 \
-				-bios "$l_efi_firmware" \
-				-device virtio-rng-pci \
-				-nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:"$l_ssh_port"-:22 \
-				-drive if=virtio,format=qcow2,file="$l_overlay_path" \
-				-smbios type=1,serial="ds=nocloud-net;s=http://10.0.2.2:$l_http_port/"
-			;;
-		esac
+	l_qemu_bin=$(zxfer_vm_qemu_system_binary "$l_guest_arch") ||
+		zxfer_vm_die "Unsupported qemu guest architecture: $l_guest_arch"
+	l_machine=$(zxfer_vm_qemu_machine_arg "$l_guest_arch" "$l_accel") ||
+		zxfer_vm_die "Unsupported qemu machine selection for guest architecture: $l_guest_arch"
+
+	set -- "$l_qemu_bin" \
+		-daemonize \
+		-pidfile "$ZXFER_VM_QEMU_PID_FILE" \
+		-display none \
+		-monitor none \
+		-serial file:"$l_artifact_dir/serial.log" \
+		-machine "$l_machine" \
+		-cpu max \
+		-smp 4 \
+		-m 4096
+	if [ "$l_guest_arch" = "arm64" ]; then
+		l_efi_firmware=$(zxfer_vm_qemu_resolve_aarch64_efi) || return 1
+		set -- "$@" -bios "$l_efi_firmware"
+	fi
+	set -- "$@" \
+		-device virtio-rng-pci \
+		-nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:"$l_ssh_port"-:22 \
+		-drive if=virtio,format=qcow2,file="$l_overlay_path"
+	case "$l_seed_transport" in
+	disk-cidata)
+		set -- "$@" -drive if=virtio,media=cdrom,format=raw,readonly=on,file="$l_seed_image_path"
 		;;
 	*)
-		zxfer_vm_die "Unsupported qemu guest architecture: $l_guest_arch"
+		set -- "$@" -smbios type=1,serial="ds=nocloud-net;s=http://10.0.2.2:$l_http_port/"
 		;;
 	esac
+	"$@"
 }
 
 zxfer_vm_qemu_pid_file_has_dead_process() {
@@ -408,22 +355,28 @@ zxfer_vm_qemu_wait_for_ssh() {
 	return 1
 }
 
-# Purpose: Check that the guest runs a command over SSH on the pinned key.
-# Usage: zxfer_vm_qemu_ssh_probe HOST PORT KNOWN_HOSTS IDENTITY
-zxfer_vm_qemu_ssh_probe() {
-	l_host=$1
-	l_port=$2
-	l_known_hosts=$3
-	l_identity=$4
+# Purpose: Run ssh against a QEMU guest using the pinned per-run known_hosts
+# and generated ed25519 identity.
+# Usage: zxfer_vm_qemu_ssh PORT KNOWN_HOSTS IDENTITY [SSH_ARG...]
+zxfer_vm_qemu_ssh() {
+	l_qemu_ssh_port=$1
+	l_qemu_ssh_known_hosts=$2
+	l_qemu_ssh_identity=$3
+	shift 3
 
-	ssh -i "$l_identity" \
+	ssh -i "$l_qemu_ssh_identity" \
 		-o BatchMode=yes \
 		-o IdentitiesOnly=yes \
 		-o StrictHostKeyChecking=yes \
-		-o UserKnownHostsFile="$l_known_hosts" \
-		-o ConnectTimeout=10 \
-		-p "$l_port" \
-		root@"$l_host" true >/dev/null 2>&1
+		-o UserKnownHostsFile="$l_qemu_ssh_known_hosts" \
+		-p "$l_qemu_ssh_port" \
+		"$@"
+}
+
+# Purpose: Check that the guest runs a command over SSH on the pinned key.
+# Usage: zxfer_vm_qemu_ssh_probe HOST PORT KNOWN_HOSTS IDENTITY
+zxfer_vm_qemu_ssh_probe() {
+	zxfer_vm_qemu_ssh "$2" "$3" "$4" -o ConnectTimeout=10 root@"$1" true >/dev/null 2>&1
 }
 
 # Purpose: Before a remote step, wait for SSH on the pinned host key (sshd may
@@ -657,38 +610,17 @@ zxfer_vm_qemu_resize_overlay_if_needed() {
 }
 
 zxfer_vm_qemu_copy_repo_to_guest() {
-	l_port=$1
-	l_known_hosts=$2
-	l_identity=$3
-	l_remote_dir=$4
-
 	zxfer_vm_qemu_write_repo_archive |
-		ssh -i "$l_identity" \
-			-o BatchMode=yes \
-			-o IdentitiesOnly=yes \
-			-o StrictHostKeyChecking=yes \
-			-o UserKnownHostsFile="$l_known_hosts" \
-			-p "$l_port" \
-			root@127.0.0.1 "rm -rf '$l_remote_dir' && mkdir -p '$l_remote_dir' && tar xf - -C '$l_remote_dir'" ||
+		zxfer_vm_qemu_ssh "$1" "$2" "$3" root@127.0.0.1 \
+			"rm -rf '$4' && mkdir -p '$4' && tar xf - -C '$4'" ||
 		zxfer_vm_die "Failed to copy repository contents into the guest"
 }
 
 zxfer_vm_qemu_copy_ref_to_guest() {
-	l_port=$1
-	l_known_hosts=$2
-	l_identity=$3
-	l_remote_dir=$4
-	l_ref=$5
-
-	zxfer_vm_qemu_write_ref_archive "$l_ref" |
-		ssh -i "$l_identity" \
-			-o BatchMode=yes \
-			-o IdentitiesOnly=yes \
-			-o StrictHostKeyChecking=yes \
-			-o UserKnownHostsFile="$l_known_hosts" \
-			-p "$l_port" \
-			root@127.0.0.1 "rm -rf '$l_remote_dir' && mkdir -p '$l_remote_dir' && tar xf - -C '$l_remote_dir'" ||
-		zxfer_vm_die "Failed to copy baseline ref [$l_ref] into the guest"
+	zxfer_vm_qemu_write_ref_archive "$5" |
+		zxfer_vm_qemu_ssh "$1" "$2" "$3" root@127.0.0.1 \
+			"rm -rf '$4' && mkdir -p '$4' && tar xf - -C '$4'" ||
+		zxfer_vm_die "Failed to copy baseline ref [$5] into the guest"
 }
 
 zxfer_vm_qemu_run_remote_script() {
@@ -700,42 +632,22 @@ zxfer_vm_qemu_run_remote_script() {
 	l_stderr_file=$6
 	l_status=0
 
-	if zxfer_vm_run_command_with_captured_output \
+	zxfer_vm_run_command_with_captured_output \
 		"$l_stdout_file" \
 		"$l_stderr_file" \
 		"[$g_vm_guest_name stdout]" \
 		"[$g_vm_guest_name stderr]" \
-		ssh -i "$l_identity" \
-		-o BatchMode=yes \
-		-o IdentitiesOnly=yes \
-		-o StrictHostKeyChecking=yes \
-		-o UserKnownHostsFile="$l_known_hosts" \
-		-p "$l_port" \
-		root@127.0.0.1 /bin/sh -s <"$l_script_file"; then
-		l_status=0
-	else
-		l_status=$?
-	fi
+		zxfer_vm_qemu_ssh "$l_port" "$l_known_hosts" "$l_identity" \
+		root@127.0.0.1 /bin/sh -s <"$l_script_file" || l_status=$?
 
 	return "$l_status"
 }
 
 zxfer_vm_qemu_collect_remote_artifacts() {
-	l_port=$1
-	l_known_hosts=$2
-	l_identity=$3
-	l_remote_artifact_dir=$4
-	l_artifact_dir=$5
-
-	zxfer_vm_mkdir_p "$l_artifact_dir/guest-artifacts"
-	ssh -i "$l_identity" \
-		-o BatchMode=yes \
-		-o IdentitiesOnly=yes \
-		-o StrictHostKeyChecking=yes \
-		-o UserKnownHostsFile="$l_known_hosts" \
-		-p "$l_port" \
-		root@127.0.0.1 "if [ -d '$l_remote_artifact_dir' ]; then tar cf - -C '$l_remote_artifact_dir' .; fi" |
-		tar xf - -C "$l_artifact_dir/guest-artifacts" 2>/dev/null || true
+	zxfer_vm_mkdir_p "$5/guest-artifacts"
+	zxfer_vm_qemu_ssh "$1" "$2" "$3" root@127.0.0.1 \
+		"if [ -d '$4' ]; then tar cf - -C '$4' .; fi" |
+		tar xf - -C "$5/guest-artifacts" 2>/dev/null || true
 }
 
 zxfer_vm_backend_qemu_run_guest() {
@@ -797,10 +709,10 @@ zxfer_vm_backend_qemu_run_guest() {
 		"$l_guest_display_name" \
 		"checksum manifest $(basename "$l_checksum_file")"
 	zxfer_vm_log "==> [$l_guest_display_name] checksum manifest ready ($(zxfer_vm_format_bytes "$(zxfer_vm_file_size_bytes "$l_checksum_file")"))"
-	l_checksum=$(zxfer_vm_resolve_expected_checksum "$l_checksum_file" "$g_vm_guest_image_filename")
+	l_checksum=$(zxfer_vm_resolve_expected_checksum "$l_checksum_file" "$g_vm_guest_image_filename") || return 1
 
 	zxfer_vm_log "==> [$l_guest_display_name] ensuring guest image cache $(basename "$l_archive_path")"
-	zxfer_vm_download_and_verify_file "$g_vm_guest_image_url" "$l_archive_path" "$l_checksum"
+	zxfer_vm_download_and_verify_file "$g_vm_guest_image_url" "$l_archive_path" "$l_checksum" || return 1
 	zxfer_vm_qemu_log_cached_download_state \
 		"$l_guest_display_name" \
 		"guest image" \

@@ -37,8 +37,9 @@
 
 # Module contract:
 # owns globals: g_zxfer_failure_* structured failure context,
-#   g_zxfer_original_invocation, and g_zxfer_report_fast_path (set when the
-#   module is sourced).
+#   g_zxfer_original_invocation, g_zxfer_report_fast_path (set when the module
+#   is sourced), and the result globals g_zxfer_escaped_report_value_result and
+#   g_zxfer_quoted_report_token_result.
 # reads globals: g_option_* verbosity, beep, host, and mode flags;
 #   g_zxfer_version; g_cmd_awk; ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS;
 #   ZXFER_ERROR_LOG.
@@ -64,6 +65,8 @@ zxfer_reset_failure_context() {
 	g_zxfer_failure_destination_root=""
 	g_zxfer_failure_current_destination=""
 	g_zxfer_failure_last_command=""
+	g_zxfer_escaped_report_value_result=""
+	g_zxfer_quoted_report_token_result=""
 }
 
 # Purpose: Record the launcher argv as the failure report's invocation field.
@@ -83,10 +86,10 @@ zxfer_warn_stderr() {
 	printf '%s\n' "$*" >&2
 }
 
-# The report fast paths below skip awk and sed for printable words, which
-# needs [[:print:]] in case patterns. posh reads [![:print:]] as a plain
-# bracket expression and would let control bytes through, so detect class
-# support once here; without it every word takes the slow path.
+# The report fast paths below skip awk for printable words, which needs
+# [[:print:]] in case patterns. posh reads [![:print:]] as a plain bracket
+# expression and would let control bytes through, so detect class support once
+# here; without it every word takes the awk path.
 # shellcheck disable=SC2194 # The constant word is the probe.
 case 'a
 b' in
@@ -98,28 +101,47 @@ b' in
 	;;
 esac
 
-# Purpose: Make a report value inert on terminals, pagers, and ZXFER_ERROR_LOG:
-# backslash, tab, CR, and newline become \\ \t \r \n; other C0 bytes and DEL
-# become \xHH.
-# Usage: l_safe=$(zxfer_escape_report_value "$l_value")
-zxfer_escape_report_value() {
-	# Printable text without backslashes needs no escaping, so skip the awk
-	# pipeline. [:print:] follows the shell's locale; the slow path below
-	# passes bytes >= 0x80 through unchanged either way.
+# Purpose: Escape a report value in the current shell: backslash, tab, CR, and
+# newline become \\ \t \r \n; other C0 bytes and DEL become \xHH.
+# Usage: zxfer_escape_report_value_into_result VALUE; publishes
+# g_zxfer_escaped_report_value_result.
+zxfer_escape_report_value_into_result() {
+	g_zxfer_escaped_report_value_result=""
+	l_escape_had_lc_all=0
+	if [ "${LC_ALL+set}" = set ]; then
+		l_escape_had_lc_all=1
+		l_escape_saved_lc_all=$LC_ALL
+	fi
+	LC_ALL=C
+	# Printable ASCII without backslashes needs no escaping, so skip the awk
+	# pipeline. Checking under LC_ALL=C keeps multibyte locales from hiding
+	# 0x5C ('\') as a trail byte; the awk path passes bytes >= 0x80 unchanged.
 	case $1 in
-	*[![:print:]]* | *\\*) ;;
+	*[![:print:]]* | *\\*)
+		if [ "$l_escape_had_lc_all" -eq 1 ]; then
+			LC_ALL=$l_escape_saved_lc_all
+		else
+			unset LC_ALL
+		fi
+		;;
 	*)
+		if [ "$l_escape_had_lc_all" -eq 1 ]; then
+			LC_ALL=$l_escape_saved_lc_all
+		else
+			unset LC_ALL
+		fi
 		if [ "$g_zxfer_report_fast_path" = 1 ]; then
-			printf '%s' "$1"
+			g_zxfer_escaped_report_value_result=$1
 			return 0
 		fi
 		;;
 	esac
 
 	# Terminate the final record, even if it is empty. Each separator
-	# between awk records then represents exactly one newline in the value.
+	# between awk records then represents exactly one newline in the value;
+	# ORS is empty so command substitution strips nothing.
 	# shellcheck disable=SC2016
-	printf '%s\n' "$1" | LC_ALL=C "${g_cmd_awk:-awk}" '
+	g_zxfer_escaped_report_value_result=$(printf '%s\n' "$1" | LC_ALL=C "${g_cmd_awk:-awk}" '
 BEGIN {
 	ORS = ""
 	for (i = 1; i < 32; i++) {
@@ -145,26 +167,52 @@ BEGIN {
 		}
 	}
 }
-'
+')
+}
+
+# Purpose: Print an escaped report value to stdout.
+# Usage: l_safe=$(zxfer_escape_report_value "$l_value")
+zxfer_escape_report_value() {
+	zxfer_escape_report_value_into_result "$1" || return
+	printf '%s' "$g_zxfer_escaped_report_value_result"
+}
+
+# Purpose: Render one token as an escaped, single-quoted report word in the
+# current shell without invoking sed.
+# Usage: zxfer_quote_report_token_into_result TOKEN; publishes
+# g_zxfer_quoted_report_token_result.
+zxfer_quote_report_token_into_result() {
+	g_zxfer_quoted_report_token_result=""
+	zxfer_escape_report_value_into_result "$1" || return
+	l_report_quote_had_lc_all=0
+	if [ "${LC_ALL+set}" = set ]; then
+		l_report_quote_had_lc_all=1
+		l_report_quote_saved_lc_all=$LC_ALL
+	fi
+	LC_ALL=C
+	l_report_quote_rest=$g_zxfer_escaped_report_value_result
+	l_report_quote_safe=""
+	while :; do
+		case $l_report_quote_rest in
+		*\'*) ;;
+		*) break ;;
+		esac
+		l_report_quote_safe="$l_report_quote_safe${l_report_quote_rest%%\'*}'\"'\"'"
+		l_report_quote_rest=${l_report_quote_rest#*\'}
+	done
+	if [ "$l_report_quote_had_lc_all" -eq 1 ]; then
+		LC_ALL=$l_report_quote_saved_lc_all
+	else
+		unset LC_ALL
+	fi
+	g_zxfer_quoted_report_token_result="'$l_report_quote_safe$l_report_quote_rest'"
 }
 
 # Purpose: Render one token as an escaped, single-quoted report word.
 # Usage: l_word=$(zxfer_quote_token_for_report "$l_token")
 zxfer_quote_token_for_report() {
-	# Printable tokens without backslashes or single quotes quote as-is.
-	case $1 in
-	*[![:print:]]* | *\\* | *\'*) ;;
-	*)
-		if [ "$g_zxfer_report_fast_path" = 1 ]; then
-			printf "'%s'" "$1"
-			return 0
-		fi
-		;;
-	esac
-	l_value_escaped=$(zxfer_escape_report_value "$1")
-	# LC_ALL=C: a UTF-8 sed rejects invalid multibyte input and prints nothing.
-	l_value_safe=$(printf '%s' "$l_value_escaped" | LC_ALL=C sed "s/'/'\"'\"'/g")
-	printf "'%s'" "$l_value_safe"
+	zxfer_quote_report_token_into_result "$1" || return
+	printf '%s' "$g_zxfer_quoted_report_token_result"
 }
 
 # Purpose: Render argv as space-separated report words, one per argument.
@@ -172,22 +220,8 @@ zxfer_quote_token_for_report() {
 zxfer_quote_command_argv() {
 	l_output=""
 	for l_arg in "$@"; do
-		# Same fast path as zxfer_quote_token_for_report, without its subshell.
-		case $l_arg in
-		*[![:print:]]* | *\\* | *\'*)
-			l_quoted_arg=$(zxfer_quote_token_for_report "$l_arg")
-			;;
-		*)
-			l_quoted_arg="'$l_arg'"
-			[ "$g_zxfer_report_fast_path" = 1 ] ||
-				l_quoted_arg=$(zxfer_quote_token_for_report "$l_arg")
-			;;
-		esac
-		if [ "$l_output" = "" ]; then
-			l_output=$l_quoted_arg
-		else
-			l_output="$l_output $l_quoted_arg"
-		fi
+		zxfer_quote_report_token_into_result "$l_arg" || return
+		l_output=${l_output:+$l_output }$g_zxfer_quoted_report_token_result
 	done
 	printf '%s\n' "$l_output"
 }
@@ -315,7 +349,9 @@ zxfer_record_last_command_string() {
 	if [ $# -eq 0 ] || [ "$1" = "" ]; then
 		g_zxfer_failure_last_command=""
 	elif zxfer_failure_report_uses_unsafe_command_fields; then
-		g_zxfer_failure_last_command=$(zxfer_escape_report_value "$1")
+		zxfer_escape_report_value_into_result "$1" ||
+			g_zxfer_escaped_report_value_result=""
+		g_zxfer_failure_last_command=$g_zxfer_escaped_report_value_result
 	else
 		zxfer_record_last_command_opaque
 	fi
@@ -338,15 +374,8 @@ zxfer_record_last_command_argv() {
 # Usage: zxfer_append_report_field KEY VALUE; prints nothing for an empty VALUE.
 zxfer_append_report_field() {
 	[ -n "$2" ] || return 0
-	printf '%s: %s\n' "$1" "$(zxfer_escape_report_value "$2")"
-}
-
-# Purpose: Print one "key: value" report line whose value is already escaped.
-# Usage: zxfer_append_preescaped_report_field KEY VALUE; prints nothing for an
-# empty VALUE.
-zxfer_append_preescaped_report_field() {
-	[ -n "$2" ] || return 0
-	printf '%s: %s\n' "$1" "$2"
+	zxfer_escape_report_value_into_result "$2"
+	printf '%s: %s\n' "$1" "$g_zxfer_escaped_report_value_result"
 }
 
 # Purpose: Render the structured failure report for one exit status.
@@ -399,8 +428,8 @@ zxfer_render_failure_report() {
 	zxfer_append_report_field dry_run "${g_option_n_dryrun:-0}"
 	zxfer_append_report_field mode "$l_mode"
 	zxfer_append_report_field yield_iterations "${g_option_Y_yield_iterations:-}"
-	zxfer_append_preescaped_report_field invocation "$l_report_invocation"
-	zxfer_append_preescaped_report_field last_command "$l_report_last_command"
+	[ -z "$l_report_invocation" ] || printf 'invocation: %s\n' "$l_report_invocation"
+	[ -z "$l_report_last_command" ] || printf 'last_command: %s\n' "$l_report_last_command"
 	printf 'zxfer: failure report end\n'
 }
 
@@ -484,7 +513,7 @@ zxfer_validate_existing_error_log_file() {
 	# parent. Owner, link count and mode come from the same metadata read.
 	case $l_validate_links in
 	1) ;;
-	'' | *[!0-9]*)
+	'' | *[!0123456789]*)
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its link count could not be determined."
 		return 1
 		;;
@@ -657,7 +686,8 @@ zxfer_echoV() {
 # Usage: zxfer_echoV_escaped LABEL VALUE
 zxfer_echoV_escaped() {
 	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
-		printf '%s: %s\n' "$1" "$(zxfer_escape_report_value "$2")" >&2
+		zxfer_escape_report_value_into_result "$2"
+		printf '%s: %s\n' "$1" "$g_zxfer_escaped_report_value_result" >&2
 	fi
 }
 

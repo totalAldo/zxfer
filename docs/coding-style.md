@@ -58,9 +58,9 @@ The project priority order still applies:
 - Reserve `*_state` for modules that own mutable caches or shared session
   state.
 - Reserve `*_runtime` for temp resources and process cleanup.
-- Give each `src/zxfer_NAME.sh` one test entry, `tests/test_zxfer_NAME.sh`,
-  whose fragments live in `tests/suites/zxfer_NAME_TOPIC_tests.sh`; behavior
-  an operator sees belongs in the `tests/test_contract_*.sh` suites.
+- Give each `src/zxfer_NAME.sh` one self-contained unit suite,
+  `tests/test_zxfer_NAME.sh`; behavior an operator sees belongs in the
+  `tests/test_contract_*.sh` suites.
 
 ## Naming
 

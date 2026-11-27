@@ -132,7 +132,7 @@ EOF
 		;;
 	esac
 	chmod +x "$l_mockbin_dir/zfs" "$l_mockbin_fake" &&
-		planning_write_socket_mock_ssh "$l_mockbin_dir/ssh" &&
+		zxfer_mockbin_write_socket_ssh "$l_mockbin_dir/ssh" &&
 		planning_write_mock_parallel "$l_mockbin_dir/parallel"
 }
 

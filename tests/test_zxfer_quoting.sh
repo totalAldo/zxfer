@@ -99,10 +99,19 @@ test_is_uint_accepts_only_nonempty_digit_strings() {
 		assertTrue "[$l_value] should be an unsigned integer." \
 			"zxfer_is_uint '$l_value'"
 	done
-	for l_value in "" "-1" "+1" "1.5" " 1" "1 " "a" "1a" "0x1" "1$ZXFER_LF" "*"; do
+	for l_value in "" "-1" "+1" "1.5" " 1" "1 " "a" "1a" "0x1" "1$ZXFER_LF" "*" \
+		"$(printf '\342\206\205')" "1$(printf '\357\274\222')"; do
 		assertFalse "[$l_value] should not be an unsigned integer." \
 			"zxfer_is_uint '$l_value'"
 	done
+	l_utf8_status=0
+	(
+		LC_ALL=en_US.UTF-8
+		export LC_ALL
+		zxfer_is_uint "$(printf '\342\206\205')"
+	) 2>/dev/null || l_utf8_status=$?
+	assertNotEquals "U+2185 must not pass zxfer_is_uint under en_US.UTF-8 collation." \
+		0 "$l_utf8_status"
 }
 
 test_split_begin_and_end_restore_unset_ifs_and_enabled_globbing() {

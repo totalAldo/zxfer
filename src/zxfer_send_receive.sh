@@ -453,27 +453,6 @@ exit \"\$zxfer_job_status\""
 # JOB COMPLETION
 ################################################################################
 
-# Purpose: Remove one job row from the list.
-# Usage: zxfer_unregister_send_job JOB_ID; called after the job was reaped.
-zxfer_unregister_send_job() {
-	l_unregister_send_job_id=$1
-	l_unregister_send_job_remaining=""
-
-	while IFS= read -r l_unregister_send_job_row; do
-		[ -n "$l_unregister_send_job_row" ] || continue
-		case $l_unregister_send_job_row in
-		"$l_unregister_send_job_id	"*) continue ;;
-		esac
-		l_unregister_send_job_remaining=${l_unregister_send_job_remaining:+$l_unregister_send_job_remaining
-}$l_unregister_send_job_row
-	done <<EOF
-${g_zxfer_send_jobs:-}
-EOF
-	g_zxfer_send_jobs=$l_unregister_send_job_remaining
-	[ "${g_count_zfs_send_jobs:-0}" -le 0 ] ||
-		g_count_zfs_send_jobs=$((g_count_zfs_send_jobs - 1))
-}
-
 # Purpose: Record one successful receive into DEST in the destination caches.
 # Usage: zxfer_finish_destination_receive DEST; runs in the main shell after
 # a foreground pipeline and when a job is reaped.
@@ -503,17 +482,32 @@ zxfer_reap_send_job() {
 			l_reap_send_job_status=""
 	fi
 	case $l_reap_send_job_status in
-	0 | [1-9] | [1-9][0-9] | 1[0-9][0-9] | 2[0-4][0-9] | 25[0-5]) ;;
-	*)
-		# The job shell died before recording its status.
+	0) ;;
+	0* | '' | ????* | *[!0123456789]*)
+		# The job shell died before recording a valid exit status.
 		l_reap_send_job_status=125
+		;;
+	*)
+		[ "$l_reap_send_job_status" -le 255 ] || l_reap_send_job_status=125
 		;;
 	esac
 	if [ "$l_reap_send_job_status" -eq 0 ]; then
 		# jobs may discard a completed child's wait entry (notably dash).
 		# The private status file is the pipeline result; wait only reaps.
 		wait "$l_reap_send_job_pid" 2>/dev/null || :
-		zxfer_unregister_send_job "$l_reap_send_job_id"
+		l_reap_remaining_jobs=""
+		while IFS= read -r l_reap_job_row; do
+			[ -n "$l_reap_job_row" ] || continue
+			case $l_reap_job_row in
+			"$l_reap_send_job_id	"*) continue ;;
+			esac
+			l_reap_remaining_jobs=${l_reap_remaining_jobs:+$l_reap_remaining_jobs$ZXFER_LF}$l_reap_job_row
+		done <<EOF
+${g_zxfer_send_jobs:-}
+EOF
+		g_zxfer_send_jobs=$l_reap_remaining_jobs
+		[ "${g_count_zfs_send_jobs:-0}" -le 0 ] ||
+			g_count_zfs_send_jobs=$((g_count_zfs_send_jobs - 1))
 		zxfer_finish_destination_receive "$l_reap_send_job_dest"
 		return 0
 	fi
@@ -638,9 +632,8 @@ EOF
 	# Poll rather than sleep the whole grace window so an interrupted run
 	# exits as soon as the running job shells are gone.
 	zxfer_init_send_job_poll_interval
-	# Keep only a plain number before it reaches arithmetic.
-	l_abort_send_jobs_ticks=${g_zxfer_send_job_abort_grace_seconds##*[!0-9]*}
-	l_abort_send_jobs_ticks=${l_abort_send_jobs_ticks:-1}
+	l_abort_send_jobs_ticks=${g_zxfer_send_job_abort_grace_seconds:-1}
+	zxfer_is_uint "$l_abort_send_jobs_ticks" || l_abort_send_jobs_ticks=1
 	[ "$g_zxfer_send_job_poll_seconds" != 0.2 ] ||
 		l_abort_send_jobs_ticks=$((l_abort_send_jobs_ticks * 5))
 	while [ "$l_abort_send_jobs_ticks" -gt 0 ]; do
@@ -660,6 +653,8 @@ EOF
 		l_abort_send_jobs_ticks=$((l_abort_send_jobs_ticks - 1))
 	done
 
+	l_abort_surviving_rows=""
+	l_abort_surviving_count=0
 	while IFS='	' read -r l_abort_send_jobs_id l_abort_send_jobs_pid l_abort_send_jobs_dest l_abort_send_jobs_status_file l_abort_send_jobs_snapshot l_abort_send_jobs_scope; do
 		[ -n "$l_abort_send_jobs_id" ] || continue
 		l_abort_send_jobs_signal_status=0
@@ -670,13 +665,16 @@ EOF
 				l_abort_send_jobs_status=$l_abort_send_jobs_signal_status
 				g_zxfer_send_job_abort_failure_message="Failed to stop send/receive job [$l_abort_send_jobs_snapshot -> $l_abort_send_jobs_dest] (PID $l_abort_send_jobs_pid)."
 			fi
+			l_abort_surviving_rows=${l_abort_surviving_rows:+$l_abort_surviving_rows$ZXFER_LF}$l_abort_send_jobs_id$ZXFER_TAB$l_abort_send_jobs_pid$ZXFER_TAB$l_abort_send_jobs_dest$ZXFER_TAB$l_abort_send_jobs_status_file$ZXFER_TAB$l_abort_send_jobs_snapshot$ZXFER_TAB$l_abort_send_jobs_scope
+			l_abort_surviving_count=$((l_abort_surviving_count + 1))
 			continue
 		fi
 		wait "$l_abort_send_jobs_pid" 2>/dev/null || :
-		zxfer_unregister_send_job "$l_abort_send_jobs_id"
 	done <<EOF
 $l_abort_send_jobs_rows
 EOF
+	g_zxfer_send_jobs=$l_abort_surviving_rows
+	g_count_zfs_send_jobs=$l_abort_surviving_count
 
 	return "$l_abort_send_jobs_status"
 }

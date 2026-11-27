@@ -100,6 +100,18 @@ EOF
 		"$output" "isolated budget passed"
 	assertNotContains "A dependency-free target should never try to create the configured lint cache." \
 		"$output" "not a directory"
+
+	l_copied_root="$TEST_TMPDIR/copied-root"
+	mkdir -p "$l_copied_root/tests"
+	cp "$RUN_LINT_BIN" "$l_copied_root/tests/run_lint.sh"
+	chmod +x "$l_copied_root/tests/run_lint.sh"
+	copied_status=0
+	copied_output=$("$l_copied_root/tests/run_lint.sh" --help 2>&1) ||
+		copied_status=$?
+	assertEquals "A standalone copy without runner_common.sh should exit 1 cleanly." \
+		1 "$copied_status"
+	assertContains "Missing runner_common.sh should emit an explicit diagnostic." \
+		"$copied_output" "Unable to locate tests/helpers/runner_common.sh"
 }
 
 test_run_lint_shell_targets_include_existing_sources_once_and_skip_deletions() {
@@ -248,6 +260,36 @@ EOF
 		"$EVAL_POLICY_OUTPUT" "tests/helpers/process_capture.sh:7: eval in a shared test helper"
 	assertContains "An eval in another helper should be named." \
 		"$EVAL_POLICY_OUTPUT" "tests/helpers/new_capture.sh:2: eval in a shared test helper"
+}
+
+test_run_lint_sha256_file_distinguishes_missing_tool_from_unreadable_file() {
+	l_sha_fake_bin="$TEST_TMPDIR/sha-fake-bin"
+	l_sha_tool_root="$TEST_TMPDIR/sha-tool-root"
+	write_fake_lint_host_uname "$l_sha_fake_bin"
+	printf '#!/bin/sh\nexit 0\n' >"$l_sha_fake_bin/curl"
+	chmod +x "$l_sha_fake_bin/curl"
+
+	l_missing_status=0
+	l_missing_file_out=$(
+		PATH="$l_sha_fake_bin:${PATH:-/usr/bin:/bin}" \
+			ZXFER_LINT_TOOL_DIR="$l_sha_tool_root" \
+			"$RUN_LINT_BIN" --bootstrap-only shfmt 2>&1
+	) || l_missing_status=$?
+	assertEquals "Missing downloaded files must fail sha256_file." 1 "$l_missing_status"
+	assertContains "Missing downloaded files must report checksum failure rather than missing tool." \
+		"$l_missing_file_out" "Failed to compute SHA-256 checksum for"
+
+	l_vm_status=0
+	l_vm_out=$(
+		sh -c '
+			. "$1/tests/helpers/runner_common.sh"
+			. "$1/tests/vm/common.sh"
+			zxfer_vm_sha256_file "$2/does-not-exist"
+		' sh "$ZXFER_ROOT" "$TEST_TMPDIR" 2>&1
+	) || l_vm_status=$?
+	assertEquals "Missing files must fail zxfer_vm_sha256_file." 1 "$l_vm_status"
+	assertContains "zxfer_vm_sha256_file must report checksum failure rather than missing tool." \
+		"$l_vm_out" "Failed to compute SHA-256 checksum for"
 }
 
 # shellcheck source=tests/shunit2/shunit2

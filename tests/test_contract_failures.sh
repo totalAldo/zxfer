@@ -99,27 +99,6 @@ contract_setup() {
 	CONTRACT_BACKUP_CHECK=""
 }
 
-# Purpose: Give one destination child a destination-only snapshot @snap9
-# (created 1700000009, Nov 2023) in the recursive listing, plus the
-# creation-time rule -d planning issues. The child's depth-1 listing and the
-# existence probe answer the state after the destroy, which is when zxfer
-# reads them.
-# Usage: contract_add_extra_child_snapshot <child-index>
-contract_add_extra_child_snapshot() {
-	l_extra_child="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child$1"
-	printf '%s@snap9\t9999900%s09000000007\n' "$l_extra_child" "$1" \
-		>>"$STATE_DIR/dst_snapshots.list" ||
-		fail "Unable to append the destination-only snapshot."
-	awk -F'\t' -v child="$l_extra_child@" \
-		'index($1, child) == 1 { sub(/^.*@/, "", $1); print child $1 "\t" 1700000000 + substr($1, 5) }' \
-		"$STATE_DIR/dst_snapshots.list" >"$STATE_DIR/dst_child$1_creation.list" ||
-		fail "Unable to write the creation-time fixture."
-	contract_add_child_existence_rule "$1"
-	printf 'get -H -o name,value -p creation %s@*\tdst_child%s_creation.list\t0\n' \
-		"$l_extra_child" "$1" >>"$STATE_DIR/manifest" ||
-		fail "Unable to append the creation-time rule."
-}
-
 # Purpose: Answer the live existence probe (`zfs list -H`) for one
 # destination child, which zxfer issues once the child has been changed.
 # Usage: contract_add_child_existence_rule <child-index>
@@ -133,42 +112,12 @@ contract_add_child_existence_rule() {
 		fail "Unable to append the child existence rule."
 }
 
-# Purpose: Diverge child1's newest snapshot (same name @snap3, guid
-# 9999900103000000007) until the convergence receive heals it: one 'once'
-# rule serves the diverged recursive listing to the no-op proof (discovery
-# reuses it), one serves the post-destroy depth-1 listing to the recheck
-# between the destroy and the rollback, and the post-receive verification
-# falls through to the aligned listing the receive would have produced.
-# Usage: contract_make_child_diverged_until_receive (on a noop STATE_DIR)
-contract_make_child_diverged_until_receive() {
-	l_diverged_child="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1"
-	awk -F'\t' -v name="$l_diverged_child@snap3" 'BEGIN { OFS = "\t" }
-		$1 == name { $2 = "9999900103000000007" }
-		{ print }
-	' "$STATE_DIR/dst_snapshots.list" >"$STATE_DIR/dst_snapshots_diverged.list" ||
-		fail "Unable to write the diverged listing."
-	grep -v "^$l_diverged_child@snap3" "$STATE_DIR/dst_d1_1.list" \
-		>"$STATE_DIR/dst_d1_1_post_destroy.list" ||
-		fail "Unable to write the post-destroy listing."
-	printf '%s@snap2\t1700000002\n%s@snap3\t1700000003\n' \
-		"$l_diverged_child" "$l_diverged_child" \
-		>"$STATE_DIR/dst_child1_creation.list" ||
-		fail "Unable to write the creation-time fixture."
-	awk -F'\t' \
-		-v key="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
-		-v d1_key="list -H -d 1 -o name,guid -t snapshot $l_diverged_child" '
-		BEGIN { OFS = "\t" }
-		$1 == key { print key, "dst_snapshots_diverged.list", 0, "once" }
-		$1 == d1_key { print d1_key, "dst_d1_1_post_destroy.list", 0, "once" }
-		{ print }
-	' "$STATE_DIR/manifest" >"$STATE_DIR/manifest.new" ||
-		fail "Unable to stage the consumable diverged listing rules."
-	mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
-		fail "Unable to install the consumable diverged listing rules."
-	printf 'get -H -o name,value -p creation %s@*\tdst_child1_creation.list\t0\n' \
-		"$l_diverged_child" >>"$STATE_DIR/manifest" ||
-		fail "Unable to append the creation-time rule."
-	contract_add_child_existence_rule 1
+# Purpose: Give one destination child a destination-only snapshot @snap9 plus
+# the creation-time and live-existence rules -d planning issues.
+# Usage: contract_add_extra_child_snapshot <child-index>
+contract_add_extra_child_snapshot() {
+	planning_add_extra_destination_snapshot "/child$1" snap9 1700000009 snap2 1700000002
+	contract_add_child_existence_rule "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -866,7 +815,7 @@ test_delete_fails_closed_at_every_zfs_call() {
 test_diverged_child_convergence_fails_closed_at_every_zfs_call() {
 	contract_setup
 	planning_clone_state "$FIXTURE_DIR/noop" diverged_child
-	contract_make_child_diverged_until_receive
+	planning_make_child1_diverged_until_receive
 	contract_sweep diverged_child zfs -d -F -R \
 		"$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 }
@@ -1195,7 +1144,7 @@ contract_setup_migration() {
 # reads: the property answers of the -P pass -m implies, every source
 # dataset mounted, and unmounts that succeed. Empties the zfs log.
 # Usage: contract_migration_state <state-name>; make a rule win over these
-# with contract_prepend_rules.
+# with blackbox_prepend_manifest_rule.
 contract_migration_state() {
 	planning_clone_state "$FIXTURE_DIR/incremental" "$1"
 	planning_add_property_transfer_fixtures
@@ -1205,19 +1154,6 @@ contract_migration_state() {
 		fail "Unable to append the -m manifest rules."
 	fi
 	: >"$ZFS_LOG"
-}
-
-# Purpose: Put manifest rules in STATE_DIR ahead of the others; the first
-# matching rule wins.
-# Usage: contract_prepend_rules <rule>...; one manifest line each.
-contract_prepend_rules() {
-	if ! {
-		printf '%s\n' "$@"
-		cat "$STATE_DIR/manifest"
-	} >"$STATE_DIR/manifest.new" ||
-		! mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest"; then
-		fail "Unable to prepend the manifest rules."
-	fi
 }
 
 # Purpose: Run ./zxfer recursively against STATE_DIR, refusing to run without
@@ -1395,7 +1331,7 @@ test_migrate_checks_every_source_is_mounted_before_unmounting_one() {
 	l_src=$ZXFER_MOCKBIN_SOURCE_ROOT
 	printf 'no\n' >"$STATE_DIR/mounted_no.list" ||
 		fail "Unable to write the unmounted answer."
-	contract_prepend_rules "get -Ho value mounted $l_src/child2	mounted_no.list	0"
+	blackbox_prepend_manifest_rule "get -Ho value mounted $l_src/child2	mounted_no.list	0"
 
 	contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
 	l_status=$?
@@ -1417,7 +1353,7 @@ svcadm enable $CONTRACT_SVC_ONE
 svcadm enable $CONTRACT_SVC_TWO" "$(contract_migration_steps)"
 
 	contract_migration_state migrate_mount_check_failure
-	contract_prepend_rules "get -Ho value mounted $l_src/child1	-	1"
+	blackbox_prepend_manifest_rule "get -Ho value mounted $l_src/child1	-	1"
 	contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
 	l_status=$?
 
@@ -1438,7 +1374,7 @@ svcadm enable $CONTRACT_SVC_TWO" "$(contract_migration_steps)"
 test_migrate_starts_services_again_when_an_unmount_fails() {
 	contract_setup_migration migrate_unmount_failure
 	l_src=$ZXFER_MOCKBIN_SOURCE_ROOT
-	contract_prepend_rules "unmount $l_src/child1	-	1"
+	blackbox_prepend_manifest_rule "unmount $l_src/child1	-	1"
 
 	contract_run_migration -m -c "$CONTRACT_SVC_ONE $CONTRACT_SVC_TWO"
 	l_status=$?
@@ -1499,7 +1435,7 @@ test_migrate_keeps_the_first_failure_when_a_service_cannot_start_at_exit() {
 	contract_setup_migration migrate_exit_start_failure
 	l_listing="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
 	# The discovery after the -m snapshot fails.
-	contract_prepend_rules "$l_listing	dst_snapshots.list	0	once" \
+	blackbox_prepend_manifest_rule "$l_listing	dst_snapshots.list	0	once" \
 		"$l_listing	-	2"
 
 	(

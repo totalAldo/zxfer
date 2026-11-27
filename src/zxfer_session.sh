@@ -60,8 +60,8 @@
 # and only assigns: nothing here signals a process, contacts a host, removes a
 # path or restarts a service.
 zxfer_reset_session_state() {
-	# Dependency commands go first: the ssh and remote-host resets copy
-	# g_cmd_zfs and probe g_cmd_ssh, so neither may keep an inherited value.
+	# Dependency commands go first: the remote-host reset copies g_cmd_zfs, so
+	# it must not keep an inherited value.
 	zxfer_reset_dependency_state
 	# CLI defaults make early trap decisions inert; the failure reset keeps
 	# the launcher-captured original invocation.
@@ -77,16 +77,12 @@ zxfer_reset_session_state() {
 	zxfer_reset_migration_service_state
 	zxfer_reset_profile_state
 	zxfer_reset_replication_runtime_state
-	zxfer_reset_destination_existence_cache
-	zxfer_reset_live_destination_listing_state
-	zxfer_reset_snapshot_producer_session_state
-	zxfer_reset_snapshot_discovery_state
-	zxfer_reset_snapshot_plan_state
-	zxfer_reset_snapshot_delete_artifact_state
+	zxfer_reset_destination_session_state
+	zxfer_reset_snapshot_discovery_session_state
+	zxfer_reset_snapshot_plan_session_state
 	zxfer_reset_backup_metadata_state
 	zxfer_reset_property_runtime_state
-	zxfer_reset_property_iteration_caches
-	zxfer_reset_property_read_state
+	zxfer_reset_property_session_state
 	zxfer_reset_remote_host_state
 
 	g_zxfer_version="2.0.20261119"
@@ -139,7 +135,7 @@ zxfer_trap_exit() {
 	set +C +f
 	IFS=" $ZXFER_TAB$ZXFER_LF"
 	case ${g_zxfer_run_umask:-} in
-	'' | *[!0-7]*) ;;
+	'' | *[!01234567]*) ;;
 	*) umask "$g_zxfer_run_umask" ;;
 	esac
 	# After a signal, $? is the status of the command it interrupted (0 after
@@ -262,38 +258,6 @@ zxfer_init_endpoint_execution_context() {
 	esac
 }
 
-# Purpose: Resolve the cat helper that -e reads backup metadata with, locally
-# or on the -O host.
-# Usage: Called by zxfer_init_variables after the endpoint contexts.
-zxfer_init_restore_property_helpers() {
-	[ "$g_option_e_restore_property_mode" -eq 1 ] || return
-
-	if [ "$g_option_O_origin_host" = "" ]; then
-		zxfer_require_tool cat
-		g_cmd_cat=$g_zxfer_required_tool_result
-		return
-	fi
-
-	if [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
-		[ -n "${g_cmd_cat:-}" ] || g_cmd_cat='cat'
-		zxfer_echoV "Dry run: skipping live remote backup-restore helper validation."
-		return
-	fi
-
-	zxfer_resolve_remote_required_tool "$g_option_O_origin_host" cat cat source ||
-		zxfer_throw_dependency_error "$g_zxfer_required_tool_result" "$?"
-	g_cmd_cat=$g_zxfer_required_tool_result
-}
-
-# Purpose: Prefer gawk on SunOS, the established compatibility path.
-# Usage: Called by zxfer_init_variables once g_zxfer_local_os is set.
-zxfer_init_local_awk_compatibility() {
-	[ "$g_zxfer_local_os" = "SunOS" ] || return 0
-	if zxfer_find_tool_in_path gawk "$g_zxfer_secure_path"; then
-		g_cmd_awk=$g_zxfer_tool_path_result
-	fi
-}
-
 # Purpose: Connect the -O and -T hosts: resolve ssh, open each role's control
 # master, then probe each host's capabilities over it.
 # Usage: Called after CLI validation and before zxfer_init_variables, so every
@@ -334,7 +298,8 @@ zxfer_prepare_remote_host_connections() {
 	g_zxfer_profile_ssh_setup_ms=$((g_zxfer_profile_ssh_setup_ms + g_zxfer_profile_elapsed_ms))
 }
 
-# Purpose: Resolve both endpoints' execution context after CLI validation.
+# Purpose: Resolve both endpoints' execution context, -e cat helper, SunOS gawk
+# preference, and readonly property policy after CLI validation.
 # Usage: Called by zxfer_session_run after zxfer_prepare_remote_host_connections.
 zxfer_init_variables() {
 	zxfer_get_os "" >/dev/null ||
@@ -345,8 +310,23 @@ zxfer_init_variables() {
 	zxfer_init_endpoint_execution_context origin
 	zxfer_init_endpoint_execution_context target
 	zxfer_refresh_remote_zfs_commands
-	zxfer_init_restore_property_helpers
-	zxfer_init_local_awk_compatibility
+	if [ "$g_option_e_restore_property_mode" -eq 1 ]; then
+		if [ -z "$g_option_O_origin_host" ]; then
+			zxfer_require_tool cat
+			g_cmd_cat=$g_zxfer_required_tool_result
+		elif [ "${g_option_n_dryrun:-0}" -eq 1 ]; then
+			[ -n "${g_cmd_cat:-}" ] || g_cmd_cat="cat"
+			zxfer_echoV "Dry run: skipping live remote backup-restore helper validation."
+		else
+			zxfer_resolve_remote_required_tool "$g_option_O_origin_host" cat cat source ||
+				zxfer_throw_dependency_error "$g_zxfer_required_tool_result" "$?"
+			g_cmd_cat=$g_zxfer_required_tool_result
+		fi
+	fi
+	if [ "$g_zxfer_local_os" = "SunOS" ] &&
+		zxfer_find_tool_in_path gawk "$g_zxfer_secure_path"; then
+		g_cmd_awk=$g_zxfer_tool_path_result
+	fi
 	zxfer_prepare_readonly_property_policy
 }
 

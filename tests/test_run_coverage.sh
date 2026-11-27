@@ -216,36 +216,41 @@ EOS
 		"$trace" "+$l_root/src/zxfer_mod.sh:2: printf"
 }
 
-test_run_coverage_appends_total_summary_row() {
-	l_summary_file="$TEST_TMPDIR/summary.tsv"
-	cat >"$l_summary_file" <<'EOF'
-80.00	10	8	2	src/a.sh
-50.00	4	2	2	src/b.sh
+test_run_coverage_render_bash_xtrace_report_emits_single_aggregate_total_row() {
+	prepare_coverage_fixture total-row
+	l_second_file="$l_fake_root/src/second.sh"
+	printf '%s\n%s\n' "$l_source_file" "$l_second_file" >"$l_target_list_file"
+	cat >"$l_source_file" <<'EOF'
+#!/bin/sh
+printf '%s\n' a1
+printf '%s\n' a2
+printf '%s\n' a3
+printf '%s\n' a4
 EOF
-
-	output=$(run_coverage_helper 'append_total_summary_row "$1"; cat "$1"' "$l_summary_file")
-
-	assertContains "The total-row helper should preserve the existing per-file entries." \
-		"$output" "80.00	10	8	2	src/a.sh"
-	assertContains "The total-row helper should append an aggregate TOTAL row." \
-		"$output" "71.43	14	10	4	TOTAL"
-}
-
-test_run_coverage_appends_total_summary_row_replaces_existing_total() {
-	l_summary_file="$TEST_TMPDIR/summary-existing-total.tsv"
-	cat >"$l_summary_file" <<'EOF'
-80.00	10	8	2	src/a.sh
-50.00	4	2	2	src/b.sh
-71.43	14	10	4	TOTAL
+	cat >"$l_second_file" <<'EOF'
+#!/bin/sh
+printf '%s\n' b1
+printf '%s\n' b2
 EOF
+	cat >"$l_trace_file" <<EOF
++$l_source_file:2: printf
++$l_source_file:3: printf
++$l_source_file:4: printf
++$l_second_file:2: printf
+EOF
+	printf '99.00\t1\t1\t0\tTOTAL\n' >"$l_summary_file"
 
-	output=$(run_coverage_helper 'append_total_summary_row "$1"; cat "$1"' "$l_summary_file")
-	total_count=$(printf '%s\n' "$output" | grep -c 'TOTAL$')
+	output=$(render_coverage_fixture)
+	total_count=$(grep -c 'TOTAL$' "$l_summary_file")
 
-	assertEquals "The total-row helper should keep only one aggregate TOTAL row when rerun." \
-		"1" "$total_count"
-	assertContains "The recomputed TOTAL row should still reflect only per-file rows." \
-		"$output" "71.43	14	10	4	TOTAL"
+	assertEquals "Report rendering should emit exactly one aggregate TOTAL row even when overwriting an older summary." \
+		1 "$total_count"
+	assertContains "Report rendering should emit per-file rows before TOTAL." \
+		"$output" "75.00	4	3	1	src/fake.sh"
+	assertContains "Report rendering should emit the second per-file row." \
+		"$output" "50.00	2	1	1	src/second.sh"
+	assertContains "Report rendering should compute the aggregate TOTAL row in the same pass." \
+		"$output" "66.67	6	4	2	TOTAL"
 }
 
 test_run_coverage_render_bash_xtrace_report_uses_repo_relative_paths() {

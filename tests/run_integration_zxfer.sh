@@ -38,6 +38,8 @@ TEST_POOL_RUN_PROP="org.zxfer:run"
 TEST_POOL_VDEV_PROP="org.zxfer:vdev"
 TEST_RUN_ID=""
 
+# shellcheck source=tests/helpers/runner_common.sh
+. "$INTEGRATION_TESTS_DIR/helpers/runner_common.sh"
 # shellcheck source=tests/helpers/zfs_test_reporting.sh
 . "$INTEGRATION_TESTS_DIR/helpers/zfs_test_reporting.sh"
 # shellcheck source=tests/helpers/zfs_test_host.sh
@@ -85,32 +87,7 @@ EOF
 }
 
 append_test_names() {
-	l_current=$1
-	l_spec=$2
-	l_result=$l_current
-	l_tests=
-
-	[ -n "$l_spec" ] || {
-		printf '%s\n' "$l_result"
-		return
-	}
-
-	l_tests=$(printf '%s\n' "$l_spec" | tr ',' ' ')
-	for l_test in $l_tests; do
-		[ -n "$l_test" ] || continue
-		case " $l_result " in
-		*" $l_test "*) ;;
-		*)
-			if [ -n "$l_result" ]; then
-				l_result="$l_result $l_test"
-			else
-				l_result=$l_test
-			fi
-			;;
-		esac
-	done
-
-	printf '%s\n' "$l_result"
+	zxfer_runner_append_csv_words "$1" "$2"
 }
 
 append_skip_test() {
@@ -311,35 +288,46 @@ append_failed_test() {
 	esac
 }
 
+write_confirmation_prompt_helper() {
+	l_prompt_helper=$1
+	cat >"$l_prompt_helper" <<'EOF'
+confirm_wrapped_command() {
+	l_confirm_target=$1
+	shift
+	[ "${ZXFER_CONFIRM_EACH_COMMAND:-0}" = "1" ] || return 0
+	if [ ! -r /dev/tty ]; then
+		printf '%s\n' "Command confirmation requested but /dev/tty is unavailable." >&2
+		exit 1
+	fi
+	printf '%s\n' "About to run command:" >/dev/tty
+	printf '  %s\n' "$l_confirm_target" >/dev/tty
+	for l_arg in "$@"; do
+		printf '  %s\n' "$l_arg" >/dev/tty
+	done
+	printf '%s' "Approve? [y/N] " >/dev/tty
+	IFS= read -r l_reply </dev/tty || exit 1
+	case "$l_reply" in
+	y | Y | yes | YES) ;;
+	*)
+		printf '%s\n' "Declined command: $l_confirm_target" >&2
+		exit 1
+		;;
+	esac
+}
+EOF
+}
+
 write_command_confirmation_wrapper() {
 	l_cmd=$1
 	l_wrapper_path=$2
 
 	cat >"$l_wrapper_path" <<EOF
 #!/bin/sh
+set -eu
 l_cmd_name='$l_cmd'
 l_wrapper_dir='${ZXFER_CONFIRM_WRAPPER_DIR}'
-
-if [ "\${ZXFER_CONFIRM_EACH_COMMAND:-0}" = "1" ]; then
-	if [ ! -r /dev/tty ]; then
-		printf '%s\n' "Command confirmation requested but /dev/tty is unavailable." >&2
-		exit 1
-	fi
-	printf '%s\n' "About to run command:" >/dev/tty
-	printf '  %s\n' "\$l_cmd_name" >/dev/tty
-	for l_arg in "\$@"; do
-		printf '  %s\n' "\$l_arg" >/dev/tty
-	done
-	printf '%s' "Approve? [y/N] " >/dev/tty
-	IFS= read -r l_reply </dev/tty || exit 1
-	case "\$l_reply" in
-	y | Y | yes | YES) ;;
-	*)
-		printf '%s\n' "Declined command: \$l_cmd_name" >&2
-		exit 1
-		;;
-	esac
-fi
+. "\$l_wrapper_dir/.confirm_prompt.sh"
+confirm_wrapped_command "\$l_cmd_name" "\$@"
 
 l_search_path=
 l_oldifs=\$IFS
@@ -372,29 +360,11 @@ write_zxfer_confirmation_wrapper() {
 
 	cat >"$l_wrapper_path" <<EOF
 #!/bin/sh
+set -eu
 l_real_zxfer='${ZXFER_REAL_BIN}'
 l_wrapper_dir='${ZXFER_CONFIRM_WRAPPER_DIR}'
-
-if [ "\${ZXFER_CONFIRM_EACH_COMMAND:-0}" = "1" ]; then
-	if [ ! -r /dev/tty ]; then
-		printf '%s\n' "Command confirmation requested but /dev/tty is unavailable." >&2
-		exit 1
-	fi
-	printf '%s\n' "About to run command:" >/dev/tty
-	printf '  %s\n' "\$l_real_zxfer" >/dev/tty
-	for l_arg in "\$@"; do
-		printf '  %s\n' "\$l_arg" >/dev/tty
-	done
-	printf '%s' "Approve? [y/N] " >/dev/tty
-	IFS= read -r l_reply </dev/tty || exit 1
-	case "\$l_reply" in
-	y | Y | yes | YES) ;;
-	*)
-		printf '%s\n' "Declined command: \$l_real_zxfer" >&2
-		exit 1
-		;;
-	esac
-fi
+. "\$l_wrapper_dir/.confirm_prompt.sh"
+confirm_wrapped_command "\$l_real_zxfer" "\$@"
 
 case ":\${ZXFER_SECURE_PATH:-}:" in
 *:"\$l_wrapper_dir":*) ;;
@@ -439,6 +409,7 @@ setup_command_confirmation_wrappers() {
 	mkdir -p "$ZXFER_CONFIRM_WRAPPER_DIR"
 	export ZXFER_CONFIRM_WRAPPER_DIR ZXFER_CONFIRM_EACH_COMMAND
 
+	write_confirmation_prompt_helper "$ZXFER_CONFIRM_WRAPPER_DIR/.confirm_prompt.sh"
 	for l_cmd in $ZXFER_CONFIRM_COMMANDS; do
 		write_command_confirmation_wrapper "$l_cmd" "$ZXFER_CONFIRM_WRAPPER_DIR/$l_cmd"
 	done
@@ -455,7 +426,7 @@ get_file_mode_octal() {
 
 	if l_mode=$(stat -c '%a' "$l_path" 2>/dev/null); then
 		case "$l_mode" in
-		'' | *[!0-9]*) ;;
+		'' | *[!0123456789]*) ;;
 		*)
 			printf '%s\n' "$l_mode"
 			return 0
@@ -464,7 +435,7 @@ get_file_mode_octal() {
 	fi
 	if l_mode=$(stat -f '%OLp' "$l_path" 2>/dev/null); then
 		case "$l_mode" in
-		'' | *[!0-9]*) ;;
+		'' | *[!0123456789]*) ;;
 		*)
 			printf '%s\n' "$l_mode"
 			return 0
@@ -691,8 +662,8 @@ abort_integration_run() {
 }
 
 cleanup() {
-	set +e
 	l_exit_status=$?
+	set +e
 	l_cleanup_ok=1
 	l_preserve_reason=""
 	l_job_pids=$(ps -o pid= -o ppid= 2>/dev/null | awk -v ppid="$$" '
@@ -704,8 +675,7 @@ cleanup() {
 		# shellcheck disable=SC2086  # wait accepts individual PIDs
 		wait $l_job_pids 2>/dev/null || true
 	fi
-	destroy_test_pool_if_owned "source" "${SRC_POOL:-}" "${SRC_POOL_CREATED:-0}" "${SRC_IMG:-}" || l_cleanup_ok=0
-	destroy_test_pool_if_owned "destination" "${DEST_POOL:-}" "${DEST_POOL_CREATED:-0}" "${DEST_IMG:-}" || l_cleanup_ok=0
+	destroy_owned_test_pool_pair || l_cleanup_ok=0
 	if [ "$l_cleanup_ok" -ne 1 ]; then
 		l_preserve_reason="test pools were not fully cleaned up"
 	elif [ "$l_exit_status" -ne 0 ] && [ "${ZXFER_PRESERVE_WORKDIR_ON_FAILURE:-0}" = "1" ]; then
@@ -757,23 +727,7 @@ main() {
 			exit "$l_status"
 		fi
 	done
-	SRC_POOL=$(generate_test_pool_name "src")
-	DEST_POOL=$(generate_test_pool_name "dest")
-	SRC_MOUNT_ROOT="$WORKDIR/mnt/src"
-	DEST_MOUNT_ROOT="$WORKDIR/mnt/dest"
-	mkdir -p "$SRC_MOUNT_ROOT" "$DEST_MOUNT_ROOT"
-
-	SRC_IMG="$WORKDIR/${SRC_POOL}.img"
-	DEST_IMG="$WORKDIR/${DEST_POOL}.img"
-	create_sparse_file "$SRC_IMG" "$SPARSE_SIZE_MB"
-	create_sparse_file "$DEST_IMG" "$SPARSE_SIZE_MB"
-
-	log "Creating source pool $SRC_POOL"
-	create_test_pool "source" "$SRC_POOL" "$SRC_IMG" "$SRC_MOUNT_ROOT"
-	SRC_POOL_CREATED=1
-	log "Creating destination pool $DEST_POOL"
-	create_test_pool "destination" "$DEST_POOL" "$DEST_IMG" "$DEST_MOUNT_ROOT"
-	DEST_POOL_CREATED=1
+	create_test_pool_pair "src" "dest" "$SPARSE_SIZE_MB" log
 
 	TEST_SEQUENCE=$(build_requested_test_sequence)
 	# shellcheck disable=SC2086

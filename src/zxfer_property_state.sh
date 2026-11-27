@@ -44,8 +44,8 @@
 #   globals g_zxfer_normalized_dataset_properties(_cache_hit),
 #   g_zxfer_required_properties_result, g_zxfer_property_record_value/source,
 #   g_zxfer_encoded_property_value, g_zxfer_decoded_property_value (with the
-#   helper results g_zxfer_property_replace_result and
-#   g_zxfer_property_code_byte), g_zxfer_property_list_value_result,
+#   helper result g_zxfer_property_replace_result),
+#   g_zxfer_property_list_value_result,
 #   g_zxfer_property_display_list_result, g_zxfer_property_row_result and
 #   g_zxfer_property_row_payload_result
 #   and the shared failure text g_zxfer_property_error_result (the transfer
@@ -77,15 +77,12 @@
 # tombstone ahead of the dataset's rows; a create, set or inherit also strips
 # its descendants' lines, whose inherited values may have changed.
 
-# Purpose: Clear the shared property failure text and forget the property
-# read scratch files and the row store directory. The transfer module's
-# result globals need no reset here: each is cleared by the function that
-# publishes it.
-# Usage: Called once at session initialization.
-zxfer_reset_property_read_state() {
-	g_zxfer_property_error_result=""
-	g_zxfer_property_read_workspace=""
-	g_zxfer_property_row_dir=""
+# Purpose: Report whether this run transfers or overrides dataset properties.
+# Usage: zxfer_property_pass_is_enabled; true under -P (which -e, -k, and -m
+# also set) or non-empty -o.
+zxfer_property_pass_is_enabled() {
+	[ "${g_option_P_transfer_property:-0}" -eq 1 ] ||
+		[ -n "${g_option_o_override_property:-}" ]
 }
 
 # Purpose: Reset the per-iteration property tables, prefetch state, and lookup
@@ -98,7 +95,6 @@ zxfer_reset_property_iteration_caches() {
 	g_zxfer_normalized_dataset_properties=""
 	g_zxfer_normalized_dataset_properties_cache_hit=0
 	g_zxfer_required_properties_result=""
-	g_zxfer_required_property_probe_result=""
 	g_zxfer_property_row_result=""
 	g_zxfer_property_row_payload_result=""
 	g_zxfer_property_row_count=0
@@ -110,6 +106,16 @@ zxfer_reset_property_iteration_caches() {
 	g_zxfer_destination_property_tree_prefetch_state=0
 }
 
+# Purpose: Reset all property read scratch, row store handles, and iteration
+# caches for a new session.
+# Usage: zxfer_reset_property_session_state, from session initialization.
+zxfer_reset_property_session_state() {
+	g_zxfer_property_error_result=""
+	g_zxfer_property_read_workspace=""
+	g_zxfer_property_row_dir=""
+	zxfer_reset_property_iteration_caches
+}
+
 # Purpose: Arm (or disarm) the recursive property prefetch for both sides from
 # the current options and dataset context.
 # Usage: zxfer_refresh_property_tree_prefetch_context, when an iteration
@@ -119,11 +125,7 @@ zxfer_refresh_property_tree_prefetch_context() {
 	g_zxfer_source_property_tree_prefetch_state=0
 	g_zxfer_destination_property_tree_prefetch_root=""
 	g_zxfer_destination_property_tree_prefetch_state=0
-	if [ "${g_option_R_recursive:-}" = "" ] ||
-		{ [ "${g_option_P_transfer_property:-0}" -ne 1 ] &&
-			[ -z "${g_option_o_override_property:-}" ]; }; then
-		return
-	fi
+	[ -n "${g_option_R_recursive:-}" ] && zxfer_property_pass_is_enabled || return 0
 
 	g_zxfer_source_property_tree_prefetch_root=${g_initial_source:-}
 	g_zxfer_destination_property_tree_prefetch_root=${g_destination:-}
@@ -413,32 +415,20 @@ zxfer_property_replace_all() {
 	g_zxfer_property_replace_result=$g_zxfer_property_replace_result$l_replace_rest
 }
 
-# Purpose: Give the byte one percent code of the property-list encoding
-# stands for.
-# Usage: zxfer_property_code_byte 0D|0A|09|3B|3D|2C|25; publishes
-# g_zxfer_property_code_byte.
-zxfer_property_code_byte() {
-	case $1 in
-	0D) g_zxfer_property_code_byte=$ZXFER_CR ;;
-	0A) g_zxfer_property_code_byte=$ZXFER_LF ;;
-	09) g_zxfer_property_code_byte=$ZXFER_TAB ;;
-	3B) g_zxfer_property_code_byte=';' ;;
-	3D) g_zxfer_property_code_byte='=' ;;
-	2C) g_zxfer_property_code_byte=',' ;;
-	25) g_zxfer_property_code_byte='%' ;;
-	esac
-}
-
 # Purpose: Percent-encode one raw property value without forking, as the AWK
 # encode_value does (% first).
 # Usage: zxfer_encode_property_value VALUE; publishes
 # g_zxfer_encoded_property_value.
 zxfer_encode_property_value() {
 	g_zxfer_encoded_property_value=$1
-	for l_encode_code in 25 2C 3D 3B 09 0D 0A; do
-		zxfer_property_code_byte "$l_encode_code"
+	case $1 in
+	*%* | *,* | *=* | *\;* | *"$ZXFER_TAB"* | *"$ZXFER_CR"* | *"$ZXFER_LF"*) ;;
+	*) return 0 ;;
+	esac
+	for l_encode_pair in "%:%25" ",:%2C" "=:%3D" ";:%3B" \
+		"$ZXFER_TAB:%09" "$ZXFER_CR:%0D" "$ZXFER_LF:%0A"; do
 		zxfer_property_replace_all "$g_zxfer_encoded_property_value" \
-			"$g_zxfer_property_code_byte" "%$l_encode_code"
+			"${l_encode_pair%%:*}" "${l_encode_pair#*:}"
 		g_zxfer_encoded_property_value=$g_zxfer_property_replace_result
 	done
 }
@@ -453,10 +443,10 @@ zxfer_decode_property_value() {
 	*%*) ;;
 	*) return 0 ;;
 	esac
-	for l_decode_code in 0D 0A 09 3B 3D 2C 25; do
-		zxfer_property_code_byte "$l_decode_code"
+	for l_decode_pair in "%0D:$ZXFER_CR" "%0A:$ZXFER_LF" "%09:$ZXFER_TAB" \
+		"%3B:;" "%3D:=" "%2C:," "%25:%"; do
 		zxfer_property_replace_all "$g_zxfer_decoded_property_value" \
-			"%$l_decode_code" "$g_zxfer_property_code_byte"
+			"${l_decode_pair%%:*}" "${l_decode_pair#*:}"
 		g_zxfer_decoded_property_value=$g_zxfer_property_replace_result
 	done
 }
@@ -565,7 +555,7 @@ zxfer_read_property_row() {
 	g_zxfer_property_row_payload_result=""
 	# A row name is one letter and a number.
 	case $1 in
-	'' | ? | [!a-z]* | ?*[!0-9]*) return 1 ;;
+	'' | ? | [!abcdefghijklmnopqrstuvwxyz]* | ?*[!0123456789]*) return 1 ;;
 	esac
 	[ -n "${2:-${g_zxfer_property_row_dir:-}}" ] || return 1
 	# dash's read takes the file one byte at a time, but only this row.
@@ -588,6 +578,16 @@ zxfer_store_property_row() {
 		return 1
 	g_zxfer_property_row_count=${l_store_row#p}
 	g_zxfer_property_row_result=$l_store_row
+}
+
+# Purpose: Prepend index lines (with a leading LF) to one side's property table.
+# Usage: zxfer_property_table_prepend source|destination LINES_WITH_LEADING_LF.
+zxfer_property_table_prepend() {
+	[ -n "$2" ] || return 0
+	case $1 in
+	source) g_zxfer_source_property_table=$2${g_zxfer_source_property_table:-$ZXFER_LF} ;;
+	destination) g_zxfer_destination_property_table=$2${g_zxfer_destination_property_table:-$ZXFER_LF} ;;
+	esac
 }
 
 # Purpose: Find one dataset's list in one side's table.
@@ -792,22 +792,14 @@ zxfer_prefetch_recursive_normalized_properties() {
 		l_prefetch_last=${l_prefetch_index##*"$ZXFER_LF"}
 		l_prefetch_last=${l_prefetch_last%%"$ZXFER_TAB"*}
 		case ${l_prefetch_last#p} in
-		'' | *[!0-9]*) return 1 ;;
+		'' | *[!0123456789]*) return 1 ;;
 		esac
 		g_zxfer_property_row_count=${l_prefetch_last#p}
-		l_prefetch_index=$ZXFER_LF$l_prefetch_index
+		zxfer_property_table_prepend "$l_prefetch_side" "$ZXFER_LF$l_prefetch_index"
 	fi
 	case $l_prefetch_side in
-	source)
-		[ -z "$l_prefetch_index" ] ||
-			g_zxfer_source_property_table=$l_prefetch_index${g_zxfer_source_property_table:-$ZXFER_LF}
-		g_zxfer_source_property_tree_prefetch_state=1
-		;;
-	destination)
-		[ -z "$l_prefetch_index" ] ||
-			g_zxfer_destination_property_table=$l_prefetch_index${g_zxfer_destination_property_table:-$ZXFER_LF}
-		g_zxfer_destination_property_tree_prefetch_state=1
-		;;
+	source) g_zxfer_source_property_tree_prefetch_state=1 ;;
+	destination) g_zxfer_destination_property_tree_prefetch_state=1 ;;
 	esac
 }
 
@@ -929,46 +921,13 @@ zxfer_load_normalized_dataset_properties() {
 	"" | *"$ZXFER_TAB"* | *"$ZXFER_LF"*) return 0 ;;
 	esac
 	zxfer_store_property_row "$g_zxfer_normalized_dataset_properties" || return 0
-	l_load_line=$ZXFER_LF$g_zxfer_property_row_result$ZXFER_TAB$l_load_dataset
-	case $l_load_side in
-	source) g_zxfer_source_property_table=$l_load_line${g_zxfer_source_property_table:-$ZXFER_LF} ;;
-	destination) g_zxfer_destination_property_table=$l_load_line${g_zxfer_destination_property_table:-$ZXFER_LF} ;;
-	esac
+	zxfer_property_table_prepend "$l_load_side" \
+		"$ZXFER_LF$g_zxfer_property_row_result$ZXFER_TAB$l_load_dataset"
 }
 
 ################################################################################
 # REQUIRED CREATION-TIME PROPERTY BACKFILL
 ################################################################################
-
-# Purpose: Probe one required creation-time property that `zfs get all` did
-# not report.
-# Usage: zxfer_probe_required_property DATASET PROPERTY source|destination;
-# publishes the serialized item in g_zxfer_required_property_probe_result
-# (empty when the platform reports the property as inapplicable or unknown)
-# or the failure message in g_zxfer_property_error_result with a non-zero
-# status.
-zxfer_probe_required_property() {
-	l_probe_dataset=$1
-	l_probe_property=$2
-
-	g_zxfer_required_property_probe_result=""
-	g_zxfer_profile_required_property_backfill_gets=$((g_zxfer_profile_required_property_backfill_gets + 1))
-	l_probe_status=0
-	zxfer_read_one_property "$3" "$l_probe_dataset" "$l_probe_property" -Hpo ||
-		l_probe_status=$?
-	if [ "$l_probe_status" -ne 0 ]; then
-		case $g_zxfer_property_error_result in
-		*"does not apply"* | *"invalid property"* | *"no such property"* | *"not supported"*)
-			g_zxfer_property_error_result=""
-			return 0
-			;;
-		esac
-		g_zxfer_property_error_result="Failed to retrieve required creation-time property [$l_probe_property] for dataset [$l_probe_dataset]: $g_zxfer_property_error_result"
-		return "$l_probe_status"
-	fi
-	zxfer_encode_property_value "$g_zxfer_property_record_value"
-	g_zxfer_required_property_probe_result=$l_probe_property=$g_zxfer_encoded_property_value=$g_zxfer_property_record_source
-}
 
 # Purpose: Append any required creation-time property missing from a property
 # list so the diff can enforce creation-time rules on every platform (some
@@ -986,6 +945,8 @@ zxfer_backfill_required_properties() {
 
 	g_zxfer_required_properties_result=$2
 	g_zxfer_property_error_result=""
+	[ -n "$3" ] || return 0
+
 	l_backfill_missing=""
 	l_backfill_rest=$3,
 	while [ -n "$l_backfill_rest" ]; do
@@ -1007,9 +968,27 @@ zxfer_backfill_required_properties() {
 	*,*)
 		g_zxfer_profile_required_property_backfill_gets=$((g_zxfer_profile_required_property_backfill_gets + 1))
 		if l_backfill_batch=$(zxfer_run_zfs_cmd_for_role "$l_backfill_side" get -Hpo property,value,source \
-			"$l_backfill_missing" "$l_backfill_dataset" 2>/dev/null </dev/null) &&
-			zxfer_append_required_properties_from_capture "$l_backfill_missing" "$l_backfill_batch"; then
-			return 0
+			"$l_backfill_missing" "$l_backfill_dataset" 2>/dev/null </dev/null); then
+			l_append_result=$g_zxfer_required_properties_result
+			l_append_names=$l_backfill_missing,
+			l_append_lines=$l_backfill_batch$ZXFER_LF
+			l_append_ok=1
+			while [ -n "$l_append_names" ]; do
+				l_append_name=${l_append_names%%,*}
+				l_append_names=${l_append_names#*,}
+				l_append_line=${l_append_lines%%"$ZXFER_LF"*}
+				l_append_lines=${l_append_lines#*"$ZXFER_LF"}
+				if ! zxfer_split_property_record "$l_append_name" "$l_append_line"; then
+					l_append_ok=0
+					break
+				fi
+				zxfer_encode_property_value "$g_zxfer_property_record_value"
+				l_append_result=${l_append_result:+$l_append_result,}$l_append_name=$g_zxfer_encoded_property_value=$g_zxfer_property_record_source
+			done
+			if [ "$l_append_ok" -eq 1 ] && [ -z "$l_append_lines" ]; then
+				g_zxfer_required_properties_result=$l_append_result
+				return 0
+			fi
 		fi
 		;;
 	esac
@@ -1018,33 +997,21 @@ zxfer_backfill_required_properties() {
 	while [ -n "$l_backfill_rest" ]; do
 		l_backfill_name=${l_backfill_rest%%,*}
 		l_backfill_rest=${l_backfill_rest#*,}
-		zxfer_probe_required_property "$l_backfill_dataset" "$l_backfill_name" "$l_backfill_side" ||
-			return "$?"
-		[ -n "$g_zxfer_required_property_probe_result" ] || continue
-		g_zxfer_required_properties_result=${g_zxfer_required_properties_result:+$g_zxfer_required_properties_result,}$g_zxfer_required_property_probe_result
-	done
-}
-
-# Purpose: Append the named properties from one comma-list `zfs get -Hpo
-# property,value,source` capture to g_zxfer_required_properties_result. The
-# names are the skeleton: zfs prints them in order, so the capture must hold
-# exactly one record line per name.
-# Usage: zxfer_append_required_properties_from_capture NAMES_CSV CAPTURE;
-# returns 1 without publishing on any other shape, so the backfill falls back
-# to per-property probes.
-zxfer_append_required_properties_from_capture() {
-	l_append_result=$g_zxfer_required_properties_result
-	l_append_names=$1,
-	l_append_lines=$2$ZXFER_LF
-	while [ -n "$l_append_names" ]; do
-		l_append_name=${l_append_names%%,*}
-		l_append_names=${l_append_names#*,}
-		l_append_line=${l_append_lines%%"$ZXFER_LF"*}
-		l_append_lines=${l_append_lines#*"$ZXFER_LF"}
-		zxfer_split_property_record "$l_append_name" "$l_append_line" || return 1
+		g_zxfer_profile_required_property_backfill_gets=$((g_zxfer_profile_required_property_backfill_gets + 1))
+		l_probe_status=0
+		zxfer_read_one_property "$l_backfill_side" "$l_backfill_dataset" "$l_backfill_name" -Hpo ||
+			l_probe_status=$?
+		if [ "$l_probe_status" -ne 0 ]; then
+			case $g_zxfer_property_error_result in
+			*"does not apply"* | *"invalid property"* | *"no such property"* | *"not supported"*)
+				g_zxfer_property_error_result=""
+				continue
+				;;
+			esac
+			g_zxfer_property_error_result="Failed to retrieve required creation-time property [$l_backfill_name] for dataset [$l_backfill_dataset]: $g_zxfer_property_error_result"
+			return "$l_probe_status"
+		fi
 		zxfer_encode_property_value "$g_zxfer_property_record_value"
-		l_append_result=${l_append_result:+$l_append_result,}$l_append_name=$g_zxfer_encoded_property_value=$g_zxfer_property_record_source
+		g_zxfer_required_properties_result=${g_zxfer_required_properties_result:+$g_zxfer_required_properties_result,}$l_backfill_name=$g_zxfer_encoded_property_value=$g_zxfer_property_record_source
 	done
-	[ -z "$l_append_lines" ] || return 1
-	g_zxfer_required_properties_result=$l_append_result
 }

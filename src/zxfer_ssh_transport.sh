@@ -51,9 +51,8 @@
 # mutates caches: sets g_cmd_ssh on first remote use; opens the per-run ssh
 #   control masters (each open is in the runtime cleanup-PID registry until
 #   it finishes) and closes them at exit.
-# returns via stdout: remote command output, the remote context label, and
-#   the commands rendered by zxfer_render_{source,destination}_zfs_command
-#   (each also publishes its result global).
+# returns via stdout: remote command output and the remote context label;
+#   role command renderers publish g_zxfer_shell_command_result.
 
 ZXFER_SSH_CONTROL_SOCKET_PATH_MAX=104
 ZXFER_SSH_CONTROL_SOCKET_TEMP_SUFFIX_SAMPLE=".Mvij6x1tYLn6woxm"
@@ -70,8 +69,8 @@ zxfer_ssh_supports_control_sockets() {
 }
 
 # Purpose: Record whether the local ssh supports control sockets.
-# Usage: Called at session reset and after ssh is resolved; sets
-# g_ssh_supports_control_sockets to 1 or 0.
+# Usage: Called by zxfer_prepare_remote_host_connections after ssh is resolved;
+# sets g_ssh_supports_control_sockets to 1 or 0.
 zxfer_refresh_ssh_control_socket_support_state() {
 	g_ssh_supports_control_sockets=0
 	if zxfer_ssh_supports_control_sockets; then
@@ -80,8 +79,8 @@ zxfer_refresh_ssh_control_socket_support_state() {
 }
 
 # Purpose: Reset all per-run ssh transport state before a new session.
-# Usage: Called by zxfer_reset_session_state after the dependency reset, so
-# g_cmd_ssh is empty and no ssh runs.
+# Usage: Called by zxfer_reset_session_state; clears cached policy, host specs,
+# control-socket paths, and support state without running ssh.
 zxfer_reset_ssh_transport_state() {
 	g_zxfer_ssh_transport_error=""
 	g_zxfer_ssh_transport_ready=""
@@ -105,7 +104,7 @@ zxfer_reset_ssh_transport_state() {
 	g_ssh_target_control_socket=""
 	g_zxfer_ssh_control_socket_dir_result=""
 	g_zxfer_ssh_control_socket_short_dir=""
-	zxfer_refresh_ssh_control_socket_support_state
+	g_ssh_supports_control_sockets=0
 }
 
 # Purpose: Resolve the local ssh on first remote use, so local-only runs never
@@ -229,24 +228,27 @@ zxfer_parse_ssh_host_spec() {
 # Usage: Called whenever -O/-T may have changed (CLI parsing, session setup);
 # a spec that needs shell quoting is a usage error with status 2.
 zxfer_refresh_remote_zfs_commands() {
-	if [ "${g_option_O_origin_host:-}" != "${g_zxfer_ssh_origin_spec:-}" ]; then
-		if zxfer_parse_ssh_host_spec "$g_option_O_origin_host"; then
-			g_zxfer_ssh_origin_spec=$g_option_O_origin_host
+	for l_refresh_role in origin target; do
+		if [ "$l_refresh_role" = origin ]; then
+			l_refresh_option=${g_option_O_origin_host:-}
+			l_refresh_cached=${g_zxfer_ssh_origin_spec:-}
+		else
+			l_refresh_option=${g_option_T_target_host:-}
+			l_refresh_cached=${g_zxfer_ssh_target_spec:-}
+		fi
+		[ "$l_refresh_option" != "$l_refresh_cached" ] || continue
+		zxfer_parse_ssh_host_spec "$l_refresh_option" ||
+			zxfer_throw_usage_error "$g_zxfer_ssh_shell_context_error_result" 2
+		if [ "$l_refresh_role" = origin ]; then
+			g_zxfer_ssh_origin_spec=$l_refresh_option
 			g_zxfer_ssh_origin_host=$g_zxfer_ssh_shell_host_result
 			g_zxfer_ssh_origin_wrapper=$g_zxfer_ssh_wrapper_result
 		else
-			zxfer_throw_usage_error "$g_zxfer_ssh_shell_context_error_result" 2
-		fi
-	fi
-	if [ "${g_option_T_target_host:-}" != "${g_zxfer_ssh_target_spec:-}" ]; then
-		if zxfer_parse_ssh_host_spec "$g_option_T_target_host"; then
-			g_zxfer_ssh_target_spec=$g_option_T_target_host
+			g_zxfer_ssh_target_spec=$l_refresh_option
 			g_zxfer_ssh_target_host=$g_zxfer_ssh_shell_host_result
 			g_zxfer_ssh_target_wrapper=$g_zxfer_ssh_wrapper_result
-		else
-			zxfer_throw_usage_error "$g_zxfer_ssh_shell_context_error_result" 2
 		fi
-	fi
+	done
 }
 
 # Purpose: Look up the ssh host and wrapper for a host spec, reusing the -O/-T
@@ -269,19 +271,6 @@ zxfer_resolve_ssh_host_spec() {
 ################################################################################
 # SSH COMMANDS
 ################################################################################
-
-# Purpose: Pick the control socket that serves a host spec.
-# Usage: zxfer_select_ssh_control_socket HOST_SPEC; publishes
-# g_zxfer_ssh_control_socket_result, empty when no role socket applies.
-zxfer_select_ssh_control_socket() {
-	g_zxfer_ssh_control_socket_result=""
-	[ -n "$1" ] || return 0
-	if [ "$1" = "${g_option_O_origin_host:-}" ] && [ -n "${g_ssh_origin_control_socket:-}" ]; then
-		g_zxfer_ssh_control_socket_result=$g_ssh_origin_control_socket
-	elif [ "$1" = "${g_option_T_target_host:-}" ]; then
-		g_zxfer_ssh_control_socket_result=${g_ssh_target_control_socket:-}
-	fi
-}
 
 # Purpose: Label a remote command with its role and host spec for -V output.
 # Usage: zxfer_get_remote_command_context_label HOST_SPEC [source|destination|other];
@@ -354,14 +343,20 @@ zxfer_ssh_shell_command_for_host() {
 	[ -n "$g_zxfer_ssh_shell_host_result" ] || return 1
 	[ -z "$g_zxfer_ssh_wrapper_result" ] ||
 		l_ssh_remote_cmd="$g_zxfer_ssh_wrapper_result $l_ssh_remote_cmd"
-	zxfer_select_ssh_control_socket "$l_ssh_host_spec"
+	l_ssh_control_socket=""
+	if [ "$l_ssh_host_spec" = "${g_option_O_origin_host:-}" ] &&
+		[ -n "${g_ssh_origin_control_socket:-}" ]; then
+		l_ssh_control_socket=$g_ssh_origin_control_socket
+	elif [ "$l_ssh_host_spec" = "${g_option_T_target_host:-}" ]; then
+		l_ssh_control_socket=${g_ssh_target_control_socket:-}
+	fi
 
 	zxfer_split_begin "$ZXFER_LF"
 	# shellcheck disable=SC2086 # Policy options are checked single-line tokens.
 	set -- "$g_cmd_ssh" $g_zxfer_ssh_policy_options
 	zxfer_split_end
-	[ -z "$g_zxfer_ssh_control_socket_result" ] ||
-		set -- "$@" -S "$g_zxfer_ssh_control_socket_result"
+	[ -z "$l_ssh_control_socket" ] ||
+		set -- "$@" -S "$l_ssh_control_socket"
 	set -- "$@" "$g_zxfer_ssh_shell_host_result" \
 		"$l_ssh_remote_cmd"
 
@@ -578,18 +573,30 @@ zxfer_run_destination_zfs_cmd() {
 	zxfer_run_zfs_cmd_for_role destination "$@"
 }
 
-# Purpose: Print the source-side zfs command.
-# Usage: zxfer_render_source_zfs_command ARG...
-zxfer_render_source_zfs_command() {
-	zxfer_render_zfs_command_for_role source "$@" || return
-	printf '%s' "$g_zxfer_shell_command_result"
-}
-
-# Purpose: Print the destination-side zfs command.
-# Usage: zxfer_render_destination_zfs_command ARG...
-zxfer_render_destination_zfs_command() {
-	zxfer_render_zfs_command_for_role destination "$@" || return
-	printf '%s' "$g_zxfer_shell_command_result"
+# Purpose: Trace a role's zfs command under -V or unsafe failure-report mode
+# without subshell forks or throwing on unvalidated SSH state, otherwise record
+# "[redacted]".
+# Usage: zxfer_trace_zfs_command_for_role LABEL source|destination|local ARG...
+zxfer_trace_zfs_command_for_role() {
+	if zxfer_command_trace_enabled; then
+		l_trace_label=$1
+		l_trace_host=""
+		case ${2:-} in
+		source) l_trace_host=${g_option_O_origin_host:-} ;;
+		destination) l_trace_host=${g_option_T_target_host:-} ;;
+		esac
+		if [ -z "$l_trace_host" ] ||
+			{ zxfer_prepare_ssh_transport &&
+				zxfer_resolve_ssh_host_spec "$l_trace_host" &&
+				[ -n "$g_zxfer_ssh_shell_host_result" ]; }; then
+			shift
+			if zxfer_render_zfs_command_for_role "$@"; then
+				zxfer_trace_rendered_command "$l_trace_label" "$g_zxfer_shell_command_result"
+				return 0
+			fi
+		fi
+	fi
+	zxfer_record_last_command_opaque
 }
 
 ################################################################################
@@ -832,8 +839,7 @@ zxfer_open_ssh_control_sockets() {
 			zxfer_echoV "ssh client does not support control sockets; continuing without connection reuse for $l_open_role host."
 			continue
 		fi
-		# zxfer_select_ssh_control_socket sends a -T spec equal to the -O
-		# spec through the origin master.
+		# A -T spec equal to the -O spec multiplexes through the origin master.
 		if [ "$l_open_role" = target ] &&
 			[ "$l_open_host" = "${g_option_O_origin_host:-}" ]; then
 			continue

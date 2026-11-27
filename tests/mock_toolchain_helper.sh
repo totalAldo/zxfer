@@ -27,9 +27,33 @@
 #                           way zfs receive does ("cannot receive: failed to
 #                           read from stream", status 1, no END line)
 #                           instead of accepting it; any other value accepts.
+#   MOCK_ZFS_ARGV_LOG       optional path where invocations append bracketed
+#                           argument records before executing.
+#   MOCK_ZFS_ARGV_VERBS     colon-delimited subcommand filter for
+#                           MOCK_ZFS_ARGV_LOG (e.g. "create:set:inherit");
+#                           unset or empty logs every subcommand.
+#   MOCK_ZFS_ARGV_FORMAT    "inline" (default: "[a] [b] "), "lines"
+#                           ("[a]\n[b]\n"), or "counted" ("ARGV N\n[a]\n").
+#   MOCK_ZFS_DELAY_RECEIVE_GLOB
+#                           optional sh glob matched against receive's last
+#                           operand; matching calls sleep
+#                           $MOCK_ZFS_DELAY_RECEIVE_SECONDS before running.
+#   MOCK_ZFS_RECEIVE_BYTES_LOG
+#                           optional path appending "<dataset> <bytes>" per
+#                           receive and failing on 0 bytes.
+#   MOCK_ZFS_RECEIVE_STREAM_DIR
+#                           optional directory where each receive appends a
+#                           copy of its stdin under <dataset> ("/" -> "_").
+#   MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR
+#                           optional directory holding argv, status, and
+#                           stderr files: the first matching call emits its
+#                           normal output, then prints stderr and exits status.
 #
 # Manifest format ($MOCK_ZFS_FIXTURE_DIR/manifest), one rule per line:
 #   <glob-pattern><TAB><fixture-file><TAB><exit-status>[<TAB>once]
+# Static fixture trees may also carry $MOCK_ZFS_FIXTURE_DIR/.exact/ (built by
+# zxfer_mockbin_index_manifest) for O(1) exact-key lookup with .exact/.globs
+# holding any glob rules.
 # The pattern is matched (sh case glob, first match wins) against the argv
 # key: all zfs arguments joined with single spaces, e.g.
 #   "list -Hr -o name,guid -s creation -t snapshot srcpool/data".
@@ -42,7 +66,7 @@
 # for the same argv falls through to a later rule. This is the only stateful
 # manifest feature (the manifest lives in the per-case scratch state dir, so
 # the rewrite is safe); use it to answer the same query differently before
-# and after a mutation, e.g. a diverged-guid listing healed by a receive.
+# and after a receive, e.g. a diverged-guid listing healed by convergence.
 # Consumable rules are not safe under concurrent mock invocations.
 #
 # Counting wrapper runtime environment:
@@ -55,6 +79,13 @@
 #                           zxfer_mockbin_ssh_log_rows.
 #   MOCK_SSH_HANDSHAKE_S    seconds each new connection sleeps (unset: none).
 #   MOCK_SSH_MUX_S          seconds each multiplexed or control call sleeps.
+#   MOCK_SSH_REJECT_CONTROL_MASTER
+#                           1 rejects -M with status 255 ("ssh: illegal
+#                           option -- M") and logs kind "reject".
+#   MOCK_SSH_READ_STDIN     1 drains local stdin into `sh -c` like OpenSSH.
+#   MOCK_SSH_CAPABILITY_RESPONSE_FILE
+#                           optional file printed instead of running a remote
+#                           ZXFER_REMOTE_CAPS_V2 capability probe.
 #
 # Fault injection, shared by the canned zfs, the socket-aware mock ssh and
 # every counting wrapper (all unset: no counting and no overhead):
@@ -158,7 +189,7 @@ mock_fail_claim() {
 		esac
 	fi
 	case $MOCK_FAIL_CALL in
-	*[!0-9]*)
+	*[!0123456789]*)
 		printf 'mock %s: MOCK_FAIL_CALL must be a number: %s\n' "$1" \
 			"$MOCK_FAIL_CALL" >&2
 		exit 125
@@ -176,7 +207,7 @@ mock_fail_claim() {
 	[ ! -f "$MOCK_FAIL_DIR/.last" ] ||
 		IFS= read -r mock_fail_n <"$MOCK_FAIL_DIR/.last" || :
 	case $mock_fail_n in
-	'' | *[!0-9]*) mock_fail_n=0 ;;
+	'' | *[!0123456789]*) mock_fail_n=0 ;;
 	esac
 	set -C
 	while :; do
@@ -264,23 +295,95 @@ mock_log_line() {
 	fi
 }
 
+mock_encode_key() {
+	mock_enc_rest=$1
+	mock_enc_out=""
+	while :; do
+		case $mock_enc_rest in
+		*%*)
+			mock_enc_out="$mock_enc_out${mock_enc_rest%%\%*}%25"
+			mock_enc_rest=${mock_enc_rest#*%}
+			;;
+		*)
+			mock_enc_out="$mock_enc_out$mock_enc_rest"
+			break
+			;;
+		esac
+	done
+	mock_enc_rest=$mock_enc_out
+	mock_enc_out=""
+	while :; do
+		case $mock_enc_rest in
+		*/*)
+			mock_enc_out="$mock_enc_out${mock_enc_rest%%/*}%2F"
+			mock_enc_rest=${mock_enc_rest#*/}
+			;;
+		*)
+			mock_enc_out="$mock_enc_out$mock_enc_rest"
+			break
+			;;
+		esac
+	done
+	mock_encoded_key=$mock_enc_out
+}
+
 # First manifest rule whose glob pattern matches the space-joined argv wins.
+# Static fixture dirs built with zxfer_mockbin_index_manifest answer exact keys
+# in O(1) from .exact/<encoded_key> and scan only .exact/.globs on a miss.
 # A matching rule whose optional 4th field is "once" is consumed: the
 # manifest is rewritten without that line before returning, so the next
 # lookup for the same argv falls through to a later rule.
 mock_manifest_lookup() {
 	[ -n "${MOCK_ZFS_FIXTURE_DIR:-}" ] || return 1
-	mock_manifest="$MOCK_ZFS_FIXTURE_DIR/manifest"
-	[ -r "$mock_manifest" ] || return 1
 	mock_tab=$(printf '\t')
+	if [ -d "$MOCK_ZFS_FIXTURE_DIR/.exact" ]; then
+		mock_encode_key "$mock_key"
+		if [ "${#mock_encoded_key}" -le 200 ]; then
+			mock_exact_file="$MOCK_ZFS_FIXTURE_DIR/.exact/$mock_encoded_key"
+			if [ -r "$mock_exact_file" ]; then
+				IFS= read -r mock_exact_line <"$mock_exact_file" ||
+					return 1
+				mock_fixture=${mock_exact_line%%"$mock_tab"*}
+				if [ "$mock_exact_line" = "$mock_fixture" ]; then
+					mock_status=0
+				else
+					mock_status=${mock_exact_line#*"$mock_tab"}
+					mock_status=${mock_status%%"$mock_tab"*}
+				fi
+				mock_status=${mock_status:-0}
+				return 0
+			fi
+		fi
+		mock_manifest="$MOCK_ZFS_FIXTURE_DIR/.exact/.globs"
+		[ -s "$mock_manifest" ] || return 1
+	else
+		mock_manifest="$MOCK_ZFS_FIXTURE_DIR/manifest"
+		[ -r "$mock_manifest" ] || return 1
+	fi
 	mock_line_no=0
-	while IFS=$mock_tab read -r mock_pattern mock_rule_fixture mock_rule_status mock_rule_flag; do
+	while IFS= read -r mock_raw_line || [ -n "$mock_raw_line" ]; do
 		mock_line_no=$((mock_line_no + 1))
+		mock_pattern=${mock_raw_line%%"$mock_tab"*}
 		case "$mock_pattern" in
 		'' | '#'*)
 			continue
 			;;
 		esac
+		mock_rule_fixture=""
+		mock_rule_status=""
+		mock_rule_flag=""
+		if [ "$mock_raw_line" != "$mock_pattern" ]; then
+			mock_rest=${mock_raw_line#*"$mock_tab"}
+			mock_rule_fixture=${mock_rest%%"$mock_tab"*}
+			if [ "$mock_rest" != "$mock_rule_fixture" ]; then
+				mock_rest=${mock_rest#*"$mock_tab"}
+				mock_rule_status=${mock_rest%%"$mock_tab"*}
+				if [ "$mock_rest" != "$mock_rule_status" ]; then
+					mock_rule_flag=${mock_rest#*"$mock_tab"}
+					mock_rule_flag=${mock_rule_flag%%"$mock_tab"*}
+				fi
+			fi
+		fi
 		# shellcheck disable=SC2254  # manifest patterns glob-match on purpose
 		case "$mock_key" in
 		$mock_pattern)
@@ -304,6 +407,67 @@ mock_emit_fixture() {
 	fi
 }
 
+mock_finish_with_status() {
+	if [ "$mock_after_output_triggered" -eq 1 ]; then
+		cat "$MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR/stderr" >&2
+		IFS= read -r mock_after_status <"$MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR/status" ||
+			mock_after_status=1
+		exit "$mock_after_status"
+	fi
+	exit "$1"
+}
+
+if [ -n "${MOCK_ZFS_ARGV_LOG:-}" ]; then
+	mock_log_argv=0
+	if [ -z "${MOCK_ZFS_ARGV_VERBS:-}" ]; then
+		mock_log_argv=1
+	else
+		case ":${MOCK_ZFS_ARGV_VERBS}:" in
+		*":${1:-}:"*) mock_log_argv=1 ;;
+		esac
+	fi
+	if [ "$mock_log_argv" -eq 1 ]; then
+		mock_argv_nl='
+'
+		case "${MOCK_ZFS_ARGV_FORMAT:-inline}" in
+		counted)
+			mock_argv_line="ARGV $#"
+			for mock_arg in "$@"; do
+				mock_argv_line="$mock_argv_line$mock_argv_nl[$mock_arg]"
+			done
+			printf '%s\n' "$mock_argv_line" >>"$MOCK_ZFS_ARGV_LOG"
+			;;
+		lines)
+			if [ "$#" -gt 0 ]; then
+				mock_argv_line=""
+				for mock_arg in "$@"; do
+					mock_argv_line="${mock_argv_line:+$mock_argv_line$mock_argv_nl}[$mock_arg]"
+				done
+				printf '%s\n' "$mock_argv_line" >>"$MOCK_ZFS_ARGV_LOG"
+			fi
+			;;
+		*)
+			mock_argv_line=""
+			for mock_arg in "$@"; do
+				mock_argv_line="$mock_argv_line[$mock_arg] "
+			done
+			printf '%s\n' "$mock_argv_line" >>"$MOCK_ZFS_ARGV_LOG"
+			;;
+		esac
+	fi
+fi
+
+mock_after_output_triggered=0
+if [ -n "${MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR:-}" ] &&
+	[ -r "$MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR/argv" ]; then
+	IFS= read -r mock_after_argv <"$MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR/argv" ||
+		mock_after_argv=""
+	if [ "$mock_key" = "$mock_after_argv" ] &&
+		(set -C && printf '' >"$MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR/fired") 2>/dev/null; then
+		mock_after_output_triggered=1
+	fi
+fi
+
 if mock_fail_claim zfs "$mock_key"; then
 	mock_fail_operand=""
 	for mock_arg in "$@"; do
@@ -317,13 +481,43 @@ destroy | rollback | create | set | inherit | snapshot | rename | clone | promot
 	mock_log_line "MUTATE $mock_key"
 	if mock_manifest_lookup; then
 		mock_emit_fixture
-		exit "$mock_status"
+		mock_finish_with_status "$mock_status"
 	fi
-	exit 0
+	mock_finish_with_status 0
 	;;
 receive | recv)
+	for mock_arg in "$@"; do
+		mock_receive_dataset=$mock_arg
+	done
+	if [ -n "${MOCK_ZFS_DELAY_RECEIVE_GLOB:-}" ]; then
+		# shellcheck disable=SC2254  # delay target is a glob on purpose
+		case "${mock_receive_dataset:-}" in
+		$MOCK_ZFS_DELAY_RECEIVE_GLOB)
+			sleep "${MOCK_ZFS_DELAY_RECEIVE_SECONDS:-1}" || exit "$?"
+			;;
+		esac
+	fi
 	mock_log_line "$mock_key"
-	if [ "${MOCK_ZFS_STRICT_RECEIVE:-}" = 1 ]; then
+	if [ -n "${MOCK_ZFS_RECEIVE_STREAM_DIR:-}" ] ||
+		[ -n "${MOCK_ZFS_RECEIVE_BYTES_LOG:-}" ]; then
+		if [ -n "${MOCK_ZFS_RECEIVE_STREAM_DIR:-}" ]; then
+			mkdir -p "$MOCK_ZFS_RECEIVE_STREAM_DIR" || exit 1
+			mock_stream_copy="$MOCK_ZFS_RECEIVE_STREAM_DIR/$(printf '%s' "$mock_receive_dataset" | tr / _)"
+			mock_recv_bytes=$(tee -a "$mock_stream_copy" | wc -c | tr -d ' ')
+		else
+			mock_recv_bytes=$(wc -c | tr -d ' ')
+		fi
+		if [ -n "${MOCK_ZFS_RECEIVE_BYTES_LOG:-}" ]; then
+			printf '%s %s\n' "$mock_receive_dataset" "$mock_recv_bytes" \
+				>>"$MOCK_ZFS_RECEIVE_BYTES_LOG"
+		fi
+		if [ "$mock_recv_bytes" -eq 0 ] &&
+			{ [ -n "${MOCK_ZFS_RECEIVE_BYTES_LOG:-}" ] ||
+				[ "${MOCK_ZFS_STRICT_RECEIVE:-}" = 1 ]; }; then
+			printf '%s\n' 'cannot receive: failed to read from stream' >&2
+			exit 1
+		fi
+	elif [ "${MOCK_ZFS_STRICT_RECEIVE:-}" = 1 ]; then
 		# Like zfs receive, refuse a stream without a single byte; read, a
 		# builtin, takes the first line without spawning a byte counter.
 		mock_stream_head=""
@@ -331,35 +525,34 @@ receive | recv)
 			printf '%s\n' 'cannot receive: failed to read from stream' >&2
 			exit 1
 		fi
+		cat >/dev/null
+	else
+		cat >/dev/null
 	fi
-	cat >/dev/null
-	for mock_arg in "$@"; do
-		mock_receive_dataset=$mock_arg
-	done
 	mock_log_line "END receive $mock_receive_dataset"
 	if mock_manifest_lookup; then
 		mock_emit_fixture
-		exit "$mock_status"
+		mock_finish_with_status "$mock_status"
 	fi
-	exit 0
+	mock_finish_with_status 0
 	;;
 send)
 	mock_log_line "$mock_key"
 	if mock_manifest_lookup; then
 		mock_emit_fixture
-		exit "$mock_status"
+		mock_finish_with_status "$mock_status"
 	fi
 	printf 'ZXFERMOCKSTREAM %s\n' "$mock_key"
-	exit 0
+	mock_finish_with_status 0
 	;;
 *)
 	mock_log_line "$mock_key"
 	if mock_manifest_lookup; then
 		mock_emit_fixture
-		exit "$mock_status"
+		mock_finish_with_status "$mock_status"
 	fi
 	printf 'mock zfs: no manifest match for: %s\n' "$mock_key" >&2
-	exit "${MOCK_ZFS_DEFAULT_STATUS:-1}"
+	mock_finish_with_status "${MOCK_ZFS_DEFAULT_STATUS:-1}"
 	;;
 esac
 EOF
@@ -408,39 +601,6 @@ zxfer_mockbin_write_counting_wrapper() {
 	chmod +x "$l_mockbin_wrapper_path"
 }
 
-# Purpose: Write a minimal mock ssh without control-socket support: `-M` is
-# rejected as an unknown option, other option tokens are skipped, the host
-# token is dropped, and the remaining arguments are joined with spaces and
-# executed locally through `sh -c`, so commands resolve helpers (including the
-# canned zfs) from the inherited PATH.
-# Usage: zxfer_mockbin_write_minimal_ssh <path>. The generated script appends
-# each invocation's argv to $MOCK_SSH_LOG when set. Drive zxfer with
-# PATH/ZXFER_SECURE_PATH pointing at the mock dir first so "remote" commands
-# stay inside the mock toolchain.
-zxfer_mockbin_write_minimal_ssh() {
-	l_mockbin_ssh_path=$1
-
-	cat >"$l_mockbin_ssh_path" <<'EOF'
-#!/bin/sh
-[ -n "${MOCK_SSH_LOG:-}" ] && printf '%s\n' "$*" >>"$MOCK_SSH_LOG"
-while [ $# -gt 0 ]; do
-	case "$1" in
-	-M)
-		printf '%s\n' 'ssh: illegal option -- M' >&2
-		exit 255
-		;;
-	-o) shift 2 ;;
-	-*) shift ;;
-	*) break ;;
-	esac
-done
-shift
-[ $# -gt 0 ] || exit 0
-exec sh -c "$*"
-EOF
-	chmod +x "$l_mockbin_ssh_path"
-}
-
 # Purpose: Write a mock ssh with control-socket semantics that logs whether
 # each invocation opened a new connection, so benches can budget connections.
 # Usage: zxfer_mockbin_write_socket_ssh <path>. Each call appends
@@ -452,6 +612,7 @@ EOF
 #   mux      a command over a live SOCKET;
 #   direct   a command without -S, or whose SOCKET is not live (real ssh then
 #            connects on its own);
+#   reject   a `-M` call rejected when MOCK_SSH_REJECT_CONTROL_MASTER=1;
 #   fail     the MOCK_FAIL_CALL-th call with MOCK_FAIL_TOOL=ssh: it exits
 #            255 without creating a socket or running a command.
 # master and direct are new connections and sleep $MOCK_SSH_HANDSHAKE_S when
@@ -495,6 +656,13 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+
+if [ "${MOCK_SSH_REJECT_CONTROL_MASTER:-}" = 1 ] && [ "$mock_master" -eq 1 ]; then
+	[ -z "${MOCK_SSH_LOG:-}" ] ||
+		printf 'reject\t%s\n' "$mock_argv" >>"$MOCK_SSH_LOG"
+	printf '%s\n' 'ssh: illegal option -- M' >&2
+	exit 255
+fi
 
 if [ "$mock_version" -eq 1 ] && [ $# -eq 0 ]; then
 	mock_kind=version
@@ -544,6 +712,33 @@ control)
 esac
 [ $# -gt 1 ] || exit 0
 shift
+if [ -n "${MOCK_SSH_CAPABILITY_RESPONSE_FILE:-}" ]; then
+	mock_cap_rest=$*
+	mock_cap_joined=""
+	mock_cap_boundary="' 'd"
+	while :; do
+		case $mock_cap_rest in
+		*"$mock_cap_boundary"*)
+			mock_cap_joined="$mock_cap_joined${mock_cap_rest%%"$mock_cap_boundary"*}"
+			mock_cap_rest=${mock_cap_rest#*"$mock_cap_boundary"}
+			;;
+		*)
+			mock_cap_joined="$mock_cap_joined$mock_cap_rest"
+			break
+			;;
+		esac
+	done
+	case $mock_cap_joined in
+	*ZXFER_REMOTE_CAPS_V2*)
+		cat "$MOCK_SSH_CAPABILITY_RESPONSE_FILE"
+		exit 0
+		;;
+	esac
+fi
+if [ "${MOCK_SSH_READ_STDIN:-}" = 1 ]; then
+	cat | sh -c "$*"
+	exit "$?"
+fi
 exec sh -c "$*"
 EOF
 	} >"$l_mockbin_ssh_path" || return 1
@@ -707,6 +902,61 @@ zxfer_mockbin_write_fixture_state_dir() {
 			l_mockbin_state_index=$((l_mockbin_state_index + 1))
 		done
 	} >"$l_mockbin_state_dir/manifest"
+	zxfer_mockbin_index_manifest "$l_mockbin_state_dir"
+}
+
+# Purpose: Build an O(1) .exact/<encoded-key> lookup directory for a static
+# manifest directory that contains no consumable "once" rules. To preserve
+# exact first-match-wins precedence, only non-pattern rules preceding the first
+# glob/escaped/long rule are indexed into .exact/; that rule and any later
+# rules land in .exact/.globs in manifest order.
+# Usage: zxfer_mockbin_index_manifest <state-dir>
+zxfer_mockbin_index_manifest() {
+	l_mockbin_idx_dir=$1
+
+	rm -rf "$l_mockbin_idx_dir/.exact" || return 1
+	[ -r "$l_mockbin_idx_dir/manifest" ] || return 0
+	mkdir -p "$l_mockbin_idx_dir/.exact" || return 1
+
+	l_mockbin_idx_status=0
+	LC_ALL=C awk -F '\t' -v dir="$l_mockbin_idx_dir/.exact" '
+		BEGIN {
+			globs_file = dir "/.globs"
+			printf "" > globs_file
+		}
+		$1 == "" || substr($1, 1, 1) == "#" { next }
+		$4 == "once" {
+			exit 2
+		}
+		{
+			key = $1
+			fixture = $2
+			status = ($3 == "") ? "0" : $3
+			encoded = key
+			gsub(/%/, "%25", encoded)
+			gsub(/\//, "%2F", encoded)
+			if (seen_glob || index(key, "*") || index(key, "?") || index(key, "[") || index(key, "\\") || length(encoded) > 200) {
+				seen_glob = 1
+				if (!(encoded in seen)) {
+					printf "%s\t%s\t%s\n", key, fixture, status > globs_file
+				}
+				next
+			}
+			if (!(encoded in seen)) {
+				seen[encoded] = 1
+				target = dir "/" encoded
+				printf "%s\t%s\n", fixture, status > target
+				close(target)
+			}
+		}
+		END {
+			close(globs_file)
+		}
+	' "$l_mockbin_idx_dir/manifest" || l_mockbin_idx_status=$?
+	if [ "$l_mockbin_idx_status" -ne 0 ]; then
+		rm -rf "$l_mockbin_idx_dir/.exact"
+		[ "$l_mockbin_idx_status" -eq 2 ] || return 1
+	fi
 }
 
 # Purpose: Generate the deterministic dataset/snapshot fixture tree plus the
@@ -725,14 +975,14 @@ zxfer_mockbin_build_fixture_tree() {
 	l_mockbin_tree_snaps=$3
 
 	case "$l_mockbin_tree_datasets" in
-	'' | *[!0-9]*)
+	'' | *[!0123456789]*)
 		printf 'zxfer_mockbin_build_fixture_tree: num-datasets must be a non-negative integer: %s\n' \
 			"$l_mockbin_tree_datasets" >&2
 		return 1
 		;;
 	esac
 	case "$l_mockbin_tree_snaps" in
-	'' | *[!0-9]* | 0 | 1)
+	'' | *[!0123456789]* | 0 | 1)
 		printf 'zxfer_mockbin_build_fixture_tree: snaps-per-dataset must be >= 2: %s\n' \
 			"$l_mockbin_tree_snaps" >&2
 		return 1
@@ -825,6 +1075,30 @@ encryption|off|default
 EOF
 }
 
+# Purpose: Append the shared recursive-tree and root property `zfs get` rules
+# used by both zxfer_mockbin_add_property_fixtures and blackbox.sh.
+# Usage: zxfer_mockbin_append_property_tree_rules <manifest-path>
+zxfer_mockbin_append_property_tree_rules() {
+	{
+		for l_mockbin_props_view in -Hpo -Ho; do
+			printf '%s\t%s\t0\n' \
+				"get -r -t filesystem,volume $l_mockbin_props_view name,property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT" \
+				src_props_tree.list \
+				"get -r -t filesystem,volume $l_mockbin_props_view name,property,value,source all $ZXFER_MOCKBIN_DEST_ROOT" \
+				dst_props_tree.list \
+				"get $l_mockbin_props_view property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT" \
+				src_props_root.list \
+				"get $l_mockbin_props_view property,value,source all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
+				dst_props_root.list
+		done
+		printf '%s\t%s\t0\n' \
+			"get -r -t filesystem,volume -Ho name,property all $ZXFER_MOCKBIN_SOURCE_ROOT" \
+			src_props_tree.names \
+			"get -r -t filesystem,volume -Ho name,property all $ZXFER_MOCKBIN_DEST_ROOT" \
+			dst_props_tree.names
+	} >>"$1"
+}
+
 # Purpose: Add matching property fixtures to one canned-zfs state directory
 # of the fixture tree, so a -P run reads 68 properties per dataset that
 # already agree on both sides and plans no set or inherit.
@@ -882,27 +1156,8 @@ zxfer_mockbin_add_property_fixtures() {
 	printf 'filesystem\n' >"$l_mockbin_props_dir/props_type.list" || return 1
 	printf -- '-\n' >"$l_mockbin_props_dir/props_volsize.list" || return 1
 
+	zxfer_mockbin_append_property_tree_rules "$l_mockbin_props_dir/manifest" || return 1
 	{
-		for l_mockbin_props_view in -Hpo -Ho; do
-			printf '%s\t%s\t0\n' \
-				"get -r -t filesystem,volume $l_mockbin_props_view name,property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT" \
-				src_props_tree.list \
-				"get -r -t filesystem,volume $l_mockbin_props_view name,property,value,source all $ZXFER_MOCKBIN_DEST_ROOT" \
-				dst_props_tree.list \
-				"get $l_mockbin_props_view property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT" \
-				src_props_root.list \
-				"get $l_mockbin_props_view property,value,source all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
-				dst_props_root.list
-		done
-		printf '%s\t%s\t0\n' \
-			"get -r -t filesystem,volume -Ho name,property all $ZXFER_MOCKBIN_SOURCE_ROOT" \
-			src_props_tree.names \
-			"get -r -t filesystem,volume -Ho name,property all $ZXFER_MOCKBIN_DEST_ROOT" \
-			dst_props_tree.names \
-			"get -Ho property all $ZXFER_MOCKBIN_SOURCE_ROOT*" src_props.names \
-			"get -Ho property all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT*" dst_props.names \
-			"get -Hpo value type *" props_type.list \
-			"get -Hpo value volsize *" props_volsize.list
 		l_mockbin_props_index=1
 		while [ "$l_mockbin_props_index" -le "$l_mockbin_props_datasets" ]; do
 			for l_mockbin_props_view in -Hpo -Ho; do
@@ -914,7 +1169,13 @@ zxfer_mockbin_add_property_fixtures() {
 			done
 			l_mockbin_props_index=$((l_mockbin_props_index + 1))
 		done
-	} >>"$l_mockbin_props_dir/manifest"
+		printf '%s\t%s\t0\n' \
+			"get -Ho property all $ZXFER_MOCKBIN_SOURCE_ROOT*" src_props.names \
+			"get -Ho property all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT*" dst_props.names \
+			"get -Hpo value type *" props_type.list \
+			"get -Hpo value volsize *" props_volsize.list
+	} >>"$l_mockbin_props_dir/manifest" || return 1
+	zxfer_mockbin_index_manifest "$l_mockbin_props_dir"
 }
 
 # Purpose: Print the ZXFER_SECURE_PATH value that resolves mocks first and

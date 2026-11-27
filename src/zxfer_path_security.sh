@@ -94,7 +94,7 @@ EOF
 	for l_metadata_number in "$l_metadata_inode" "$l_metadata_links" \
 		"$l_metadata_owner"; do
 		case $l_metadata_number in
-		'' | *[!0-9]*) return 1 ;;
+		'' | *[!0123456789]*) return 1 ;;
 		esac
 	done
 	# A type character and nine permission characters, then at most one
@@ -198,36 +198,14 @@ zxfer_get_private_directory_security_record() {
 # safe to share: well-formed and either free of group/other write bits or
 # protected by the sticky bit.
 # Usage: zxfer_validate_shared_dir_permission_string PERMS, from the temp-root
-# and trusted-symlink validators; parameter expansion only, no spawns.
+# and trusted-symlink validators; pattern match only, no spawns.
 zxfer_validate_shared_dir_permission_string() {
-	l_perm_str=$1
-
-	case "$l_perm_str" in
-	??????????*) ;;
-	*)
-		return 1
-		;;
+	case $1 in
+	?????????[tT]*) return 0 ;;
+	?????w* | ????????w*) return 1 ;;
+	??????????*) return 0 ;;
+	*) return 1 ;;
 	esac
-	# Single-character slices via parameter expansion: strip N leading
-	# characters, then keep only the first character of the remainder.
-	l_perm_tail=${l_perm_str#?????}
-	l_group_write=${l_perm_tail%"${l_perm_tail#?}"}
-	l_perm_tail=${l_perm_str#????????}
-	l_other_write=${l_perm_tail%"${l_perm_tail#?}"}
-	l_perm_tail=${l_perm_str#?????????}
-	l_sticky_char=${l_perm_tail%"${l_perm_tail#?}"}
-	case "$l_group_write$l_other_write" in
-	*w*)
-		case "$l_sticky_char" in
-		t | T) ;;
-		*)
-			return 1
-			;;
-		esac
-		;;
-	esac
-
-	return 0
 }
 
 # Purpose: Look up the effective user UID once per process.
@@ -238,7 +216,7 @@ zxfer_get_effective_user_uid() {
 	[ -z "${g_zxfer_effective_uid:-}" ] || return 0
 	l_effective_uid_output=$(exec id -u 2>/dev/null) || return 1
 	case $l_effective_uid_output in
-	'' | *[!0-9]*) return 1 ;;
+	'' | *[!0123456789]*) return 1 ;;
 	esac
 	g_zxfer_effective_uid=$l_effective_uid_output
 }
@@ -283,47 +261,27 @@ zxfer_require_backup_metadata_path_without_symlinks() {
 # Root-owned top-level system symlinks (zxfer_is_trusted_symlink_path_component)
 # are skipped.
 zxfer_find_symlink_path_component() {
-	l_find_symlink_path_component_path=$1
+	[ -n "$1" ] || return 1
 
-	[ -n "$l_find_symlink_path_component_path" ] || return 1
-
-	l_remaining=$l_find_symlink_path_component_path
+	l_remaining=$1/
 	l_candidate_path=""
+	case $l_remaining in
+	/*)
+		l_candidate_path=/
+		l_remaining=${l_remaining#/}
+		;;
+	esac
 	while [ -n "$l_remaining" ]; do
-		case "$l_remaining" in
-		/*)
-			if [ "$l_candidate_path" = "" ]; then
-				l_candidate_path="/"
-				l_remaining=${l_remaining#/}
-				continue
-			fi
-			;;
-		esac
-
 		l_component=${l_remaining%%/*}
-		if [ "$l_component" = "$l_remaining" ]; then
-			l_remaining=""
-		else
-			l_remaining=${l_remaining#*/}
-		fi
+		l_remaining=${l_remaining#*/}
 		[ -n "$l_component" ] || continue
-
-		case "$l_candidate_path" in
-		"")
-			l_candidate_path=$l_component
-			;;
-		/)
-			l_candidate_path="/$l_component"
-			;;
-		*)
-			l_candidate_path="$l_candidate_path/$l_component"
-			;;
+		case $l_candidate_path in
+		'') l_candidate_path=$l_component ;;
+		/) l_candidate_path=/$l_component ;;
+		*) l_candidate_path=$l_candidate_path/$l_component ;;
 		esac
-
-		if [ -L "$l_candidate_path" ]; then
-			if zxfer_is_trusted_symlink_path_component "$l_candidate_path"; then
-				continue
-			fi
+		if [ -L "$l_candidate_path" ] &&
+			! zxfer_is_trusted_symlink_path_component "$l_candidate_path"; then
 			printf '%s\n' "$l_candidate_path"
 			return 0
 		fi
@@ -379,11 +337,8 @@ zxfer_validate_temp_root_candidate() {
 	[ -d "$l_candidate_physical" ] || return 1
 	zxfer_parse_path_metadata_line "${l_candidate_output##*"$ZXFER_LF"}" ||
 		return 1
-	if [ "$g_zxfer_path_owner_uid_result" != 0 ]; then
-		zxfer_get_effective_user_uid || return 1
-		[ "$g_zxfer_path_owner_uid_result" = "$g_zxfer_effective_uid" ] ||
-			return 1
-	fi
+	zxfer_backup_owner_uid_is_allowed "$g_zxfer_path_owner_uid_result" ||
+		return 1
 	zxfer_validate_shared_dir_permission_string \
 		"$g_zxfer_path_permissions_result" || return 1
 

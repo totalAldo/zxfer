@@ -162,11 +162,11 @@ destroy_test_pool_if_owned() {
 	l_created=$3
 	l_expected_vdev=${4:-}
 
-	[ "$l_created" -eq 1 ] || return
-	[ -n "$l_pool" ] || return
+	[ "$l_created" -eq 1 ] || return 0
+	[ -n "$l_pool" ] || return 0
 
 	if ! zpool list "$l_pool" >/dev/null 2>&1; then
-		return
+		return 0
 	fi
 
 	if ! pool_belongs_to_test_run "$l_pool" "$l_expected_vdev"; then
@@ -262,4 +262,38 @@ append_data_to_dataset() {
 
 	l_mountpoint=$(get_mountpoint "$l_dataset")
 	printf '%s\n' "$l_data" >>"$l_mountpoint/$l_file"
+}
+
+# shellcheck disable=SC2034  # Publishes SRC_*/DEST_* globals for the harness.
+create_test_pool_pair() {
+	l_pair_src_prefix=$1
+	l_pair_dest_prefix=$2
+	l_pair_size_mb=$3
+	l_pair_log_fn=${4:-log}
+	l_pair_desc_prefix=${5:-}
+
+	SRC_POOL=$(generate_test_pool_name "$l_pair_src_prefix")
+	DEST_POOL=$(generate_test_pool_name "$l_pair_dest_prefix")
+	SRC_MOUNT_ROOT="$WORKDIR/mnt/src"
+	DEST_MOUNT_ROOT="$WORKDIR/mnt/dest"
+	mkdir -p "$SRC_MOUNT_ROOT" "$DEST_MOUNT_ROOT"
+
+	SRC_IMG="$WORKDIR/${SRC_POOL}.img"
+	DEST_IMG="$WORKDIR/${DEST_POOL}.img"
+	create_sparse_file "$SRC_IMG" "$l_pair_size_mb"
+	create_sparse_file "$DEST_IMG" "$l_pair_size_mb"
+
+	"$l_pair_log_fn" "Creating ${l_pair_desc_prefix}source pool $SRC_POOL"
+	create_test_pool "source" "$SRC_POOL" "$SRC_IMG" "$SRC_MOUNT_ROOT"
+	SRC_POOL_CREATED=1
+	"$l_pair_log_fn" "Creating ${l_pair_desc_prefix}destination pool $DEST_POOL"
+	create_test_pool "destination" "$DEST_POOL" "$DEST_IMG" "$DEST_MOUNT_ROOT"
+	DEST_POOL_CREATED=1
+}
+
+destroy_owned_test_pool_pair() {
+	l_pair_cleanup_ok=1
+	destroy_test_pool_if_owned "source" "${SRC_POOL:-}" "${SRC_POOL_CREATED:-0}" "${SRC_IMG:-}" || l_pair_cleanup_ok=0
+	destroy_test_pool_if_owned "destination" "${DEST_POOL:-}" "${DEST_POOL_CREATED:-0}" "${DEST_IMG:-}" || l_pair_cleanup_ok=0
+	[ "$l_pair_cleanup_ok" -eq 1 ]
 }

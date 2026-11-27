@@ -25,15 +25,14 @@ supported train.
 
 The project targets POSIX `/bin/sh`, so portability depends more on shell and
 tool behavior than on GNU-specific scripting features.
-Failure-report and `-v` command quoting prints plain printable tokens without
-spawning `awk` or `sed` only when the shell's `case` patterns support
+Failure-report and `-v` command quoting prints plain printable ASCII tokens
+without spawning `awk` only when the shell's `case` patterns support
 `[[:print:]]`; zxfer checks this once at load, and shells without that support
-(such as `posh`) keep the `awk`/`sed` escaping path for every token.
+(such as `posh`) keep the `awk` escaping path for every token.
 bash 3.2, macOS's `/bin/sh`, and ksh93 on macOS match a bracket range such
-as `[0-9]` in a `case` pattern by locale collation, so under a UTF-8 locale
-zxfer's digit checks accept some non-ASCII characters (see
-[../KNOWN_ISSUES.md](../KNOWN_ISSUES.md)); dash, bash 5 and zsh compare code
-points. The test tooling spells out its character lists instead.
+as `[0-9]` in a `case` pattern by locale collation under UTF-8, whereas dash,
+bash 5 and zsh compare code points; both `src/` and `tests/` spell out explicit
+ASCII character lists (`[0123456789]`) instead.
 Pre-OpenZFS 2.0 behavior, Solaris Express-era property profiles, and older
 backup metadata layouts are intentionally outside the supported platform
 surface.

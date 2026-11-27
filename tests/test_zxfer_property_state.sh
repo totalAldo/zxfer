@@ -184,7 +184,7 @@ test_property_read_workspace_is_private_reused_and_forgotten_on_reset() {
 	assertEquals "Reuse allocates no files." \
 		5 "$((g_zxfer_profile_runtime_artifact_files_created - l_workspace_created_before))"
 	assertEquals "Preparing scratch does not overwrite a previous capture." capture "$(cat "$l_read_workspace.machine")"
-	zxfer_reset_property_read_state
+	zxfer_reset_property_session_state
 	assertEquals "Reset forgets the workspace." "" "$g_zxfer_property_read_workspace"
 	assertEquals "Reset forgets the row directory." "" "$g_zxfer_property_row_dir"
 	assertTrue "The run-root owner retains cleanup responsibility." "[ -f '$l_read_workspace.machine' ]"

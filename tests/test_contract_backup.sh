@@ -300,7 +300,7 @@ test_restore_mode_applies_recorded_properties() {
 # locally through `sh -c`).
 test_remote_target_backup_mode_writes_metadata_through_ssh() {
 	planning_setup_backup_env k_remote
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_backup.log"
 	: >"$SSH_LOG"
@@ -401,7 +401,7 @@ test_backup_mode_forwards_an_alias_below_the_source_root() {
 # roots that listing reports are read.
 test_remote_origin_backup_mode_forwards_an_alias_below_the_source_root() {
 	planning_setup_backup_env k_remote_child_alias
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	l_child=$ZXFER_MOCKBIN_SOURCE_ROOT/child1
 	l_child_alias=$(planning_backup_metadata_file "$BACKUP_ROOT" "$l_child" "$l_child")
@@ -521,13 +521,7 @@ test_backup_mode_failure_partway_keeps_the_previous_files() {
 
 	planning_clone_state "$FIXTURE_DIR/incremental" k_partial_incremental
 	planning_add_property_transfer_fixtures
-	{
-		printf 'receive*child2*\t-\t1\n'
-		cat "$STATE_DIR/manifest"
-	} >"$STATE_DIR/manifest.new" ||
-		fail "Unable to inject the child2 receive failure."
-	mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
-		fail "Unable to install the rewritten manifest."
+	blackbox_prepend_manifest_rule 'receive*child2*	-	1'
 	: >"$ZFS_LOG"
 
 	planning_run_backup_zxfer -k -P
@@ -595,7 +589,7 @@ $l_row"; do
 # argv with the missing-file error.
 test_remote_origin_restore_mode_reads_the_exact_pair_file_through_ssh() {
 	planning_setup_backup_env e_remote_origin
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_restore.log"
 	planning_run_backup_zxfer -k -P
@@ -635,7 +629,7 @@ test_remote_origin_restore_mode_reads_the_exact_pair_file_through_ssh() {
 # ssh, and creates nothing.
 test_remote_target_dry_run_backup_mode_previews_the_directory_program() {
 	planning_setup_backup_env k_dry_run_remote
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_dry_run.log"
 
@@ -772,7 +766,7 @@ test_backup_mode_fails_closed_on_an_alias_with_duplicate_rows() {
 # finds both aliases and each is read once.
 test_backup_mode_forwards_the_nearest_alias_row_across_two_aliases() {
 	planning_setup_backup_env k_two_aliases
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	planning_write_backup_alias "${ZXFER_MOCKBIN_SOURCE_ROOT%/*}" ".	compression=off=local" \
 		"data	compression=zstd=local" "data/child2	compression=zstd-3=local"
@@ -809,17 +803,7 @@ test_backup_mode_forwards_the_nearest_alias_row_across_two_aliases() {
 test_backup_mode_records_one_row_per_dataset_after_a_seeded_reconcile() {
 	planning_setup_backup_env k_seeded
 	l_missing_child="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child2"
-	for l_seed_fixture in dst_datasets.list dst_snapshots.list dst_props_tree.list; do
-		grep -v "^$l_missing_child" "$STATE_DIR/$l_seed_fixture" \
-			>"$STATE_DIR/$l_seed_fixture.new" || :
-		mv "$STATE_DIR/$l_seed_fixture.new" "$STATE_DIR/$l_seed_fixture" ||
-			fail "Unable to drop $l_missing_child from $l_seed_fixture."
-	done
-	: >"$STATE_DIR/dst_d1_2.list"
-	printf "cannot open '%s': dataset does not exist\n" "$l_missing_child" \
-		>"$STATE_DIR/missing_child2.list"
-	printf 'list -H %s\tmissing_child2.list\t1\n' "$l_missing_child" \
-		>>"$STATE_DIR/manifest" || fail "Unable to append missing-child rule."
+	blackbox_drop_destination_child child2
 
 	planning_run_backup_zxfer -k -P
 	l_run_status=$?
@@ -839,7 +823,7 @@ test_backup_mode_records_one_row_per_dataset_after_a_seeded_reconcile() {
 # over -T, and none of it runs.
 test_backup_mode_records_hostile_property_values_literally() {
 	planning_setup_backup_env k_hostile_values
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	l_sentinel="$CASE_DIR/value_ran"
 	l_value="\$(touch $l_sentinel)\`touch $l_sentinel\`\\\\t'q"
@@ -870,7 +854,7 @@ test_backup_mode_records_hostile_property_values_literally() {
 # command (a pass-through pfexec stands in for the real one).
 test_remote_target_backup_mode_keeps_a_wrapper_host_spec() {
 	planning_setup_backup_env k_remote_wrapper
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	cat >"$MOCKBIN_DIR/pfexec" <<'EOF'
 #!/bin/sh

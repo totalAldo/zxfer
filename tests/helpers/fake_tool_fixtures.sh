@@ -136,6 +136,22 @@ zxfer_test_print_source_listing() {
 	return "$l_test_listing_status"
 }
 
+# Purpose: Write a GNU-parallel stand-in that answers --version and exits 0.
+# Usage: create_parallel_bin PATH [VERSION_LINE]
+create_parallel_bin() {
+	l_path=$1
+	l_version_line=${2:-GNU parallel (fake)}
+	cat >"$l_path" <<EOF
+#!/bin/sh
+if [ "\$1" = "--version" ]; then
+	printf '%s\n' "$l_version_line"
+	exit 0
+fi
+exit 0
+EOF
+	chmod +x "$l_path"
+}
+
 # Purpose: Build a secure-PATH directory for launcher runs that stop at a
 # usage error: the host awk plus ps, zfs and ssh stand-ins that exit 0.
 # Usage: create_launcher_usage_secure_path DIR || return

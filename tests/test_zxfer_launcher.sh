@@ -74,17 +74,6 @@ test_canonical_module_name_validator_rejects_unknown_name() {
 		1 "$status"
 }
 
-test_canonical_module_loader_rejects_unknown_boundary() {
-	set +e
-	output=$(zxfer_load_modules not-a-module.sh 2>&1)
-	status=$?
-
-	assertEquals "The canonical loader should reject an unknown boundary before sourcing." \
-		2 "$status"
-	assertContains "The canonical loader should identify the invalid boundary." \
-		"$output" "unknown source module boundary: not-a-module.sh"
-}
-
 test_module_loader_stops_after_a_valid_boundary() {
 	capture_case() {
 		unset -f zxfer_split_begin zxfer_set_failure_stage

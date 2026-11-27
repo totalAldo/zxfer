@@ -222,8 +222,8 @@ The startup path is intentionally explicit:
 2. `zxfer_reset_session_state()` in
    [../src/zxfer_session.sh](../src/zxfer_session.sh) calls each module's
    owner reset once, in a fixed order, and only assigns. It resets dependency
-   commands first (`zxfer_reset_dependency_state()`), because the ssh and
-   remote-host resets read `g_cmd_ssh` and `g_cmd_zfs`. Inherited process,
+   commands first (`zxfer_reset_dependency_state()`), because the remote-host
+   reset reads `g_cmd_zfs`. Inherited process,
    SSH, path, and migration-service handles are dropped without acting on
    them, so an exported `g_*` value can never grant cleanup ownership, and
    the effective-UID and ssh-policy memos start empty, so an exported value
@@ -751,7 +751,7 @@ never runs the creation-order source listing. When the proof declines after a
 successful destination listing, full discovery normalizes that raw listing
 instead of listing again. A full-discovery listing checks destination
 existence only when the listing itself fails. The destination producer writes
-one status line for its list, normalize, and sort stages.
+its listing exit status to its status file before normalizing and sorting.
 
 A `-T` destination takes the same full-discovery path as a local one. Every
 destination `zfs list` goes through `zxfer_run_destination_zfs_cmd`, which

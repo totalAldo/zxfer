@@ -7,6 +7,28 @@
 set -eu
 
 ZXFER_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+if [ -f "$ZXFER_ROOT/tests/helpers/runner_common.sh" ]; then
+	# shellcheck source=tests/helpers/runner_common.sh
+	. "$ZXFER_ROOT/tests/helpers/runner_common.sh"
+else
+	l_lint_self=$0
+	while [ -L "$l_lint_self" ] && command -v readlink >/dev/null 2>&1; do
+		l_lint_target=$(readlink "$l_lint_self") || break
+		case "$l_lint_target" in
+		/*) l_lint_self=$l_lint_target ;;
+		*) l_lint_self="$(dirname "$l_lint_self")/$l_lint_target" ;;
+		esac
+	done
+	l_lint_real_tests_dir=$(cd -P "$(dirname "$l_lint_self")" 2>/dev/null && pwd) ||
+		l_lint_real_tests_dir=
+	if [ -z "$l_lint_real_tests_dir" ] ||
+		[ ! -f "$l_lint_real_tests_dir/helpers/runner_common.sh" ]; then
+		printf '%s\n' "Unable to locate tests/helpers/runner_common.sh from $0" >&2
+		exit 1
+	fi
+	# shellcheck source=tests/helpers/runner_common.sh
+	. "$l_lint_real_tests_dir/helpers/runner_common.sh"
+fi
 
 ACTIONLINT_VERSION=1.7.12
 ACTIONLINT_BASE_URL=https://github.com/rhysd/actionlint/releases/download/v1.7.12
@@ -64,16 +86,13 @@ require_command() {
 }
 
 sha256_file() {
-	l_file=$1
-	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum "$l_file" | awk '{print $1}'
-		return
-	fi
-	if command -v shasum >/dev/null 2>&1; then
-		shasum -a 256 "$l_file" | awk '{print $1}'
-		return
-	fi
-	die "A SHA-256 tool is required (sha256sum or shasum)."
+	l_lint_sha_status=0
+	zxfer_runner_sha256_file "$1" || l_lint_sha_status=$?
+	case "$l_lint_sha_status" in
+	0) return 0 ;;
+	127) die "A SHA-256 tool is required (sha256sum or shasum)." ;;
+	*) die "Failed to compute SHA-256 checksum for $1" ;;
+	esac
 }
 
 download_and_verify() {
@@ -88,7 +107,7 @@ download_and_verify() {
 
 	mkdir -p "$(dirname "$l_dest")"
 	if [ -f "$l_dest" ]; then
-		l_actual_sha256=$(sha256_file "$l_dest")
+		l_actual_sha256=$(sha256_file "$l_dest") || return 1
 		if [ "$l_actual_sha256" = "$l_expected_sha256" ]; then
 			return 0
 		fi
@@ -98,7 +117,7 @@ download_and_verify() {
 	l_tmp=$l_dest.tmp.$$
 	rm -f "$l_tmp"
 	curl -fsSL "$l_url" -o "$l_tmp"
-	l_actual_sha256=$(sha256_file "$l_tmp")
+	l_actual_sha256=$(sha256_file "$l_tmp") || return 1
 	if [ "$l_actual_sha256" != "$l_expected_sha256" ]; then
 		rm -f "$l_tmp"
 		die "Checksum mismatch for $(basename "$l_dest"): expected $l_expected_sha256, got $l_actual_sha256"
@@ -107,16 +126,9 @@ download_and_verify() {
 }
 
 set_tool_root() {
-	if [ -n "${ZXFER_LINT_TOOL_DIR:-}" ]; then
-		LINT_TOOL_ROOT=$ZXFER_LINT_TOOL_DIR
-	elif [ -n "${XDG_CACHE_HOME:-}" ]; then
-		LINT_TOOL_ROOT=$XDG_CACHE_HOME/zxfer/lint-tools
-	elif [ -n "${HOME:-}" ]; then
-		LINT_TOOL_ROOT=$HOME/.cache/zxfer/lint-tools
-	else
-		LINT_TOOL_ROOT=${TMPDIR:-/tmp}/zxfer-lint-tools
-	fi
-
+	LINT_TOOL_ROOT=$(zxfer_runner_resolve_cache_dir \
+		"${ZXFER_LINT_TOOL_DIR:-}" "${XDG_CACHE_HOME:-}" \
+		"zxfer/lint-tools" ".cache/zxfer/lint-tools" "zxfer-lint-tools")
 	DOWNLOAD_DIR=$LINT_TOOL_ROOT/downloads
 	mkdir -p "$DOWNLOAD_DIR"
 }
@@ -127,28 +139,15 @@ ensure_tool_root() {
 }
 
 detect_host_platform() {
-	case "$(uname -s)" in
-	Linux)
-		HOST_OS=linux
+	l_detect_status=0
+	zxfer_runner_detect_host_os_arch 0 || l_detect_status=$?
+	case "$l_detect_status" in
+	0)
+		HOST_OS=$ZXFER_RUNNER_HOST_OS
+		HOST_ARCH=$ZXFER_RUNNER_HOST_ARCH
 		;;
-	Darwin)
-		HOST_OS=darwin
-		;;
-	*)
-		die "Unsupported host OS for lint bootstrap: $(uname -s)"
-		;;
-	esac
-
-	case "$(uname -m)" in
-	x86_64 | amd64)
-		HOST_ARCH=amd64
-		;;
-	arm64 | aarch64)
-		HOST_ARCH=arm64
-		;;
-	*)
-		die "Unsupported host architecture for lint bootstrap: $(uname -m)"
-		;;
+	1) die "Unsupported host OS for lint bootstrap: $(uname -s)" ;;
+	*) die "Unsupported host architecture for lint bootstrap: $(uname -m)" ;;
 	esac
 }
 
@@ -157,99 +156,105 @@ ensure_host_platform() {
 	detect_host_platform
 }
 
-set_actionlint_asset() {
-	case "$HOST_OS/$HOST_ARCH" in
-	linux/amd64)
-		ACTIONLINT_ASSET=actionlint_1.7.12_linux_amd64.tar.gz
-		ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+resolve_pinned_tool_asset() {
+	l_pinned_tool=$1
+	case "$l_pinned_tool:$HOST_OS/$HOST_ARCH" in
+	actionlint:linux/amd64)
+		PINNED_ASSET=actionlint_1.7.12_linux_amd64.tar.gz
+		PINNED_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 		;;
-	linux/arm64)
-		ACTIONLINT_ASSET=actionlint_1.7.12_linux_arm64.tar.gz
-		ACTIONLINT_SHA256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+	actionlint:linux/arm64)
+		PINNED_ASSET=actionlint_1.7.12_linux_arm64.tar.gz
+		PINNED_SHA256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
 		;;
-	darwin/amd64)
-		ACTIONLINT_ASSET=actionlint_1.7.12_darwin_amd64.tar.gz
-		ACTIONLINT_SHA256=5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644
+	actionlint:darwin/amd64)
+		PINNED_ASSET=actionlint_1.7.12_darwin_amd64.tar.gz
+		PINNED_SHA256=5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644
 		;;
-	darwin/arm64)
-		ACTIONLINT_ASSET=actionlint_1.7.12_darwin_arm64.tar.gz
-		ACTIONLINT_SHA256=aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f
+	actionlint:darwin/arm64)
+		PINNED_ASSET=actionlint_1.7.12_darwin_arm64.tar.gz
+		PINNED_SHA256=aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f
+		;;
+	shfmt:linux/amd64)
+		PINNED_ASSET=shfmt_v3.13.0_linux_amd64
+		PINNED_SHA256=70aa99784703a8d6569bbf0b1e43e1a91906a4166bf1a79de42050a6d0de7551
+		;;
+	shfmt:linux/arm64)
+		PINNED_ASSET=shfmt_v3.13.0_linux_arm64
+		PINNED_SHA256=2091a31afd47742051a77bf7cfd175533ab07e924c20ef3151cd108fa1cab5b0
+		;;
+	shfmt:darwin/amd64)
+		PINNED_ASSET=shfmt_v3.13.0_darwin_amd64
+		PINNED_SHA256=b6890a0009abf71d36d7c536ad56e3132c547ceb77cd5d5ee62b3469ab4e9417
+		;;
+	shfmt:darwin/arm64)
+		PINNED_ASSET=shfmt_v3.13.0_darwin_arm64
+		PINNED_SHA256=650970603b5946dc6041836ddcfa7a19d99b5da885e4687f64575508e99cf718
+		;;
+	shellcheck:linux/amd64)
+		PINNED_ASSET=shellcheck-v0.11.0.linux.x86_64.tar.xz
+		PINNED_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+		;;
+	shellcheck:linux/arm64)
+		PINNED_ASSET=shellcheck-v0.11.0.linux.aarch64.tar.xz
+		PINNED_SHA256=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
+		;;
+	shellcheck:darwin/amd64)
+		PINNED_ASSET=shellcheck-v0.11.0.darwin.x86_64.tar.xz
+		PINNED_SHA256=3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6
+		;;
+	shellcheck:darwin/arm64)
+		PINNED_ASSET=shellcheck-v0.11.0.darwin.aarch64.tar.xz
+		PINNED_SHA256=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
 		;;
 	*)
-		die "No pinned actionlint asset for $HOST_OS/$HOST_ARCH"
+		die "No pinned $l_pinned_tool asset for $HOST_OS/$HOST_ARCH"
 		;;
 	esac
 }
 
-set_shfmt_asset() {
-	case "$HOST_OS/$HOST_ARCH" in
-	linux/amd64)
-		SHFMT_ASSET=shfmt_v3.13.0_linux_amd64
-		SHFMT_SHA256=70aa99784703a8d6569bbf0b1e43e1a91906a4166bf1a79de42050a6d0de7551
-		;;
-	linux/arm64)
-		SHFMT_ASSET=shfmt_v3.13.0_linux_arm64
-		SHFMT_SHA256=2091a31afd47742051a77bf7cfd175533ab07e924c20ef3151cd108fa1cab5b0
-		;;
-	darwin/amd64)
-		SHFMT_ASSET=shfmt_v3.13.0_darwin_amd64
-		SHFMT_SHA256=b6890a0009abf71d36d7c536ad56e3132c547ceb77cd5d5ee62b3469ab4e9417
-		;;
-	darwin/arm64)
-		SHFMT_ASSET=shfmt_v3.13.0_darwin_arm64
-		SHFMT_SHA256=650970603b5946dc6041836ddcfa7a19d99b5da885e4687f64575508e99cf718
-		;;
-	*)
-		die "No pinned shfmt asset for $HOST_OS/$HOST_ARCH"
-		;;
-	esac
-}
+ensure_pinned_host_tool() {
+	l_tool_name=$1
+	l_tool_version=$2
+	l_base_url=$3
+	l_extract_mode=$4
+	l_archive_member=${5:-}
 
-set_shellcheck_asset() {
-	case "$HOST_OS/$HOST_ARCH" in
-	linux/amd64)
-		SHELLCHECK_ASSET=shellcheck-v0.11.0.linux.x86_64.tar.xz
-		SHELLCHECK_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
-		;;
-	linux/arm64)
-		SHELLCHECK_ASSET=shellcheck-v0.11.0.linux.aarch64.tar.xz
-		SHELLCHECK_SHA256=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
-		;;
-	darwin/amd64)
-		SHELLCHECK_ASSET=shellcheck-v0.11.0.darwin.x86_64.tar.xz
-		SHELLCHECK_SHA256=3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6
-		;;
-	darwin/arm64)
-		SHELLCHECK_ASSET=shellcheck-v0.11.0.darwin.aarch64.tar.xz
-		SHELLCHECK_SHA256=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
-		;;
-	*)
-		die "No pinned ShellCheck asset for $HOST_OS/$HOST_ARCH"
-		;;
-	esac
-}
-
-ensure_actionlint() {
 	ensure_tool_root
 	ensure_host_platform
-	set_actionlint_asset
-	l_install_dir=$LINT_TOOL_ROOT/actionlint/$ACTIONLINT_VERSION/$HOST_OS-$HOST_ARCH
-	ACTIONLINT_BIN=$l_install_dir/actionlint
-	if [ -x "$ACTIONLINT_BIN" ]; then
+	resolve_pinned_tool_asset "$l_tool_name"
+	l_install_dir=$LINT_TOOL_ROOT/$l_tool_name/$l_tool_version/$HOST_OS-$HOST_ARCH
+	PINNED_BIN=$l_install_dir/$l_tool_name
+	if [ -x "$PINNED_BIN" ]; then
+		return 0
+	fi
+
+	l_download=$DOWNLOAD_DIR/$PINNED_ASSET
+	download_and_verify "$l_base_url/$PINNED_ASSET" "$l_download" "$PINNED_SHA256"
+	if [ "$l_extract_mode" = "raw" ]; then
+		rm -rf "$l_install_dir"
+		mkdir -p "$l_install_dir"
+		cp "$l_download" "$PINNED_BIN"
+		chmod 755 "$PINNED_BIN"
 		return 0
 	fi
 
 	require_command tar
-	l_archive=$DOWNLOAD_DIR/$ACTIONLINT_ASSET
 	l_stage=$l_install_dir.stage.$$
-
-	download_and_verify "$ACTIONLINT_BASE_URL/$ACTIONLINT_ASSET" "$l_archive" "$ACTIONLINT_SHA256"
 	rm -rf "$l_stage" "$l_install_dir"
 	mkdir -p "$l_stage" "$l_install_dir"
-	tar -xzf "$l_archive" -C "$l_stage" actionlint
-	mv "$l_stage/actionlint" "$ACTIONLINT_BIN"
-	chmod 755 "$ACTIONLINT_BIN"
+	case "$l_extract_mode" in
+	tgz) tar -xzf "$l_download" -C "$l_stage" "$l_archive_member" ;;
+	txz) tar -xJf "$l_download" -C "$l_stage" ;;
+	esac
+	mv "$l_stage/$l_archive_member" "$PINNED_BIN"
+	chmod 755 "$PINNED_BIN"
 	rm -rf "$l_stage"
+}
+
+ensure_actionlint() {
+	ensure_pinned_host_tool actionlint "$ACTIONLINT_VERSION" "$ACTIONLINT_BASE_URL" tgz actionlint
+	ACTIONLINT_BIN=$PINNED_BIN
 }
 
 ensure_checkbashisms() {
@@ -280,21 +285,8 @@ ensure_checkbashisms() {
 }
 
 ensure_shfmt() {
-	ensure_tool_root
-	ensure_host_platform
-	set_shfmt_asset
-	l_install_dir=$LINT_TOOL_ROOT/shfmt/$SHFMT_VERSION/$HOST_OS-$HOST_ARCH
-	SHFMT_BIN=$l_install_dir/shfmt
-	if [ -x "$SHFMT_BIN" ]; then
-		return 0
-	fi
-
-	l_binary=$DOWNLOAD_DIR/$SHFMT_ASSET
-	download_and_verify "$SHFMT_BASE_URL/$SHFMT_ASSET" "$l_binary" "$SHFMT_SHA256"
-	rm -rf "$l_install_dir"
-	mkdir -p "$l_install_dir"
-	cp "$l_binary" "$SHFMT_BIN"
-	chmod 755 "$SHFMT_BIN"
+	ensure_pinned_host_tool shfmt "$SHFMT_VERSION" "$SHFMT_BASE_URL" raw
+	SHFMT_BIN=$PINNED_BIN
 }
 
 ensure_codespell() {
@@ -317,26 +309,9 @@ ensure_codespell() {
 }
 
 ensure_shellcheck() {
-	ensure_tool_root
-	ensure_host_platform
-	set_shellcheck_asset
-	l_install_dir=$LINT_TOOL_ROOT/shellcheck/$SHELLCHECK_VERSION/$HOST_OS-$HOST_ARCH
-	SHELLCHECK_BIN=$l_install_dir/shellcheck
-	if [ -x "$SHELLCHECK_BIN" ]; then
-		return 0
-	fi
-
-	require_command tar
-	l_archive=$DOWNLOAD_DIR/$SHELLCHECK_ASSET
-	l_stage=$l_install_dir.stage.$$
-
-	download_and_verify "$SHELLCHECK_BASE_URL/$SHELLCHECK_ASSET" "$l_archive" "$SHELLCHECK_SHA256"
-	rm -rf "$l_stage" "$l_install_dir"
-	mkdir -p "$l_stage" "$l_install_dir"
-	tar -xJf "$l_archive" -C "$l_stage"
-	mv "$l_stage/shellcheck-v$SHELLCHECK_VERSION/shellcheck" "$SHELLCHECK_BIN"
-	chmod 755 "$SHELLCHECK_BIN"
-	rm -rf "$l_stage"
+	ensure_pinned_host_tool shellcheck "$SHELLCHECK_VERSION" "$SHELLCHECK_BASE_URL" \
+		txz "shellcheck-v$SHELLCHECK_VERSION/shellcheck"
+	SHELLCHECK_BIN=$PINNED_BIN
 }
 
 run_actionlint() {
@@ -360,38 +335,31 @@ list_lint_shell_files() {
 		' sh
 }
 
-run_checkbashisms() {
+run_shell_lint_tool() {
 	require_command git
 	require_command xargs
-	ensure_checkbashisms
-	printf '==> checkbashisms (devscripts %s)\n' "$DEVSCRIPTS_VERSION"
 	(
 		cd "$ZXFER_ROOT"
 		list_lint_shell_files |
 			xargs -0 sh -c '
-				l_tool=$1
+				l_tool_argc=$1
 				shift
-				[ "$#" -gt 0 ] || exit 0
-				exec "$l_tool" --posix "$@"
-			' sh "$CHECKBASHISMS_BIN"
+				[ "$#" -gt "$l_tool_argc" ] || exit 0
+				exec "$@"
+			' sh "$#" "$@"
 	)
 }
 
+run_checkbashisms() {
+	ensure_checkbashisms
+	printf '==> checkbashisms (devscripts %s)\n' "$DEVSCRIPTS_VERSION"
+	run_shell_lint_tool "$CHECKBASHISMS_BIN" --posix
+}
+
 run_shfmt() {
-	require_command git
-	require_command xargs
 	ensure_shfmt
 	printf '==> shfmt %s\n' "$SHFMT_VERSION"
-	(
-		cd "$ZXFER_ROOT"
-		list_lint_shell_files |
-			xargs -0 sh -c '
-				l_tool=$1
-				shift
-				[ "$#" -gt 0 ] || exit 0
-				exec "$l_tool" -d "$@"
-			' sh "$SHFMT_BIN"
-	)
+	run_shell_lint_tool "$SHFMT_BIN" -d
 }
 
 run_codespell() {
@@ -426,21 +394,10 @@ run_test_helper_eval_policy() {
 }
 
 run_shellcheck() {
-	require_command git
-	require_command xargs
 	run_test_helper_eval_policy
 	ensure_shellcheck
 	printf '==> shellcheck %s\n' "$SHELLCHECK_VERSION"
-	(
-		cd "$ZXFER_ROOT"
-		list_lint_shell_files |
-			xargs -0 sh -c '
-				l_tool=$1
-				shift
-				[ "$#" -gt 0 ] || exit 0
-				exec "$l_tool" --external-sources --source-path=.:src "$@"
-			' sh "$SHELLCHECK_BIN"
-	)
+	run_shell_lint_tool "$SHELLCHECK_BIN" --external-sources --source-path=.:src
 }
 
 run_budget() {

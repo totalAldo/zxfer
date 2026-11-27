@@ -63,20 +63,19 @@ EOT
 }
 
 # Bootstrap with the built-in allowlist before sourcing helpers so early startup
-# never executes PATH-injected awk/sed binaries. zxfer_init_session_environment()
+# never executes PATH-injected awk binaries. zxfer_init_session_environment()
 # later applies the configurable secure PATH derived from
 # ZXFER_SECURE_PATH(_APPEND).
-ZXFER_EARLY_DEFAULT_SECURE_PATH="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-PATH=$ZXFER_EARLY_DEFAULT_SECURE_PATH
+PATH="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 export PATH
 
-# Purpose: Print usage and exit 0 when -h appears before any module loads.
+# Purpose: Print usage on -h and note -V before any module loads.
 # Usage: zxfer_prescan_help_flag "$@"
-# The option string is zxfer_read_command_line_switches' (src/zxfer_cli.sh),
-# so an option's value is skipped: with ":h" alone, -x '-cache$' read as a
-# cluster of flags and its h printed the usage instead of replicating.
+# Shares the option string with zxfer_read_command_line_switches (src/zxfer_cli.sh)
+# so option arguments such as -x '-cache$' or -x '-V' are never misread as flags;
 # tests/test_zxfer_launcher.sh keeps the two strings equal.
 zxfer_prescan_help_flag() {
+	g_zxfer_profile_prescan=0
 	l_opt=""
 	OPTIND=1
 	while getopts ":bBc:dD:eFg:hI:j:kmnN:o:O:PR:sT:UvVwx:YzZ:" l_opt "$@"; do
@@ -85,6 +84,7 @@ zxfer_prescan_help_flag() {
 			zxfer_usage
 			exit 0
 			;;
+		V) g_zxfer_profile_prescan=1 ;;
 		*) ;;
 		esac
 	done
@@ -96,17 +96,6 @@ zxfer_prescan_help_flag() {
 ###############################################################################
 
 zxfer_prescan_help_flag "$@"
-
-# Tell the profiler before option parsing whether -V may be active, so it
-# reads the start clock only then (zxfer_reset_profile_state): any
-# short-option cluster containing V counts, and an option argument that merely
-# contains V costs one clock read.
-g_zxfer_profile_prescan=0
-for l_prescan_arg in "$@"; do
-	case $l_prescan_arg in
-	-*V*) g_zxfer_profile_prescan=1 ;;
-	esac
-done
 
 # Source runtime modules from this project; ${0%/*} is dirname without a fork.
 case $0 in

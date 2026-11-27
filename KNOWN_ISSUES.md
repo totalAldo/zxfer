@@ -10,8 +10,7 @@ describe a concrete failure mode or exploit path.
 
 File references below use the current flat `src/` layout and the shared
 `src/zxfer_modules.sh` loader. The unit tests of `src/zxfer_NAME.sh` live in
-`tests/test_zxfer_NAME.sh` and the `tests/suites/zxfer_NAME_*_tests.sh`
-fragments it runs; black-box pins live in the `tests/test_contract_*.sh`
+`tests/test_zxfer_NAME.sh`; black-box pins live in the `tests/test_contract_*.sh`
 suites.
 
 Latest review: 2026-10-03, against source revision `78e6c83`. Existing entries
@@ -180,7 +179,7 @@ set fails and the run stops.
 OpenZFS accepts user property names that start with `-` (for example `-x:y`;
 only a colon is required). zxfer reads such a name (a property read alone
 names it after `--`) and creates it through `zfs create -o`. However,
-`zxfer_apply_property_changes` in `src/zxfer_property_transfer.sh` passes it
+`zxfer_execute_property_plan` in `src/zxfer_property_transfer.sh` passes it
 as a bare `zfs set` or `zfs inherit` operand (`-x:y=VALUE` or `-x:y`), which
 zfs parses as an option. A `-P` run
 that must change or inherit such a property on an existing destination
@@ -289,17 +288,6 @@ the only sign of which side failed. A fix would record the send side's
 status in the run root, as a `-j` job shell records the pipeline's, and name
 the failing side and the dataset in the message.
 
-### Low: SJIS/Big5/GBK trail bytes can hide a backslash in report quoting
-
-The failure-report and `-v` quoting fast path prints a printable token as-is
-when the shell sees no backslash or single quote in it. In a double-byte
-locale such as `ja_JP.SJIS` or `zh_TW.Big5`, a character whose trail byte is
-0x5C is one character to the shell, so that byte is printed raw instead of
-being doubled as the old `awk` path under `LC_ALL=C` did. No control byte or
-unbalanced quote gets through (fuzzed across bash, dash, ksh, and `/bin/sh`),
-so the risk is ambiguous log text, not terminal injection. See
-`zxfer_quote_token_for_report` in `src/zxfer_reporting.sh`.
-
 ### Low: a BusyBox userland is unvalidated
 
 BusyBox ash itself is supported, but a host whose whole userland is BusyBox
@@ -312,32 +300,6 @@ unsignalled while `zxfer_signal_background_shell` returns 0. A safe helper
 reproduction with failed group signals, a live PID and a failing `ps`
 confirmed that result. This userland gap remains unvalidated on a real
 BusyBox-only host.
-
-### Low: under a UTF-8 locale, bash 3.2 and ksh93 digit checks accept some non-ASCII characters
-
-bash 3.2, which is `/bin/sh` on macOS, matches a bracket range in a `case`
-pattern by the locale's collation order, and so does ksh93u+ on macOS
-(illumos `/bin/sh` is ksh93; not checked there). zxfer does not set
-`LC_ALL` or `LC_COLLATE` for its own shell, so under a UTF-8 locale such as
-`en_US.UTF-8`, `[0-9]` also matches characters that collate between `0` and
-`9`, such as U+2185. `zxfer_is_uint` in `src/zxfer_quoting.sh`, which
-rejects `*[!0-9]*`, then accepts a value made of them, and so do the other
-range patterns in `src`, such as the `ls -ldin` field checks in
-`src/zxfer_path_security.sh`. The only operator input among them is `-j`
-and `-g`. `-j` with such a value passes CLI validation; every numeric test
-on it then fails with a shell error (`integer expression expected` under
-bash), which zxfer reads as false, and the run goes on as if the value were
-above 1 with no job limit: it needs `parallel` (GNU parallel accepts the
-value), and every ready send/receive job starts at once (a destination still
-waits for its parent's receive). `-g` with such a value also passes; `awk`
-reads it as 0, so a `-d` run that plans a delete stops with the
-grandfather-protection error.
-No byte but an ASCII digit matches, so no shell metacharacter gets through,
-and the other checks see values that zxfer, a local tool or the remote
-capability probe produces. dash, bash 5 and zsh compare code points and are
-not affected. A fix lists the characters in every such pattern
-(`[!0123456789]`), as the test tooling now does, with a test that runs under
-`LC_ALL=en_US.UTF-8`.
 
 ## Architectural Remediation Themes
 

@@ -227,7 +227,7 @@ zxfer_cleanup_pid_abort_grace_wait() {
 	0)
 		:
 		;;
-	'' | *[!0-9]*)
+	'' | *[!0123456789]*)
 		sleep 2
 		;;
 	*)
@@ -435,22 +435,15 @@ zxfer_run_tmp_root_has_safe_owned_shape() {
 	[ -n "$l_owned_root_shape_path" ] || return 1
 	[ "$l_owned_root_shape_path" = "${g_zxfer_owned_run_tmp_root:-}" ] || return 1
 	case "$l_owned_root_shape_parent" in
-	/*) ;;
+	/*) l_owned_root_shape_prefix=${l_owned_root_shape_parent%/}/ ;;
 	*) return 1 ;;
 	esac
-	if [ "$l_owned_root_shape_parent" = "/" ]; then
-		case "$l_owned_root_shape_path" in
-		/*) ;;
-		*) return 1 ;;
-		esac
-		l_owned_root_shape_name=${l_owned_root_shape_path#/}
-	else
-		case "$l_owned_root_shape_path" in
-		"$l_owned_root_shape_parent"/*) ;;
-		*) return 1 ;;
-		esac
-		l_owned_root_shape_name=${l_owned_root_shape_path#"$l_owned_root_shape_parent"/}
-	fi
+	case "$l_owned_root_shape_path" in
+	"$l_owned_root_shape_prefix"*)
+		l_owned_root_shape_name=${l_owned_root_shape_path#"$l_owned_root_shape_prefix"}
+		;;
+	*) return 1 ;;
+	esac
 	case "$l_owned_root_shape_name" in
 	"zxfer.$$."?*) ;;
 	*) return 1 ;;
@@ -506,11 +499,7 @@ zxfer_ensure_run_tmp_root() {
 	zxfer_try_get_effective_tmpdir 1 || return
 	l_ensure_run_tmp_root_effective_tmpdir=$g_zxfer_effective_tmpdir
 
-	if [ "$l_ensure_run_tmp_root_effective_tmpdir" = "/" ]; then
-		l_run_tmp_template="/zxfer.$$.XXXXXX"
-	else
-		l_run_tmp_template="$l_ensure_run_tmp_root_effective_tmpdir/zxfer.$$.XXXXXX"
-	fi
+	l_run_tmp_template="${l_ensure_run_tmp_root_effective_tmpdir%/}/zxfer.$$.XXXXXX"
 	# One substitution prints the caller's umask on its first line, then
 	# creates the root under umask 077 without changing this shell's umask.
 	# Recording the umask here spares the file allocator a $(umask) fork.
@@ -537,7 +526,7 @@ zxfer_ensure_run_tmp_root() {
 	fi
 	# The mode keeps special bits: a root under a setgid TMPDIR is 2700.
 	case $l_run_tmp_root_record in
-	*"$ZXFER_TAB"700 | *"$ZXFER_TAB"[1-7]700) ;;
+	*"$ZXFER_TAB"700 | *"$ZXFER_TAB"[1234567]700) ;;
 	*)
 		g_zxfer_owned_run_tmp_root=""
 		g_zxfer_owned_run_tmp_root_parent=""
@@ -612,11 +601,9 @@ zxfer_cleanup_runtime_artifact_path() {
 
 	[ -n "$l_cleanup_path" ] || return 0
 	zxfer_runtime_artifact_path_is_run_root_child "$l_cleanup_path" || return 1
-	if [ -L "$l_cleanup_path" ]; then
-		rm -f "$l_cleanup_path" 2>/dev/null || return 1
-	elif [ -d "$l_cleanup_path" ]; then
+	if [ -d "$l_cleanup_path" ] && [ ! -L "$l_cleanup_path" ]; then
 		rm -rf "$l_cleanup_path" 2>/dev/null || return 1
-	elif [ -e "$l_cleanup_path" ]; then
+	elif [ -e "$l_cleanup_path" ] || [ -L "$l_cleanup_path" ]; then
 		rm -f "$l_cleanup_path" 2>/dev/null || return 1
 	fi
 	g_zxfer_profile_runtime_artifact_paths_cleaned=$((g_zxfer_profile_runtime_artifact_paths_cleaned + 1))
@@ -669,6 +656,18 @@ zxfer_cleanup_runtime_artifact_path_list() {
 # ARTIFACT ALLOCATION AND READBACK
 ################################################################################
 
+# Purpose: Check that a runtime artifact prefix or sibling suffix is a safe
+# ASCII path component.
+# Usage: zxfer_is_safe_artifact_token TOKEN; returns 1 on empty, "." or "..",
+# or any character outside [0-9A-Za-z._-].
+zxfer_is_safe_artifact_token() {
+	case $1 in
+	'' | '.' | '..' | *[!0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._-]*)
+		return 1
+		;;
+	esac
+}
+
 # Purpose: Create a private 0700 scratch directory under the per-run temp
 # root.
 # Usage: zxfer_create_private_temp_dir [PREFIX]; publishes
@@ -677,9 +676,7 @@ zxfer_create_private_temp_dir() {
 	l_prefix=${1:-zxfer-temp-dir}
 
 	g_zxfer_runtime_artifact_path_result=""
-	case "$l_prefix" in
-	'' | '.' | '..' | *[!A-Za-z0-9._-]*) return 1 ;;
-	esac
+	zxfer_is_safe_artifact_token "$l_prefix" || return 1
 	zxfer_ensure_run_tmp_root || return "$?"
 
 	# A taken name means an earlier allocation ran in a subshell and its
@@ -710,17 +707,15 @@ zxfer_create_runtime_artifact_file() {
 	l_artifact_name=${2:-}
 
 	g_zxfer_runtime_artifact_path_result=""
-	case "$l_prefix" in
-	'' | '.' | '..' | *[!A-Za-z0-9._-]*) return 1 ;;
-	esac
-	case $l_artifact_name in
-	'.' | '..' | *[!0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._-]*) return 1 ;;
-	esac
+	zxfer_is_safe_artifact_token "$l_prefix" || return 1
+	if [ -n "$l_artifact_name" ]; then
+		zxfer_is_safe_artifact_token "$l_artifact_name" || return 1
+	fi
 	zxfer_ensure_run_tmp_root || return "$?"
 	# A root that zxfer_ensure_run_tmp_root did not create here has no recorded
 	# umask. Read it once; never pass umask an empty value (ksh reads 0777).
 	case ${g_zxfer_run_umask:-} in
-	'' | *[!0-7]*) g_zxfer_run_umask=$(umask) ;;
+	'' | *[!01234567]*) g_zxfer_run_umask=$(umask) ;;
 	esac
 
 	# Exclusive 0600 creation in this shell: umask 077 plus noclobber, both
@@ -769,9 +764,7 @@ zxfer_create_runtime_artifact_workspace() {
 	l_workspace_prefix=$1
 	shift
 	for l_workspace_name; do
-		case $l_workspace_name in
-		'' | '.' | '..' | *[!0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._-]*) return 1 ;;
-		esac
+		zxfer_is_safe_artifact_token "$l_workspace_name" || return 1
 	done
 	# A subshell may release its primary but retain a cache sibling. Check
 	# requested names before creating any sibling; this also works under set -f.
@@ -877,16 +870,8 @@ zxfer_read_runtime_artifact_file() {
 # Usage: zxfer_read_runtime_artifact_file_trimmed PATH; same result and status
 # as zxfer_read_runtime_artifact_file.
 zxfer_read_runtime_artifact_file_trimmed() {
-	l_artifact_path=$1
-
-	zxfer_read_runtime_artifact_file "$l_artifact_path" ||
-		return "$?"
-	case "$g_zxfer_runtime_artifact_read_result" in
-	*'
-')
-		g_zxfer_runtime_artifact_read_result=${g_zxfer_runtime_artifact_read_result%?}
-		;;
-	esac
+	zxfer_read_runtime_artifact_file "$1" || return "$?"
+	g_zxfer_runtime_artifact_read_result=${g_zxfer_runtime_artifact_read_result%"$ZXFER_LF"}
 }
 
 # Purpose: Allocate one scratch file under the run root, or stop the run.

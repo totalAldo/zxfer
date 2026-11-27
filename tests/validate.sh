@@ -8,6 +8,8 @@ set -eu
 ZXFER_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=tests/helpers/test_catalog.sh
 . "$ZXFER_ROOT/tests/helpers/test_catalog.sh"
+# shellcheck source=tests/helpers/runner_common.sh
+. "$ZXFER_ROOT/tests/helpers/runner_common.sh"
 VALIDATION_MAP=${ZXFER_VALIDATION_MAP:-"$ZXFER_ROOT/tests/validation_map.tsv"}
 VALIDATION_PROFILES=${ZXFER_VALIDATION_PROFILES:-"$ZXFER_ROOT/tests/validation_profiles.tsv"}
 ZXFER_VALIDATE_JOBS=${ZXFER_VALIDATE_JOBS:-4}
@@ -60,11 +62,8 @@ die() {
 }
 
 require_validate_jobs() {
-	case "$ZXFER_VALIDATE_JOBS" in
-	'' | *[!0-9]* | 0)
+	zxfer_runner_positive_integer_p "$ZXFER_VALIDATE_JOBS" ||
 		die "ZXFER_VALIDATE_JOBS must be a positive integer: $ZXFER_VALIDATE_JOBS"
-		;;
-	esac
 }
 
 print_profiles() {
@@ -95,15 +94,9 @@ report_command_availability() {
 }
 
 set_lint_cache_root() {
-	if [ -n "${ZXFER_LINT_TOOL_DIR:-}" ]; then
-		LINT_CACHE_ROOT=$ZXFER_LINT_TOOL_DIR
-	elif [ -n "${XDG_CACHE_HOME:-}" ]; then
-		LINT_CACHE_ROOT=$XDG_CACHE_HOME/zxfer/lint-tools
-	elif [ -n "${HOME:-}" ]; then
-		LINT_CACHE_ROOT=$HOME/.cache/zxfer/lint-tools
-	else
-		LINT_CACHE_ROOT=${TMPDIR:-/tmp}/zxfer-lint-tools
-	fi
+	LINT_CACHE_ROOT=$(zxfer_runner_resolve_cache_dir \
+		"${ZXFER_LINT_TOOL_DIR:-}" "${XDG_CACHE_HOME:-}" \
+		"zxfer/lint-tools" ".cache/zxfer/lint-tools" "zxfer-lint-tools")
 }
 
 find_cached_lint_tool() {
@@ -189,21 +182,7 @@ run_doctor() {
 }
 
 append_unique_word() {
-	l_list=$1
-	l_value=$2
-
-	case " $l_list " in
-	*" $l_value "*)
-		printf '%s\n' "$l_list"
-		;;
-	*)
-		if [ -n "$l_list" ]; then
-			printf '%s %s\n' "$l_list" "$l_value"
-		else
-			printf '%s\n' "$l_value"
-		fi
-		;;
-	esac
+	zxfer_runner_append_unique_word "$1" "$2"
 }
 
 # Purpose: Print every black-box contract suite, tests/test_contract_*.sh,
@@ -229,7 +208,7 @@ convention_unit_suites() {
 	l_convention_module=${1#src/zxfer_}
 	l_convention_module=${l_convention_module%.sh}
 	case "$l_convention_module" in
-	'' | *[!A-Za-z0-9_]*) return 0 ;;
+	'' | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*) return 0 ;;
 	esac
 	if [ -f "$ZXFER_ROOT/tests/test_zxfer_$l_convention_module.sh" ]; then
 		printf 'tests/test_zxfer_%s.sh\n' "$l_convention_module"
@@ -288,33 +267,10 @@ print_mapping_field() {
 	fi
 }
 
-# Purpose: Print the entry suite that sources a tests/suites fragment.
-# Usage: fragment_entry_suite tests/suites/NAME; prints nothing if unowned.
-fragment_entry_suite() {
-	l_fragment_path=${1#tests/}
-	set -- "$ZXFER_ROOT"/tests/test_*.sh
-	[ -f "$1" ] || return 0
-	l_fragment_rows=$(zxfer_test_fragment_rows "$@") || return 1
-	printf '%s\n' "$l_fragment_rows" | awk -F '\t' -v path="$l_fragment_path" '
-		$2 == path { sub(/.*\//, "", $1); print "tests/" $1; exit }
-	'
-}
-
 map_changed_path() {
 	l_changed_path=$1
 	l_matched=0
-
-	# A behavior fragment runs only inside its entry suite, so it maps as a
-	# change to that entry file; other paths map as themselves.
-	l_map_path=$l_changed_path
-	case "$l_changed_path" in
-	tests/suites/*)
-		l_fragment_entry=$(fragment_entry_suite "$l_changed_path") ||
-			die "Failed to read the fragment sources for: $l_changed_path"
-		[ -z "$l_fragment_entry" ] || l_map_path=$l_fragment_entry
-		;;
-	esac
-	l_convention_suites=$(convention_unit_suites "$l_map_path")
+	l_convention_suites=$(convention_unit_suites "$l_changed_path")
 
 	while IFS=$TAB read -r l_pattern l_units l_integration l_perf l_docs l_reason; do
 		case "$l_pattern" in
@@ -324,13 +280,10 @@ map_changed_path() {
 		esac
 		# The repository-controlled path key is intentionally a case glob.
 		# shellcheck disable=SC2254
-		case "$l_map_path" in
+		case "$l_changed_path" in
 		$l_pattern)
 			l_matched=1
 			printf '==> quick map: %s\n' "$l_changed_path"
-			if [ "$l_map_path" != "$l_changed_path" ]; then
-				printf '    fragment of: %s\n' "$l_map_path"
-			fi
 			printf '    matched:     %s\n' "$l_pattern"
 			printf '    reason:      %s\n' "$l_reason"
 			if [ -n "$l_convention_suites" ]; then
@@ -344,10 +297,10 @@ map_changed_path() {
 			print_mapping_field integration "$l_integration"
 			print_mapping_field perf "$l_perf"
 			print_mapping_field docs "$l_docs"
-			append_mapping_field unit "$l_units" "$l_map_path"
-			append_mapping_field integration "$l_integration" "$l_map_path"
-			append_mapping_field perf "$l_perf" "$l_map_path"
-			append_mapping_field docs "$l_docs" "$l_map_path"
+			append_mapping_field unit "$l_units" "$l_changed_path"
+			append_mapping_field integration "$l_integration" "$l_changed_path"
+			append_mapping_field perf "$l_perf" "$l_changed_path"
+			append_mapping_field docs "$l_docs" "$l_changed_path"
 			break
 			;;
 		esac

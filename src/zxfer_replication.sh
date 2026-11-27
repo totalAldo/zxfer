@@ -54,10 +54,11 @@
 #   the -g pre-pass's checked plan path and destroy target. The plan changes only
 #   through zxfer_snapshot_plan.sh; a seed receive publishes its snapshot as
 #   the new anchor with zxfer_publish_snapshot_transfer_plan.
-# mutates caches: destination existence and the post-seed property iteration
-#   cache through their state helpers. Prepares the full queue and plans once
-#   per pass, then snapshot-only -g preflight. Owns -m mount checks, unmounts,
-#   snapshot and rediscovery; delegates service stop/recovery to migration services.
+# mutates caches: destination existence, discovery's recursive preview lists on
+#   dry runs, and the post-seed property iteration cache. Prepares the full
+#   queue and plans once per pass, then snapshot-only -g preflight. Owns -m
+#   mount checks, unmounts, snapshot and rediscovery; delegates service
+#   stop/recovery to migration services.
 # returns via stdout: none.
 
 # Purpose: Reset the replication state for a new session.
@@ -94,9 +95,7 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 	[ "${g_did_delete_dest_snapshots:-0}" -eq 1 ] || return 0
 	[ "${g_deleted_dest_newer_snapshots:-0}" -eq 1 ] || return 0
 
-	zxfer_probe_destination_existence "$g_actual_dest" live ||
-		zxfer_throw_error "$g_zxfer_destination_exists_error"
-	[ "$g_zxfer_destination_exists_result" -eq 1 ] || return 0
+	zxfer_destination_exists "$g_actual_dest" live || return 0
 
 	# The snapshot name is everything after the first "@" of the record path.
 	l_rollback_path=${g_last_common_snap%%	*}
@@ -121,15 +120,14 @@ zxfer_seed_destination_for_snapshot_transfer() {
 	l_seed_record=$1
 	l_seed_path=$2
 
-	zxfer_probe_destination_existence "$g_actual_dest" ||
-		zxfer_throw_error "$g_zxfer_destination_exists_error"
-	if [ "$g_zxfer_destination_exists_result" -eq 0 ]; then
-		# Live-probe a cached-missing dataset once more before choosing the
-		# missing-dataset receive path: discovery may be minutes old.
-		zxfer_probe_destination_existence "$g_actual_dest" live ||
-			zxfer_throw_error "$g_zxfer_destination_exists_error"
+	# Live-probe a cached-missing dataset once more before choosing the
+	# missing-dataset receive path: discovery may be minutes old.
+	if zxfer_destination_exists "$g_actual_dest" ||
+		zxfer_destination_exists "$g_actual_dest" live; then
+		l_seed_dest_exists=1
+	else
+		l_seed_dest_exists=0
 	fi
-	l_seed_dest_exists=$g_zxfer_destination_exists_result
 
 	# The plan published g_dest_has_snapshots from discovery, or from the live
 	# rows when this run destroyed some of the dataset's snapshots.
@@ -140,9 +138,7 @@ zxfer_seed_destination_for_snapshot_transfer() {
 	fi
 	if [ "$l_seed_dest_exists" -eq 0 ]; then
 		zxfer_echov "Destination dataset does not exist [$g_actual_dest]. Sending first snapshot [$l_seed_path]"
-		if [ -n "${g_option_R_recursive:-}" ] && [ "$g_option_n_dryrun" -eq 0 ]; then
-			zxfer_warn_stderr "zxfer: destination dataset [$g_actual_dest] is missing; attempting creation before continuing recursive replication."
-		fi
+		zxfer_warn_missing_recursive_destination "$g_actual_dest"
 		zxfer_zfs_send_receive "" "$l_seed_path" "$g_actual_dest" "0"
 	elif [ "$g_dest_has_snapshots" -eq 0 ]; then
 		zxfer_echov "Destination dataset [$g_actual_dest] exists but has no snapshots. Seeding with [$l_seed_path]"
@@ -232,7 +228,9 @@ zxfer_newsnap() {
 
 	l_cmd=""
 	if zxfer_command_display_render_enabled; then
-		l_cmd=$(zxfer_render_source_zfs_command "$@")
+		zxfer_render_zfs_command_for_role source "$@" ||
+			zxfer_throw_error "Error when executing command." "$?"
+		l_cmd=$g_zxfer_shell_command_result
 		zxfer_record_last_command_string "$l_cmd"
 	else
 		zxfer_record_last_command_opaque
@@ -250,22 +248,12 @@ zxfer_newsnap() {
 # Usage: zxfer_unsupported_property_scan_is_required, after discovery; a clean
 # recursive no-op without property work skips the probes.
 zxfer_unsupported_property_scan_is_required() {
-	[ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ] || return 1
-
-	if [ "$g_option_P_transfer_property" -eq 1 ] ||
-		[ "$g_option_o_override_property" != "" ]; then
-		return 0
-	fi
-	if [ "${g_option_e_restore_property_mode:-0}" -eq 1 ] ||
-		[ "${g_option_k_backup_property_mode:-0}" -eq 1 ]; then
-		return 0
-	fi
-	if [ "${g_option_R_recursive:-}" = "" ]; then
-		return 0
-	fi
-	[ -n "${g_recursive_source_list:-}" ] || return 1
-
-	return 0
+	[ "${g_option_U_skip_unsupported_properties:-0}" -eq 1 ] &&
+		{ zxfer_property_pass_is_enabled ||
+			[ "${g_option_e_restore_property_mode:-0}" -eq 1 ] ||
+			[ "${g_option_k_backup_property_mode:-0}" -eq 1 ] ||
+			[ -z "${g_option_R_recursive:-}" ] ||
+			[ -n "${g_recursive_source_list:-}" ]; }
 }
 
 # Parent-first ordering is shared by the full queue and its snapshot-only -g
@@ -435,8 +423,7 @@ zxfer_copy_filesystems() {
 	fi
 
 	l_copy_property_pass=0
-	if [ "$g_option_P_transfer_property" -eq 1 ] ||
-		[ "$g_option_o_override_property" != "" ]; then
+	if zxfer_property_pass_is_enabled; then
 		l_copy_property_pass=1
 	fi
 	if zxfer_pass_has_replication_work; then
@@ -580,7 +567,9 @@ zxfer_prepare_migration_services() {
 		if zxfer_command_display_render_enabled; then
 			while IFS= read -r l_migration_source; do
 				[ -n "$l_migration_source" ] || continue
-				zxfer_echov "Dry run: $(zxfer_render_source_zfs_command unmount "$l_migration_source")"
+				zxfer_render_zfs_command_for_role source unmount "$l_migration_source" ||
+					zxfer_throw_error "Error when executing command." "$?"
+				zxfer_echov "Dry run: $g_zxfer_shell_command_result"
 			done <<EOF
 ${g_recursive_source_list:-}
 EOF
@@ -638,7 +627,10 @@ zxfer_maybe_capture_preflight_snapshot() {
 # Usage: zxfer_preview_zfs_mode_dry_run, instead of the live pass under -n;
 # previews only the requested source dataset.
 zxfer_preview_zfs_mode_dry_run() {
-	zxfer_publish_dry_run_snapshot_discovery
+	zxfer_reset_snapshot_discovery_state
+	zxfer_reset_destination_existence_cache
+	g_recursive_source_list=$g_initial_source
+	g_recursive_source_dataset_list=$g_initial_source
 	if [ "$g_option_R_recursive" != "" ]; then
 		zxfer_echoV "Dry run: recursive descendant discovery is skipped; previewing only the explicitly requested source dataset."
 	fi

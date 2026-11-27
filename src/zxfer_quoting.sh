@@ -66,11 +66,11 @@ zxfer_value_is_single_line() {
 	esac
 }
 
-# Purpose: Check that a value is a non-empty string of decimal digits.
+# Purpose: Check that a value is a non-empty string of ASCII decimal digits.
 # Usage: zxfer_is_uint VALUE; returns 1 otherwise and prints nothing.
 zxfer_is_uint() {
 	case $1 in
-	'' | *[!0-9]*) return 1 ;;
+	'' | *[!0123456789]*) return 1 ;;
 	esac
 }
 

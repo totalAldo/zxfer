@@ -55,23 +55,10 @@ verbose_add_hostile_root_fixture() {
 
 	ARGV_LOG="$CASE_DIR/argv.log"
 	: >"$ARGV_LOG"
-	mv "$MOCKBIN_DIR/zfs" "$MOCKBIN_DIR/zfs.canned" ||
-		fail "Unable to stage the canned zfs behind the argv recorder."
-	cat >"$MOCKBIN_DIR/zfs" <<EOF
-#!/bin/sh
-case "\${1:-}" in
-create | set | inherit) printf '[%s]\n' "\$@" >>"$ARGV_LOG" ;;
-esac
-exec "$MOCKBIN_DIR/zfs.canned" "\$@"
-EOF
-	chmod +x "$MOCKBIN_DIR/zfs"
-}
-
-# Purpose: Print how many control bytes other than LF and TAB (C0 or DEL) a
-# file holds. TAB appears in snapshot records (name TAB guid).
-# Usage: verbose_count_control_bytes FILE
-verbose_count_control_bytes() {
-	LC_ALL=C tr -dc '\001-\010\013-\037\177' <"$1" | wc -c | tr -d ' '
+	MOCK_ZFS_ARGV_LOG=$ARGV_LOG
+	MOCK_ZFS_ARGV_VERBS="create:set:inherit"
+	MOCK_ZFS_ARGV_FORMAT="lines"
+	export MOCK_ZFS_ARGV_LOG MOCK_ZFS_ARGV_VERBS MOCK_ZFS_ARGV_FORMAT
 }
 
 # Purpose: Print how many lines of FILE equal LINE exactly.
@@ -101,16 +88,16 @@ test_verbose_output_escapes_hostile_property_values() {
 			if [ "$l_mode" = local ]; then
 				planning_run_property_pass -v -V -P
 			else
-				planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+				zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 					fail "Unable to write socket-aware mock ssh."
 				PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
 					planning_run_property_pass -T localhost -v -V -P
 			fi
 
 			assertEquals "$l_case: stdout holds no control byte but LF and TAB" \
-				0 "$(verbose_count_control_bytes "$CASE_DIR/zxfer.stdout")"
+				0 "$(blackbox_count_control_bytes "$CASE_DIR/zxfer.stdout")"
 			assertEquals "$l_case: stderr holds no control byte but LF and TAB" \
-				0 "$(verbose_count_control_bytes "$CASE_DIR/zxfer.stderr")"
+				0 "$(blackbox_count_control_bytes "$CASE_DIR/zxfer.stderr")"
 			assertEquals "$l_case: -v shows the set list escaped on one line" \
 				1 "$(verbose_count_exact_lines "$CASE_DIR/zxfer.stdout" "Property set list: $l_shown")"
 			assertEquals "$l_case: the value's LF forges no line" \

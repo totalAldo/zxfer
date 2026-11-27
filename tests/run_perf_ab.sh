@@ -178,17 +178,17 @@ zxfer_perf_ab_parse_args() {
 	[ -n "$g_perf_ab_baseline_ref" ] ||
 		zxfer_perf_ab_usage_error "--baseline-ref is required"
 	case "$g_perf_ab_reps" in
-	'' | 0* | *[!0-9]*)
+	'' | 0* | *[!0123456789]*)
 		zxfer_perf_ab_usage_error "--reps must be a positive integer"
 		;;
 	esac
 	case "$g_perf_ab_latency_ms" in
-	'' | *[!0-9]* | 0?*)
+	'' | *[!0123456789]* | 0?*)
 		zxfer_perf_ab_usage_error "--latency-ms must be a non-negative integer"
 		;;
 	esac
 	case "$g_perf_ab_snapshots" in
-	'' | *[!0-9]* | 0* | 1)
+	'' | *[!0123456789]* | 0* | 1)
 		zxfer_perf_ab_usage_error "--snapshots must be an integer of at least 2"
 		;;
 	esac
@@ -231,7 +231,7 @@ zxfer_perf_ab_parse_args() {
 	g_perf_ab_shell=$l_shell_path
 	# Leading zeros are refused so shell arithmetic never reads octal.
 	case ",$g_perf_ab_sizes," in
-	,, | *,,* | *,0* | *[!0-9,]*)
+	,, | *,,* | *,0* | *[!0123456789,]*)
 		zxfer_perf_ab_usage_error "--sizes must be a comma-separated list of positive integers"
 		;;
 	esac
@@ -296,7 +296,7 @@ zxfer_perf_ab_start_clock() {
 	# %N must print nanoseconds: 10 digits of seconds plus 9 of fraction.
 	l_clock_sample=$(date '+%s%N' 2>/dev/null)
 	case "$l_clock_sample" in
-	'' | *[!0-9]*) l_clock_sample="" ;;
+	'' | *[!0123456789]*) l_clock_sample="" ;;
 	esac
 	if [ "${#l_clock_sample}" -ge 19 ]; then
 		g_perf_ab_clock=date_ns
@@ -393,6 +393,7 @@ zxfer_perf_ab_build_fixture() {
 				l_fixture_index=$((l_fixture_index + 1))
 			done
 		} >>"$l_fixture_dir/manifest" || return 1
+		zxfer_mockbin_index_manifest "$l_fixture_dir" || return 1
 	done
 	case " $g_perf_ab_scenarios " in
 	*" props "* | *" restore "* | *" remote_restore "* | *" forward "* | *" remote_forward "*)
@@ -669,7 +670,15 @@ zxfer_perf_ab_parse_args "$@"
 # Mock knobs inherited from a calling suite would redirect logs or add
 # latency to local runs; start from a clean slate.
 unset MOCK_SPAWN_LOG MOCK_ZFS_LOG MOCK_ZFS_FIXTURE_DIR MOCK_ZFS_DEFAULT_STATUS \
-	MOCK_SSH_LOG MOCK_SSH_HANDSHAKE_S MOCK_SSH_MUX_S
+	MOCK_ZFS_STRICT_RECEIVE MOCK_ZFS_ARGV_LOG MOCK_ZFS_ARGV_VERBS \
+	MOCK_ZFS_ARGV_FORMAT MOCK_ZFS_DELAY_RECEIVE_GLOB \
+	MOCK_ZFS_DELAY_RECEIVE_SECONDS MOCK_ZFS_RECEIVE_BYTES_LOG \
+	MOCK_ZFS_RECEIVE_STREAM_DIR MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR \
+	MOCK_SSH_LOG MOCK_SSH_HANDSHAKE_S MOCK_SSH_MUX_S \
+	MOCK_SSH_REJECT_CONTROL_MASTER MOCK_SSH_READ_STDIN \
+	MOCK_SSH_CAPABILITY_RESPONSE_FILE MOCK_PARALLEL_ARGV_LOG \
+	MOCK_SVCADM_FAIL MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_MATCH \
+	MOCK_FAIL_DIR MOCK_FAIL_STDERR MOCK_FAIL_STATUS
 
 g_perf_ab_workdir=$(zxfer_mockbin_make_bench_workdir zxfer_perf_ab) ||
 	zxfer_perf_ab_die "unable to create a work directory under /tmp"

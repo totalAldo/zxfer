@@ -581,5 +581,40 @@ test_packaged_version_is_major_minor_and_build_date() {
 		"ok" "$l_version_shape"
 }
 
+test_failure_report_unsafe_mode_escapes_control_bytes_and_trailing_newlines() {
+	l_esc=$(printf '\033')
+	l_bell=$(printf '\007')
+	l_control_source=$(printf 'tank/src%s[31m%s' "$l_esc" "$l_bell")
+	g_golden_case_unsafe_commands=1
+
+	zxfer_golden_invoke_zxfer -R "$l_control_source"
+	assertEquals "Unsafe control-character invocation must exit 2." 2 "$g_golden_exit_status"
+	assertEquals "Unsafe control-character invocation must not write stdout." \
+		"" "$(cat "$g_golden_stdout_file")"
+	zxfer_golden_normalize_stream <"$g_golden_stderr_file" >"$g_golden_actual_file"
+	assertTrue "ESC and BEL must be hex-escaped once in invocation." \
+		"grep -Fxq \"invocation: '[zxfer-path]' '-R' 'tank/src\\x1B[31m\\x07'\" '$g_golden_actual_file'"
+	assertFalse "Raw ESC or BEL bytes must never reach stderr." \
+		"grep -F -e '$l_esc' -e '$l_bell' '$g_golden_stderr_file'"
+
+	l_trailing_source="tank/src$ZXFER_LF"
+	zxfer_golden_invoke_zxfer -R "$l_trailing_source"
+	assertEquals "Unsafe trailing-newline invocation must exit 2." 2 "$g_golden_exit_status"
+	zxfer_golden_normalize_stream <"$g_golden_stderr_file" >"$g_golden_actual_file"
+	assertTrue "Trailing newline must be preserved as \\n in invocation." \
+		"grep -Fxq \"invocation: '[zxfer-path]' '-R' 'tank/src\\n'\" '$g_golden_actual_file'"
+	zxfer_golden_assert_mock_tools_not_executed cli_unsafe_control_bytes
+}
+
+test_error_log_email_example_self_test() {
+	l_example_output=$(sh "$ZXFER_ROOT/examples/error-log-email-notify.sh" --self-test 2>&1)
+	l_example_status=$?
+
+	assertEquals "examples/error-log-email-notify.sh --self-test must exit 0: $l_example_output" \
+		0 "$l_example_status"
+	assertContains "The example self-test must report success." \
+		"$l_example_output" "self-test passed"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

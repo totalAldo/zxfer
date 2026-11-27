@@ -45,7 +45,8 @@
 #   the immediately consumed existence result), g_zxfer_destination_dataset_result,
 #   and g_zxfer_live_destination_record_file_error.
 # reads globals: g_initial_source, g_initial_source_had_trailing_slash,
-#   g_destination and g_destination_operating_system.
+#   g_destination, g_destination_operating_system, g_option_R_recursive, and
+#   g_option_n_dryrun.
 # mutates caches: destination existence and the reusable live listing file.
 # returns via stdout: none.
 
@@ -59,10 +60,11 @@ zxfer_reset_destination_existence_cache() {
 	g_recursive_dest_list=""
 }
 
-# Purpose: Forget the reusable live listing file.
-# Usage: zxfer_reset_live_destination_listing_state; called by the session
-# reset, so the next live listing allocates a file under the new run root.
-zxfer_reset_live_destination_listing_state() {
+# Purpose: Reset destination session state, forgetting both the observation
+# cache and the reusable live listing file.
+# Usage: zxfer_reset_destination_session_state, from session initialization.
+zxfer_reset_destination_session_state() {
+	zxfer_reset_destination_existence_cache
 	g_zxfer_live_destination_listing_file=""
 }
 
@@ -322,12 +324,8 @@ zxfer_exists_destination_via_parent_recursive_listing() {
 	while :; do
 		l_parent_probe_parent=${l_parent_probe_child%/*}
 		[ "$l_parent_probe_parent" != "$l_parent_probe_child" ] || break
-		if zxfer_command_trace_enabled; then
-			zxfer_trace_rendered_command "$l_parent_probe_trace" \
-				"$(zxfer_render_destination_zfs_command list -H -r -o name "$l_parent_probe_parent")"
-		else
-			zxfer_record_last_command_opaque
-		fi
+		zxfer_trace_zfs_command_for_role "$l_parent_probe_trace" \
+			destination list -H -r -o name "$l_parent_probe_parent"
 		l_parent_probe_missing=$l_parent_probe_child
 		if l_parent_probe_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_parent_probe_parent" 2>&1); then
 			# Literal whole-line membership, without grep processes. Finding
@@ -397,13 +395,8 @@ zxfer_probe_destination_existence() {
 	fi
 
 	g_zxfer_profile_exists_destination_calls=$((g_zxfer_profile_exists_destination_calls + 1))
-
-	if zxfer_command_trace_enabled; then
-		zxfer_trace_rendered_command "Checking if destination exists" \
-			"$(zxfer_render_destination_zfs_command list -H "$l_probe_exists_dest")"
-	else
-		zxfer_record_last_command_opaque
-	fi
+	zxfer_trace_zfs_command_for_role "Checking if destination exists" \
+		destination list -H "$l_probe_exists_dest"
 
 	if l_probe_exists_output=$(zxfer_run_destination_zfs_cmd list -H "$l_probe_exists_dest" 2>&1); then
 		zxfer_set_destination_existence_cache_entry "$l_probe_exists_dest" 1
@@ -432,4 +425,23 @@ zxfer_probe_destination_existence() {
 		g_zxfer_destination_exists_error="Failed to determine whether destination dataset [$l_probe_exists_dest] exists."
 	fi
 	return 1
+}
+
+# Purpose: Probe whether a destination dataset exists, throwing on probe error.
+# Usage: if zxfer_destination_exists DATASET [live]; then ...; preserves the
+# probe's exit status on operational failure and returns 0 when present, 1 when
+# missing.
+zxfer_destination_exists() {
+	zxfer_probe_destination_existence "$@" ||
+		zxfer_throw_error "$g_zxfer_destination_exists_error" "$?"
+	[ "$g_zxfer_destination_exists_result" -eq 1 ]
+}
+
+# Purpose: Emit the operator stderr notice before creating or seeding a missing
+# destination dataset during a live recursive run.
+# Usage: zxfer_warn_missing_recursive_destination DATASET.
+zxfer_warn_missing_recursive_destination() {
+	[ -n "${g_option_R_recursive:-}" ] && [ "${g_option_n_dryrun:-0}" -eq 0 ] ||
+		return 0
+	zxfer_warn_stderr "zxfer: destination dataset [$1] is missing; attempting creation before continuing recursive replication."
 }

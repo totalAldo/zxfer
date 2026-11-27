@@ -155,9 +155,14 @@ test_newsnap_names_the_snapshot_lazily_once_per_run() {
 		printf '%s\n' "$l_name"
 	)
 
+	name_shape="unexpected <$first_name>"
 	case $first_name in
-	"zxfer_$$_"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) name_shape=ok ;;
-	*) name_shape="unexpected <$first_name>" ;;
+	"zxfer_$$_"*)
+		l_stamp=${first_name#"zxfer_$$_"}
+		if zxfer_is_uint "$l_stamp" && [ "${#l_stamp}" -eq 14 ]; then
+			name_shape=ok
+		fi
+		;;
 	esac
 	assertEquals "The first snapshot should get the zxfer_PID_YYYYmmddHHMMSS name." ok "$name_shape"
 	assertEquals "Later snapshots in the same run should reuse the name." \

@@ -155,7 +155,7 @@ test_budgets_file_is_well_formed() {
 			;;
 		esac
 		case "$l_max" in
-		'' | *[!0-9]*)
+		'' | *[!0123456789]*)
 			fail "budget max must be a non-negative integer: $l_scenario/$l_metric: $l_max"
 			;;
 		esac

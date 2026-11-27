@@ -8,7 +8,7 @@ description: Choose and explain safe validation commands for zxfer changes based
 ## Workflow
 
 1. Inspect the diff and touched files before choosing commands.
-2. Run `./tests/validate.sh quick <changed paths>` first: it maps `src/zxfer_NAME.sh` to its entry suite `tests/test_zxfer_NAME.sh` (fragments in `tests/suites/zxfer_NAME_*_tests.sh`) plus every black-box `tests/test_contract_*.sh` suite, and prints wider follow-ups without running them. Iterate with `./tests/run_shunit_tests.sh <suite>`; add `ZXFER_TEST_SHELL=/bin/dash` for portability-sensitive code.
+2. Run `./tests/validate.sh quick <changed paths>` first: it maps `src/zxfer_NAME.sh` to its unit suite `tests/test_zxfer_NAME.sh` plus every black-box `tests/test_contract_*.sh` suite, and prints wider follow-ups without running them. Iterate with `./tests/run_shunit_tests.sh <suite>`; add `ZXFER_TEST_SHELL=/bin/dash` for portability-sensitive code.
 3. Before handoff for shell logic, tests, or validation tooling, run `./tests/validate.sh full` (the pinned lint stack, every unit suite, and report-only bash-xtrace coverage). Product-only changes may skip the tooling self-tests while iterating with `./tests/run_shunit_tests.sh --skip-tool-suites`.
 4. For performance-sensitive changes, run `./tests/run_microbench.sh` (spawn budgets in `tests/perf_budgets.tsv` only go down) and `./tests/run_perf_ab.sh --baseline-ref main` for the scenarios touched; both are host-safe.
 5. For docs-only changes, prefer `git diff --check` and manual rendered-structure review unless the docs alter commands, test entry points, or shipped behavior.

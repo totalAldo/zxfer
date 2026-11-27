@@ -91,7 +91,6 @@ Current runtime inventory:
 - `ps`
 - `rm`
 - `rmdir`
-- `sed`
 - `sleep`
 - `sort`
 - `tee`

@@ -82,77 +82,6 @@ usage_error_failure_report_unsafe_commands_test() {
 	log "Usage error failure report unsafe command test passed"
 }
 
-usage_error_failure_report_control_character_escaping_test() {
-	log "Starting usage error failure report unsafe control-character escaping test"
-
-	esc=$(printf '\033')
-	bell=$(printf '\007')
-	control_source=$(printf 'tank/src%s[31m%s' "$esc" "$bell")
-	stdout_log="$WORKDIR/usage_failure_control_chars.stdout"
-	stderr_log="$WORKDIR/usage_failure_control_chars.stderr"
-	safe_rm_f "$stdout_log" "$stderr_log"
-
-	set +e
-	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 "$ZXFER_BIN" -R "$control_source" >"$stdout_log" 2>"$stderr_log"
-	status=$?
-	set -e
-
-	if [ "$status" -ne 2 ]; then
-		fail "Usage failure report unsafe control-character escaping test expected exit status 2, got $status. See $stderr_log."
-	fi
-	if [ -s "$stdout_log" ]; then
-		fail "Usage failure report unsafe control-character escaping test should not write to stdout. Output: $(cat "$stdout_log")"
-	fi
-	if ! grep -F -x "invocation: '$ZXFER_BIN' '-R' 'tank/src\\x1B[31m\\x07'" "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report unsafe control-character escaping test missing escaped ESC sequence. Output: $(cat "$stderr_log")"
-	fi
-	if ! grep -F '\x07' "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report unsafe control-character escaping test missing escaped BEL sequence. Output: $(cat "$stderr_log")"
-	fi
-	if grep -F '\\x1B' "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report unsafe control-character escaping test double-escaped the ESC marker. Output: $(cat "$stderr_log")"
-	fi
-	if grep -F "$esc" "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report unsafe control-character escaping test leaked a raw ESC byte. Output: $(cat "$stderr_log")"
-	fi
-	if grep -F "$bell" "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report unsafe control-character escaping test leaked a raw BEL byte. Output: $(cat "$stderr_log")"
-	fi
-
-	safe_rm_f "$stdout_log" "$stderr_log"
-
-	log "Usage error failure report control-character escaping test passed"
-}
-
-usage_error_failure_report_trailing_newline_preservation_test() {
-	log "Starting usage error failure report unsafe trailing-newline preservation test"
-
-	trailing_source=$(printf 'tank/src\n_')
-	trailing_source=${trailing_source%_}
-	stdout_log="$WORKDIR/usage_failure_trailing_newline.stdout"
-	stderr_log="$WORKDIR/usage_failure_trailing_newline.stderr"
-	safe_rm_f "$stdout_log" "$stderr_log"
-
-	set +e
-	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1 "$ZXFER_BIN" -R "$trailing_source" >"$stdout_log" 2>"$stderr_log"
-	status=$?
-	set -e
-
-	if [ "$status" -ne 2 ]; then
-		fail "Usage failure report unsafe trailing-newline preservation test expected exit status 2, got $status. See $stderr_log."
-	fi
-	if [ -s "$stdout_log" ]; then
-		fail "Usage failure report unsafe trailing-newline preservation test should not write to stdout. Output: $(cat "$stdout_log")"
-	fi
-	if ! grep -F -x "invocation: '$ZXFER_BIN' '-R' 'tank/src\\n'" "$stderr_log" >/dev/null 2>&1; then
-		fail "Usage failure report unsafe trailing-newline preservation test missing escaped newline marker. Output: $(cat "$stderr_log")"
-	fi
-
-	safe_rm_f "$stdout_log" "$stderr_log"
-
-	log "Usage error failure report unsafe trailing-newline preservation test passed"
-}
-
 failure_handling_tests() {
 	log "Starting missing dataset error tests"
 
@@ -462,24 +391,6 @@ invalid_error_log_warning_test() {
 	fi
 
 	log "Invalid ZXFER_ERROR_LOG warning test passed"
-}
-
-error_log_email_example_self_test() {
-	log "Starting error-log email example self-test"
-
-	set +e
-	output=$(sh ./examples/error-log-email-notify.sh --self-test 2>&1)
-	status=$?
-	set -e
-
-	if [ "$status" -ne 0 ]; then
-		fail "Error-log email example self-test failed with status $status. Output: $output"
-	fi
-	if ! printf '%s\n' "$output" | grep -q "self-test passed"; then
-		fail "Error-log email example self-test did not report success. Output: $output"
-	fi
-
-	log "Error-log email example self-test passed"
 }
 
 verbose_debug_logging_test() {

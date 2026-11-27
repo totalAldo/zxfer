@@ -2,7 +2,7 @@
 #
 # shunit2 tests for src/zxfer_snapshot_plan.sh: the planning decisions no
 # contract case isolates (retention, rollback eligibility, -g, divergence
-# records, the record slices, the live re-plan table in the fragment below)
+# records, the record slices, and the live re-plan table below)
 # and the failures the fault injector cannot reach (awk, date, record files).
 # tests/test_contract_planning.sh pins the deletes, the divergence contract
 # and the re-plan end to end.
@@ -38,8 +38,7 @@ reset_snapshot_plan_test_state() {
 	g_zxfer_source_snapshot_record_cache_file=""
 	g_zxfer_destination_snapshot_record_cache_file=""
 	g_actual_dest=""
-	zxfer_reset_snapshot_delete_artifact_state
-	zxfer_reset_snapshot_plan_state
+	zxfer_reset_snapshot_plan_session_state
 }
 
 # Stage the flat record files discovery publishes: source rows newest first,
@@ -1038,11 +1037,57 @@ backup/dst@extraA	9"
 backup/dst@extraA" "$(plan_delete_records)"
 }
 
-# shellcheck source=tests/suites/zxfer_snapshot_plan_live_replan_tests.sh
-. "$TESTS_DIR/suites/zxfer_snapshot_plan_live_replan_tests.sh"
+replan_rows() {
+	# shellcheck disable=SC2086  # WORDS split into records on purpose.
+	for l_replan_word in $2; do
+		case $l_replan_word in
+		-) ;;
+		*:*) printf '%s@%s\t%s\n' "$1" "${l_replan_word%%:*}" "${l_replan_word#*:}" ;;
+		*) printf '%s@%s\n' "$1" "$l_replan_word" ;;
+		esac
+	done
+}
 
-suite() {
-	zxfer_test_register_suite_tests "$0"
+# Each row: the anchor and pending records that inspect published before the
+# -d destroy, the live destination rows after it, and the anchor, pending
+# records and destination presence the re-plan publishes. Only the anchor or
+# a pending snapshot may become the anchor; otherwise the records stay
+# queued without one, so the seed refuses a destination that still has
+# snapshots and re-seeds an emptied one from the old anchor.
+test_reconcile_live_destination_snapshot_state_republishes_the_plan_from_live_rows() {
+	zxfer_test_stage_source_records "$(replan_rows tank/src "snap4:444 snap3:333 snap2:222 snap1:111")"
+	zxfer_run_destination_zfs_cmd() {
+		[ -z "$REPLAN_LIVE" ] || printf '%s\n' "$REPLAN_LIVE"
+	}
+	while IFS='|' read -r replan_anchor replan_pending replan_live \
+		replan_want_anchor replan_want_pending replan_want_has; do
+		g_did_delete_dest_snapshots=1
+		g_actual_dest="backup/target/src"
+		replan_pending_rows=$(replan_rows tank/src "$replan_pending")
+		replan_plan=$TEST_TMPDIR/original-transfer.plan
+		printf 'common\t%s\n' "$(replan_rows tank/src "$replan_anchor")" >"$replan_plan"
+		printf '%s\n' "$replan_pending_rows" | awk 'NF { print "send\t" $0 }' >>"$replan_plan"
+		zxfer_publish_snapshot_transfer_plan "$(replan_rows tank/src "$replan_anchor")" \
+			"${replan_pending_rows%%"$ZXFER_LF"*}" "${replan_pending_rows##*"$ZXFER_LF"}" \
+			1 "$replan_plan"
+		REPLAN_LIVE=$(replan_rows backup/target/src "$replan_live")
+		zxfer_reconcile_live_destination_snapshot_state tank/src </dev/null
+		replan_want_rows=$(replan_rows tank/src "$replan_want_pending")
+		assertEquals "Live rows [$replan_live] after anchor [$replan_anchor] and pending [$replan_pending]." \
+			"$(replan_rows tank/src "$replan_want_anchor")|${replan_want_rows%%"$ZXFER_LF"*}|${replan_want_rows##*"$ZXFER_LF"}|$replan_want_has" \
+			"$g_last_common_snap|$g_src_snapshot_transfer_first|$g_src_snapshot_transfer_final|$g_dest_has_snapshots"
+	done <<'EOF'
+snap2:222|-|-|-|snap2:222|0
+snap2:222|-|snap1:111|-|snap2:222|1
+snap2:222|snap3:333 snap4:444|snap1:111 snap2:222|snap2:222|snap3:333 snap4:444|1
+snap1:111|snap2:222 snap3:333 snap4:444|snap4:444|snap4:444|-|1
+-|snap1:111 snap2:222 snap3:333 snap4:444|snap1:111 snap3:333|snap3:333|snap4:444|1
+snap2:222|snap3:333 snap4:444|snap1:111|-|snap2:222 snap3:333 snap4:444|1
+snap1:111|snap2:222 snap4:444|snap3:333|-|snap1:111 snap2:222 snap4:444|1
+snap1:111|snap2:222 snap3:333 snap4:444|unrelated:999|-|snap1:111 snap2:222 snap3:333 snap4:444|1
+snap1:111|snap2:222 snap3:333 snap4:444|-|-|snap1:111 snap2:222 snap3:333 snap4:444|0
+-|snap1 snap2 snap3 snap4|snap1:111 snap3:333|-|snap1 snap2 snap3 snap4|1
+EOF
 }
 
 # shellcheck source=tests/shunit2/shunit2

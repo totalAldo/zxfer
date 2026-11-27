@@ -109,30 +109,17 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/helpers/argv_fuzz.sh
 . "$TESTS_DIR/helpers/argv_fuzz.sh"
 
-# Purpose: Put an argv recorder in front of the canned zfs.
+# Purpose: Configure the canned zfs to record mutating argv.
 # Usage: blackbox_properties_record_mutation_argv; each create, set or
 # inherit appends "ARGV <count>" and then one "[argument]" line per argument
 # to ARGV_LOG.
 blackbox_properties_record_mutation_argv() {
 	ARGV_LOG="$CASE_DIR/argv.log"
 	: >"$ARGV_LOG"
-	mv "$MOCKBIN_DIR/zfs" "$MOCKBIN_DIR/zfs.canned" ||
-		fail "Unable to stage the canned zfs behind the argv recorder."
-	cat >"$MOCKBIN_DIR/zfs" <<EOF
-#!/bin/sh
-case "\${1:-}" in
-create | set | inherit)
-	{
-		printf 'ARGV %s\n' "\$#"
-		for recorded_arg in "\$@"; do
-			printf '[%s]\n' "\$recorded_arg"
-		done
-	} >>"$ARGV_LOG"
-	;;
-esac
-exec "$MOCKBIN_DIR/zfs.canned" "\$@"
-EOF
-	chmod +x "$MOCKBIN_DIR/zfs"
+	MOCK_ZFS_ARGV_LOG=$ARGV_LOG
+	MOCK_ZFS_ARGV_VERBS="create:set:inherit"
+	MOCK_ZFS_ARGV_FORMAT="counted"
+	export MOCK_ZFS_ARGV_LOG MOCK_ZFS_ARGV_VERBS MOCK_ZFS_ARGV_FORMAT
 }
 
 # Purpose: Seed STATE_DIR with default property rows plus one local user
@@ -159,7 +146,7 @@ test_soh_property_value_stays_one_set_argument() {
 		"$l_expected_set" "$(cat "$ARGV_LOG")"
 
 	blackbox_properties_add_soh_root_fixture soh_set_remote
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
 		planning_run_property_pass -T localhost -P
@@ -212,7 +199,7 @@ test_newline_property_value_stays_one_set_argument() {
 		"$l_expected_set" "$(cat "$ARGV_LOG")"
 
 	blackbox_properties_add_multiline_root_fixture newline_set_remote 'a@LF@readonly=off'
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
 		planning_run_property_pass -T localhost -P
@@ -282,7 +269,7 @@ test_dash_named_properties_are_read_alone_after_end_of_options() {
 		P) planning_run_property_pass -P ;;
 		o) planning_run_property_pass -o compression=gzip ;;
 		O | T)
-			planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+			zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 				fail "Unable to write socket-aware mock ssh."
 			SSH_LOG="$CASE_DIR/ssh_$l_dash_mode.log"
 			: >"$SSH_LOG"
@@ -428,16 +415,7 @@ test_soh_property_value_stays_one_create_argument() {
 	l_child_rows=$(printf '%s\ncom.x:note\ta\001-o\001mountpoint=/etc/cron.d\tlocal' "$l_rows")
 	planning_add_property_fixtures_for_rows "$l_rows" "$l_child_rows" "$l_rows" "$l_rows"
 	l_missing_child="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child2"
-	for l_fixture in dst_datasets.list dst_snapshots.list dst_props_tree.list; do
-		grep -v "^$l_missing_child" "$STATE_DIR/$l_fixture" >"$STATE_DIR/$l_fixture.new" || :
-		mv "$STATE_DIR/$l_fixture.new" "$STATE_DIR/$l_fixture" ||
-			fail "Unable to drop $l_missing_child from $l_fixture."
-	done
-	: >"$STATE_DIR/dst_d1_2.list"
-	printf "cannot open '%s': dataset does not exist\n" "$l_missing_child" \
-		>"$STATE_DIR/missing_child2.list"
-	printf 'list -H %s\tmissing_child2.list\t1\n' "$l_missing_child" \
-		>>"$STATE_DIR/manifest" || fail "Unable to append missing-child rule."
+	blackbox_drop_destination_child child2
 	blackbox_properties_record_mutation_argv
 
 	planning_run_property_pass -P
@@ -537,20 +515,6 @@ test_override_missing_on_the_source_fails_before_the_destination_is_touched() {
 # never applies a change: a dataset read again after a set, create or inherit
 # answers its old rows unless a case gives it rows of its own.
 
-# Purpose: Put manifest rules ahead of every rule in STATE_DIR (the first
-# matching rule wins).
-# Usage: blackbox_properties_prepend_rules RULE...; each RULE is a whole
-# "pattern<TAB>fixture<TAB>status" line.
-blackbox_properties_prepend_rules() {
-	if ! {
-		printf '%s\n' "$@"
-		cat "$STATE_DIR/manifest"
-	} >"$STATE_DIR/manifest.new" ||
-		! mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest"; then
-		fail "Unable to prepend manifest rules."
-	fi
-}
-
 # Purpose: Answer the per-dataset reads of one dataset (both value views and
 # the name list) with ROWS, ahead of the shared rules; the recursive listing
 # keeps its rows, so this is what a live read finds later.
@@ -563,7 +527,7 @@ blackbox_properties_answer_live_reads() {
 		! cut -f1 "$STATE_DIR/$l_live_file" >"$STATE_DIR/$l_live_file.names"; then
 		fail "Unable to write the live rows of $1."
 	fi
-	blackbox_properties_prepend_rules \
+	blackbox_prepend_manifest_rule \
 		"get -Hpo property,value,source all $1	$l_live_file	0	${3:-}" \
 		"get -Ho property,value,source all $1	$l_live_file	0	${3:-}" \
 		"get -Ho property all $1	$l_live_file.names	0	${3:-}"
@@ -589,27 +553,6 @@ blackbox_properties_use_rows() {
 		! cut -f1,2 "$STATE_DIR/$1_props_tree.list" >"$STATE_DIR/$1_props_tree.names"; then
 		fail "Unable to give $2 its own $1 tree rows."
 	fi
-}
-
-# Purpose: Make one destination child missing: drop it from the destination
-# listings, snapshots and property tree, and answer its exact probe with
-# zfs's missing-dataset line.
-# Usage: blackbox_properties_drop_destination_child child1|child2
-blackbox_properties_drop_destination_child() {
-	l_drop_dataset="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/$1"
-	for l_drop_fixture in dst_datasets.list dst_snapshots.list dst_props_tree.list \
-		dst_props_tree.names; do
-		if ! awk -F'\t' -v dataset="$l_drop_dataset" '
-			$1 == dataset || index($1, dataset "@") == 1 { next }
-			{ print }' "$STATE_DIR/$l_drop_fixture" >"$STATE_DIR/$l_drop_fixture.new" ||
-			! mv "$STATE_DIR/$l_drop_fixture.new" "$STATE_DIR/$l_drop_fixture"; then
-			fail "Unable to drop $l_drop_dataset from $l_drop_fixture."
-		fi
-	done
-	: >"$STATE_DIR/dst_d1_${1#child}.list"
-	printf "cannot open '%s': dataset does not exist\n" "$l_drop_dataset" \
-		>"$STATE_DIR/missing_$1.list" || fail "Unable to write the missing-dataset line."
-	blackbox_properties_prepend_rules "list -H $l_drop_dataset	missing_$1.list	1"
 }
 
 # Purpose: Print the MUTATE lines of the zfs log.
@@ -776,7 +719,7 @@ test_override_values_reach_zfs_set_whole_in_order_locally_and_over_T() {
 		"$l_expected" "$(cat "$ARGV_LOG")"
 
 	blackbox_properties_add_override_fixture override_remote
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
 		planning_run_property_pass -T localhost -P -o "$l_override"
@@ -824,7 +767,7 @@ test_missing_children_are_created_with_their_creation_properties_and_recorded() 
 	l_dst_child2=$(planning_property_rows_with "$l_rows" compression gzip "$l_dst_inherited")
 	l_dst_child2=$(planning_property_rows_with "$l_dst_child2" atime off "$l_dst_inherited")
 	for l_child in child1 child2; do
-		blackbox_properties_drop_destination_child "$l_child"
+		blackbox_drop_destination_child "$l_child"
 	done
 	# What the reconcile after each seed reads back.
 	blackbox_properties_answer_live_reads "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1" "$l_dst_child1"
@@ -874,7 +817,7 @@ test_override_alone_creates_a_missing_child_with_the_list_and_creation_time_prop
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/noop" override_create
 	planning_add_property_transfer_fixtures
-	blackbox_properties_drop_destination_child child2
+	blackbox_drop_destination_child child2
 	l_child2="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child2"
 	# What the reconcile after the seed reads back.
 	blackbox_properties_answer_live_reads "$l_child2" "$(planning_property_rows_with \
@@ -897,10 +840,10 @@ test_destination_created_after_discovery_is_diffed_not_created() {
 	l_rows=$(planning_property_default_rows)
 	planning_add_property_fixtures_for_rows "$l_rows" "$l_rows" "$l_rows" "$l_rows"
 	l_child2="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child2"
-	blackbox_properties_drop_destination_child child2
+	blackbox_drop_destination_child child2
 	printf '%s\t96K\t1.0G\t24K\t/%s\n' "$l_child2" "$l_child2" >"$STATE_DIR/child2_exists.list" ||
 		fail "Unable to write the child2 listing."
-	blackbox_properties_prepend_rules "list -H $l_child2	child2_exists.list	0"
+	blackbox_prepend_manifest_rule "list -H $l_child2	child2_exists.list	0"
 	# The reconcile after its seed reads the set value back.
 	blackbox_properties_answer_live_reads "$l_child2" \
 		"$(planning_property_rows_with "$l_rows" compression gzip local)" once
@@ -933,7 +876,7 @@ test_missing_destination_root_is_created_with_its_whole_list_after_its_parent() 
 	l_pool=${ZXFER_MOCKBIN_DEST_ROOT%%/*}
 	printf '%s\n' "$l_pool" >"$STATE_DIR/dst_pool.list" ||
 		fail "Unable to write the pool listing."
-	blackbox_properties_prepend_rules "list -H -o name $l_pool	dst_pool.list	0"
+	blackbox_prepend_manifest_rule "list -H -o name $l_pool	dst_pool.list	0"
 	planning_force_manifest_failure \
 		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" 1
 	for l_missing in "$ZXFER_MOCKBIN_DEST_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
@@ -941,7 +884,7 @@ test_missing_destination_root_is_created_with_its_whole_list_after_its_parent() 
 		l_missing_file="missing_$(printf '%s' "$l_missing" | tr '/' '_').list"
 		printf "cannot open '%s': dataset does not exist\n" "$l_missing" \
 			>"$STATE_DIR/$l_missing_file" || fail "Unable to write the missing-dataset line."
-		blackbox_properties_prepend_rules "list -H $l_missing	$l_missing_file	1"
+		blackbox_prepend_manifest_rule "list -H $l_missing	$l_missing_file	1"
 	done
 	mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
 
@@ -972,37 +915,9 @@ blackbox_properties_run_failing() {
 	l_failing_match=$1
 	l_failing_stderr=$2
 	shift 2
-	rm -rf "$CASE_DIR/fail_calls"
-	mkdir "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
-	BLACKBOX_PROPERTIES_STATUS=0
-	(
-		MOCK_FAIL_TOOL=zfs
-		MOCK_FAIL_CALL=1
-		MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
-		MOCK_FAIL_MATCH=$l_failing_match
-		MOCK_FAIL_STDERR=$l_failing_stderr
-		export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH MOCK_FAIL_STDERR
+	blackbox_run_with_fault zfs 1 "$l_failing_match" "" "$l_failing_stderr" \
 		planning_run_recursive "$STATE_DIR" "$@"
-	) </dev/null || BLACKBOX_PROPERTIES_STATUS=$?
-}
-
-# Purpose: Fail unless the last run exited EXPECTED with one runtime failure
-# report naming STAGE and exactly MESSAGE, and started no change after the
-# injected failure (or at all, when none was injected).
-# Usage: blackbox_properties_assert_stopped LABEL EXPECTED STATUS STAGE MESSAGE
-blackbox_properties_assert_stopped() {
-	assertEquals "$1: exit status; stderr: $(cat "$CASE_DIR/zxfer.stderr")" "$2" "$3"
-	for l_stopped_line in "exit_status: $2" "failure_class: runtime" "failure_stage: $4" \
-		"message: $5"; do
-		grep -Fqx -e "$l_stopped_line" "$CASE_DIR/zxfer.stderr" ||
-			fail "$1: missing report line: $l_stopped_line
-stderr: $(cat "$CASE_DIR/zxfer.stderr")"
-	done
-	assertEquals "$1: exactly one failure report" \
-		1 "$(grep -c '^zxfer: failure report begin$' "$CASE_DIR/zxfer.stderr")"
-	assertEquals "$1: no change starts after the failure; zfs log: $(cat "$ZFS_LOG")" "" \
-		"$(awk '/^FAIL / { failed = 1 } /^MUTATE / && (failed || !injected) { print }' \
-			injected="$(grep -c '^FAIL ' "$ZFS_LOG")" "$ZFS_LOG")"
+	BLACKBOX_PROPERTIES_STATUS=$BLACKBOX_FAULT_STATUS
 }
 
 # Purpose: Seed STATE_DIR in CASE_DIR/NAME with the default rows, but no
@@ -1019,7 +934,7 @@ blackbox_properties_add_backfill_fixture() {
 	planning_add_property_fixtures_for_rows "$l_src_rows" "$l_src_rows" "$l_rows" "$l_rows"
 	printf '%s\t%s\t%s\n' casesensitivity sensitive - normalization none - utf8only off - \
 		>"$STATE_DIR/creation_rows.list" || fail "Unable to write the creation rows."
-	blackbox_properties_prepend_rules \
+	blackbox_prepend_manifest_rule \
 		"get -Hpo property,value,source casesensitivity,normalization,utf8only $ZXFER_MOCKBIN_SOURCE_ROOT*	$2	$3"
 }
 
@@ -1042,7 +957,7 @@ test_missing_creation_time_properties_are_read_back_and_enforced() {
 	for l_property in casesensitivity normalization utf8only; do
 		grep "^$l_property	" "$STATE_DIR/creation_rows.list" >"$STATE_DIR/alone_$l_property.list" ||
 			fail "Unable to write the $l_property row."
-		blackbox_properties_prepend_rules \
+		blackbox_prepend_manifest_rule \
 			"get -Hpo property,value,source -- $l_property $ZXFER_MOCKBIN_SOURCE_ROOT*	alone_$l_property.list	0"
 	done
 	blackbox_properties_run_failing \
@@ -1060,10 +975,10 @@ test_missing_creation_time_properties_are_read_back_and_enforced() {
 	sed 's/^casesensitivity	sensitive/casesensitivity	insensitive/' \
 		"$STATE_DIR/creation_rows.list" >"$STATE_DIR/insensitive_rows.list" ||
 		fail "Unable to write the insensitive rows."
-	blackbox_properties_prepend_rules \
+	blackbox_prepend_manifest_rule \
 		"get -Hpo property,value,source casesensitivity,normalization,utf8only $ZXFER_MOCKBIN_SOURCE_ROOT	insensitive_rows.list	0"
 	planning_run_recursive "$STATE_DIR" -P
-	blackbox_properties_assert_stopped "creation-time mismatch" 1 "$?" "property transfer" \
+	blackbox_assert_stopped "creation-time mismatch" 1 "$?" "property transfer" \
 		'The property "casesensitivity" may only be set\nat filesystem creation time. To modify this property\nyou will need to first destroy target filesystem.'
 	planning_assert_no_send_receive
 }
@@ -1086,7 +1001,7 @@ test_skip_unsupported_probes_only_missing_names_and_warns_about_each_skip() {
 		"$l_dst_rows" "$l_dst_rows"
 	printf "property 'volmode' does not apply to datasets of this type\n" \
 		>"$STATE_DIR/volmode_not_applicable.list" || fail "Unable to write the volmode answer."
-	blackbox_properties_prepend_rules \
+	blackbox_prepend_manifest_rule \
 		"get -Hpo property,value,source volmode $ZXFER_MOCKBIN_DEST_MAPPED_ROOT*	volmode_not_applicable.list	1"
 	planning_add_unsupported_property_fixtures "$l_src_rows" "$l_dst_rows"
 
@@ -1135,7 +1050,7 @@ test_skip_unsupported_keeps_volume_and_filesystem_skips_apart() {
 		fail "Unable to write the dedup answer."
 	l_src=$ZXFER_MOCKBIN_SOURCE_ROOT
 	l_dst=$ZXFER_MOCKBIN_DEST_MAPPED_ROOT
-	blackbox_properties_prepend_rules \
+	blackbox_prepend_manifest_rule \
 		"get -Hpo name,value type $l_src*	src_types.list	0" \
 		"get -Hpo property all $l_src	names_src_fs.list	0" \
 		"get -Hpo property all $l_src/child1	names_src_volume.list	0" \
@@ -1181,12 +1096,6 @@ MUTATE set $l_set $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child2" "$(blackbox_properties
 	done
 }
 
-# Purpose: Print how many control bytes other than LF and TAB a file holds.
-# Usage: blackbox_properties_count_control_bytes FILE
-blackbox_properties_count_control_bytes() {
-	LC_ALL=C tr -dc '\001-\010\013-\037\177' <"$1" | wc -c | tr -d ' '
-}
-
 # -v prints, for each changed dataset, the decoded set and inherit lists and
 # each command before it runs: the local zfs command, or over -T the ssh
 # command line. A value holding control bytes is shown escaped in the set and
@@ -1212,7 +1121,7 @@ test_verbose_shows_decoded_lists_and_each_command() {
 					"${l_line%% *}" "$(grep -cxF -e "${l_line#* }" "$CASE_DIR/zxfer.stdout")"
 			done
 		else
-			planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+			zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 				fail "Unable to write socket-aware mock ssh."
 			PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
 				planning_run_property_pass -T localhost -v -P
@@ -1247,9 +1156,9 @@ test_verbose_shows_decoded_lists_and_each_command() {
 			"$(grep -cxF -e "$l_line" "$CASE_DIR/zxfer.stderr")"
 	done
 	assertEquals "stdout holds no control byte but LF and TAB" \
-		0 "$(blackbox_properties_count_control_bytes "$CASE_DIR/zxfer.stdout")"
+		0 "$(blackbox_count_control_bytes "$CASE_DIR/zxfer.stdout")"
 	assertEquals "stderr holds no control byte but LF and TAB" \
-		0 "$(blackbox_properties_count_control_bytes "$CASE_DIR/zxfer.stderr")"
+		0 "$(blackbox_count_control_bytes "$CASE_DIR/zxfer.stderr")"
 	l_expected=$(
 		for l_child in child1 child2; do
 			printf '%s\n' 'ARGV 3' '[set]' "[com.x:tag=$l_value]" "[$l_root/$l_child]" \
@@ -1345,7 +1254,7 @@ test_property_read_failures_stop_with_the_dataset_and_the_zfs_diagnostic() {
 	planning_force_manifest_failure \
 		"get -r -t filesystem,volume -Hpo name,property,value,source all $l_src" 1
 	blackbox_properties_run_failing "get -Hpo property,value,source all $l_src" "$l_denied" -P
-	blackbox_properties_assert_stopped "source read" 1 "$BLACKBOX_PROPERTIES_STATUS" \
+	blackbox_assert_stopped "source read" 1 "$BLACKBOX_PROPERTIES_STATUS" \
 		"property transfer" "$l_denied"
 
 	blackbox_properties_add_rows_fixture read_destination
@@ -1353,41 +1262,41 @@ test_property_read_failures_stop_with_the_dataset_and_the_zfs_diagnostic() {
 		"get -r -t filesystem,volume -Hpo name,property,value,source all $ZXFER_MOCKBIN_DEST_ROOT" 1
 	blackbox_properties_run_failing "get -Hpo property,value,source all $l_dst" \
 		"cannot open '$l_dst': permission denied" -P
-	blackbox_properties_assert_stopped "destination read" 1 "$BLACKBOX_PROPERTIES_STATUS" \
+	blackbox_assert_stopped "destination read" 1 "$BLACKBOX_PROPERTIES_STATUS" \
 		"property transfer" \
 		"Failed to retrieve destination properties for [$l_dst]: cannot open '$l_dst': permission denied"
 
 	blackbox_properties_add_rows_fixture repeated_name
 	blackbox_properties_use_rows dst "$l_dst" "$(printf '%s\ncompression\tgzip\tlocal' "$l_rows")"
 	planning_run_zxfer "$STATE_DIR" -P -R "$l_src" "$ZXFER_MOCKBIN_DEST_ROOT"
-	blackbox_properties_assert_stopped "repeated destination name" 1 "$?" "property transfer" \
+	blackbox_assert_stopped "repeated destination name" 1 "$?" "property transfer" \
 		"Failed to retrieve destination properties for [$l_dst]: Failed to parse the properties of dataset [$l_dst]: the zfs get property list is malformed, repeats a name, or does not match the values."
 
 	blackbox_properties_add_multiline_root_fixture lone_read 'a@LF@b'
 	: >"$ZFS_LOG"
 	blackbox_properties_run_failing "get -Ho property,value,source -- com.x:note $l_src" \
 		"$l_denied" -P
-	blackbox_properties_assert_stopped "lone re-read" 1 "$BLACKBOX_PROPERTIES_STATUS" \
+	blackbox_assert_stopped "lone re-read" 1 "$BLACKBOX_PROPERTIES_STATUS" \
 		"property transfer" "Failed to read property [com.x:note] of dataset [$l_src]: $l_denied"
 
 	blackbox_properties_add_backfill_fixture creation_read - 1
 	blackbox_properties_run_failing "get -Hpo property,value,source -- casesensitivity $l_src" \
 		"permission denied" -P
-	blackbox_properties_assert_stopped "creation-time property read" 1 \
+	blackbox_assert_stopped "creation-time property read" 1 \
 		"$BLACKBOX_PROPERTIES_STATUS" "property transfer" \
 		"Failed to retrieve required creation-time property [casesensitivity] for dataset [$l_src]: permission denied"
 
 	blackbox_properties_add_rows_fixture snapshot_type
 	blackbox_properties_use_rows src "$l_src" "$(planning_property_rows_with "$l_rows" type snapshot -)"
 	planning_run_zxfer "$STATE_DIR" -P -R "$l_src" "$ZXFER_MOCKBIN_DEST_ROOT"
-	blackbox_properties_assert_stopped "source type" 1 "$?" "property transfer" \
+	blackbox_assert_stopped "source type" 1 "$?" "property transfer" \
 		"Invalid source dataset type for [$l_src]: snapshot"
 
 	blackbox_properties_add_rows_fixture empty_volsize
 	blackbox_properties_use_rows src "$l_src" \
 		"$(printf '%s\t%s\t%s\n' type volume - volsize - - compression lz4 local)"
 	planning_run_zxfer "$STATE_DIR" -P -R "$l_src" "$ZXFER_MOCKBIN_DEST_ROOT"
-	blackbox_properties_assert_stopped "zvol size" 1 "$?" "property transfer" \
+	blackbox_assert_stopped "zvol size" 1 "$?" "property transfer" \
 		"Failed to retrieve source zvol size for [$l_src]: empty volsize"
 }
 
@@ -1405,41 +1314,41 @@ test_property_change_failures_stop_at_the_failing_command() {
 
 	blackbox_properties_add_rows_fixture set_failure "" "" "$l_root_differs"
 	blackbox_properties_run_failing "set *" "cannot set property for '$l_dst': permission denied" -P
-	blackbox_properties_assert_stopped "set" 1 "$BLACKBOX_PROPERTIES_STATUS" \
+	blackbox_assert_stopped "set" 1 "$BLACKBOX_PROPERTIES_STATUS" \
 		"property transfer" "Error when setting properties on destination filesystem."
 
 	blackbox_properties_add_rows_fixture inherit_failure "" "$l_child_inherits"
 	blackbox_properties_run_failing "inherit *" \
 		"cannot inherit compression for '$l_dst/child1': permission denied" -P
-	blackbox_properties_assert_stopped "inherit" 1 "$BLACKBOX_PROPERTIES_STATUS" \
+	blackbox_assert_stopped "inherit" 1 "$BLACKBOX_PROPERTIES_STATUS" \
 		"property transfer" "Error when inheriting properties on destination filesystem."
 
 	blackbox_properties_add_rows_fixture create_failure
-	blackbox_properties_drop_destination_child child2
+	blackbox_drop_destination_child child2
 	blackbox_properties_run_failing "create *" "cannot create '$l_dst/child2': permission denied" -P
-	blackbox_properties_assert_stopped "create" 1 "$BLACKBOX_PROPERTIES_STATUS" \
+	blackbox_assert_stopped "create" 1 "$BLACKBOX_PROPERTIES_STATUS" \
 		"property transfer" "Error when creating destination filesystem."
 
 	blackbox_properties_add_rows_fixture probe_failure
-	blackbox_properties_drop_destination_child child2
+	blackbox_drop_destination_child child2
 	blackbox_properties_run_failing "list -H $l_dst/child2" \
 		"cannot open '$l_dst/child2': permission denied" -P
-	blackbox_properties_assert_stopped "existence probe" 1 "$BLACKBOX_PROPERTIES_STATUS" \
+	blackbox_assert_stopped "existence probe" 1 "$BLACKBOX_PROPERTIES_STATUS" \
 		"property transfer" \
 		"Failed to determine whether destination dataset [$l_dst/child2] exists: cannot open '$l_dst/child2': permission denied"
 
 	blackbox_properties_add_rows_fixture create_parent_read
-	blackbox_properties_drop_destination_child child1
+	blackbox_drop_destination_child child1
 	blackbox_properties_run_failing "get -Hpo property,value,source all $l_dst" \
 		"cannot open '$l_dst': permission denied" -o compression=gzip
-	blackbox_properties_assert_stopped "parent read for a create" 1 \
+	blackbox_assert_stopped "parent read for a create" 1 \
 		"$BLACKBOX_PROPERTIES_STATUS" "property transfer" \
 		"Failed to retrieve parent destination properties for [$l_dst]: cannot open '$l_dst': permission denied"
 
 	blackbox_properties_add_rows_fixture inherit_parent_read "" "$l_child_inherits" "$l_root_differs"
 	blackbox_properties_run_failing "get -Hpo property,value,source all $l_dst" \
 		"cannot open '$l_dst': permission denied" -P
-	blackbox_properties_assert_stopped "parent read for an inherit" 1 \
+	blackbox_assert_stopped "parent read for an inherit" 1 \
 		"$BLACKBOX_PROPERTIES_STATUS" "property transfer" \
 		"Failed to reconcile inherited child properties for destination [$l_dst/child1]."
 }
@@ -1462,7 +1371,7 @@ test_skip_unsupported_scan_failures_stop_before_any_change() {
 			"$l_scan_dst" "$l_scan_dst"
 		planning_add_unsupported_property_fixtures "$l_scan_src" "$l_scan_dst"
 		blackbox_properties_run_failing "$l_scan_match" "$l_scan_stderr" -U -P
-		blackbox_properties_assert_stopped "$l_scan_name" 1 "$BLACKBOX_PROPERTIES_STATUS" \
+		blackbox_assert_stopped "$l_scan_name" 1 "$BLACKBOX_PROPERTIES_STATUS" \
 			"snapshot discovery" "$l_scan_message"
 	done <<EOF
 source_types|get -Hpo name,value type *|permission denied|Failed to retrieve source dataset types for unsupported-property scan: permission denied

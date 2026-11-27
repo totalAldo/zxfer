@@ -110,7 +110,7 @@ run_check() {
 		# A missing or non-numeric MAX would let the count check pass
 		# vacuously. Tabs collapse on read, so an empty symbol also lands here.
 		case "$l_max" in
-		'' | *[!0-9]*)
+		'' | *[!0123456789]*)
 			report_violation callers "${l_target:--}" - "${l_max:--}" "MAX must be a non-negative integer"
 			continue
 			;;

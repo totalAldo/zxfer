@@ -23,7 +23,7 @@ fi
 
 l_status=$(sed -n '1p' "$l_status_file" | tr -d ' 	\r\n')
 case "$l_status" in
-'' | *[!0-9]*)
+'' | *[!0123456789]*)
 	printf '%s\n' "::error title=$l_label integration status invalid::Invalid harness status [$l_status] in $l_status_file."
 	exit 1
 	;;

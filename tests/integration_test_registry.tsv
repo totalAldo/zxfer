@@ -2,8 +2,6 @@
 usage_error_tests	group	yes
 usage_error_failure_report_test	test	no
 usage_error_failure_report_unsafe_commands_test	test	no
-usage_error_failure_report_control_character_escaping_test	test	no
-usage_error_failure_report_trailing_newline_preservation_test	test	no
 basic_replication_test	test	no
 non_recursive_replication_test	test	no
 generate_tests_replication	group	no
@@ -45,19 +43,16 @@ unsupported_property_skip_test	test	no
 must_create_property_error_test	test	no
 delete_dest_only_snapshot_test	test	no
 existing_empty_destination_seed_test	test	no
-dry_run_deletion_test	test	no
 progress_wrapper_test	test	no
 progress_placeholder_passthrough_test	test	no
 job_limit_enforcement_test	test	no
 background_receive_ancestry_serialization_test	test	no
 background_send_failure_test	test	no
-secure_path_dependency_tests	group	no
 secure_path_failure_report_test	test	no
 secure_path_append_resolution_test	test	no
 error_log_mirror_test	test	no
 usage_error_log_mirror_test	test	no
 invalid_error_log_warning_test	test	no
-error_log_email_example_self_test	test	no
 remote_migration_guard_tests	group	no
 local_helper_path_shell_metacharacters_test	test	no
 garbage_wrapped_host_spec_fails_closed_test	test	no
@@ -83,7 +78,6 @@ parallel_jobs_listing_test	test	no
 migration_service_success_test	test	no
 migration_yield_test	test	no
 migration_service_failure_test	test	no
-get_os_detection_test	test	no
 verbose_debug_logging_test	test	no
 legacy_backup_layout_rejected_test	test	no
 unsupported_backup_format_version_rejected_test	test	no

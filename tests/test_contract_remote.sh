@@ -72,15 +72,15 @@ TESTS_DIR=$(dirname "$0")
 # 1 for destination-side calls). The minimal mock ssh rejects -M.
 test_remote_target_discovery_succeeds_with_very_verbose() {
 	planning_setup_env
-	zxfer_mockbin_write_minimal_ssh "$MOCKBIN_DIR/ssh" ||
-		fail "Unable to write minimal mock ssh."
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh.log"
-	export MOCK_SSH_LOG="$SSH_LOG"
+	export MOCK_SSH_LOG="$SSH_LOG" MOCK_SSH_REJECT_CONTROL_MASTER=1
 
 	PATH="$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")" \
 		planning_run_recursive "$FIXTURE_DIR/noop" -V -O localhost -T localhost
 	l_remote_noop_status=$?
-	unset MOCK_SSH_LOG
+	unset MOCK_SSH_LOG MOCK_SSH_REJECT_CONTROL_MASTER
 
 	assertEquals "-V remote no-op must exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
 		0 "$l_remote_noop_status"
@@ -103,7 +103,7 @@ test_remote_target_discovery_succeeds_with_very_verbose() {
 # once at exit.
 test_remote_origin_pull_noop_opens_master_first_and_probes_once() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_pull_noop.log"
 	: >"$SSH_LOG"
@@ -133,7 +133,7 @@ test_remote_origin_pull_noop_opens_master_first_and_probes_once() {
 # reads it), and closes the master once at exit.
 test_remote_target_push_noop_opens_master_first_and_probes_once() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_push_noop.log"
 	: >"$SSH_LOG"
@@ -166,7 +166,7 @@ test_remote_target_push_noop_opens_master_first_and_probes_once() {
 # capability probe, since both roles ask that host the same questions.
 test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_both_noop.log"
 	: >"$SSH_LOG"
@@ -213,7 +213,7 @@ test_remote_origin_and_target_noop_open_one_master_per_host_spec() {
 # accept the 0700 TMPDIR they made and a root-owned sticky default root.
 test_remote_noop_under_a_long_tmpdir_removes_its_short_socket_directory() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_long_tmpdir.log"
 	: >"$SSH_LOG"
@@ -234,8 +234,8 @@ test_remote_noop_under_a_long_tmpdir_removes_its_short_socket_directory() {
 		planning_run_recursive "$FIXTURE_DIR/noop" -O localhost
 	)
 	l_long_tmpdir_status=$?
-	l_long_socket=$(awk '$1 == "-M" || index($0, " -M -S ") {
-		for (i = 1; i < NF; i++) if ($i == "-S") { print $(i + 1); exit }
+	l_long_socket=$(awk '$1 == "master" {
+		for (i = 2; i < NF; i++) if ($i == "-S") { print $(i + 1); exit }
 	}' "$SSH_LOG")
 	l_long_socket_dir=${l_long_socket%/*}
 	# ssh binds SOCKET plus a dot and 16 random characters, then renames it.
@@ -432,7 +432,7 @@ EOF
 # connection or zfs call.
 test_remote_invalid_ssh_policy_fails_at_startup_without_very_verbose() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_invalid_policy.log"
 	: >"$SSH_LOG"
@@ -448,7 +448,7 @@ test_remote_invalid_ssh_policy_fails_at_startup_without_very_verbose() {
 	planning_assert_failure_report "cli validation" \
 		"ZXFER_SSH_USER_KNOWN_HOSTS_FILE must be an absolute path."
 	assertEquals "only the control-socket support probe may reach ssh" \
-		"-M -V" "$(cat "$SSH_LOG")"
+		"version	-M -V" "$(cat "$SSH_LOG")"
 	assertFalse "no zfs command may run" "[ -s '$ZFS_LOG' ]"
 }
 
@@ -458,7 +458,7 @@ test_remote_invalid_ssh_policy_fails_at_startup_without_very_verbose() {
 # exit -- no per-command reconnect or per-command handshake regression.
 test_remote_origin_pull_incremental_opens_master_once() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_pull_incr.log"
 	: >"$SSH_LOG"
@@ -498,7 +498,7 @@ test_remote_origin_pull_incremental_opens_master_once() {
 # pool, so the property diff compared the source with itself.
 test_remote_target_property_pass_reads_destination_properties_over_ssh() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	planning_clone_state "$FIXTURE_DIR/noop" remote_props
 	planning_add_property_transfer_fixtures
@@ -569,8 +569,9 @@ planning_profile_counter() {
 # support probe starts with the given ssh options.
 # Usage: planning_assert_every_ssh_argv_leads_with <options>
 planning_assert_every_ssh_argv_leads_with() {
-	l_lead_total=$(grep -c -v -x -- '-M -V' "$SSH_LOG")
-	l_lead_matching=$(awk -v lead="$1 -" 'index($0, lead) == 1' "$SSH_LOG" | awk 'END { print NR }')
+	l_lead_total=$(awk -F '\t' '$1 != "version" { n++ } END { print n + 0 }' "$SSH_LOG")
+	l_lead_matching=$(awk -F '\t' -v lead="$1 -" \
+		'$1 != "version" && index($2, lead) == 1 { n++ } END { print n + 0 }' "$SSH_LOG")
 	assertEquals "every ssh argv but the support probe must lead with: $1; ssh log: $(cat "$SSH_LOG")" \
 		"$l_lead_total" "$l_lead_matching"
 	assertNotEquals "zxfer must have run ssh" 0 "$l_lead_total"
@@ -585,7 +586,7 @@ planning_assert_every_ssh_argv_leads_with() {
 # with its host spec and profiles each once, on that role's side.
 test_remote_wrapper_host_specs_wrap_every_remote_command_of_their_role() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	planning_write_mock_doas
 	SSH_LOG="$CASE_DIR/ssh_wrapper.log"
@@ -657,7 +658,7 @@ test_remote_wrapper_host_specs_wrap_every_remote_command_of_their_role() {
 # labeled and profiled as target-side although its host spec also matches -O.
 test_remote_shared_host_very_verbose_labels_and_profiles_each_command_by_its_role() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_shared_verbose.log"
 	: >"$SSH_LOG"
@@ -692,7 +693,7 @@ test_remote_shared_host_very_verbose_labels_and_profiles_each_command_by_its_rol
 # error with exit status 2 before zxfer runs ssh or zfs.
 test_remote_host_spec_needing_shell_syntax_is_a_usage_error_before_any_ssh() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_quoted_spec.log"
 
@@ -722,7 +723,7 @@ test_remote_host_spec_needing_shell_syntax_is_a_usage_error_before_any_ssh() {
 # every argv, in that order.
 test_remote_ssh_policy_environment_shapes_every_ssh_argv() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_policy.log"
 	: >"$SSH_LOG"
@@ -740,7 +741,7 @@ test_remote_ssh_policy_environment_shapes_every_ssh_argv() {
 	planning_assert_log_has_line "receive $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child2"
 	planning_assert_ssh_commands_multiplexed 1
 	assertEquals "ambient ssh config must add no -o option to any argv; ssh log: $(cat "$SSH_LOG")" \
-		0 "$(grep -c '^-o ' "$SSH_LOG")"
+		0 "$(awk -F '\t' '$2 ~ /(^| )-o / { n++ } END { print n + 0 }' "$SSH_LOG")"
 
 	: >"$SSH_LOG"
 	: >"$ZFS_LOG"
@@ -769,7 +770,7 @@ test_remote_ssh_policy_environment_shapes_every_ssh_argv() {
 # shellcheck disable=SC2089,SC2090  # the quotes are part of the planted wrappers
 test_remote_hosts_ignore_inherited_transport_and_capability_state() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_inherited.log"
 	: >"$SSH_LOG"
@@ -830,7 +831,7 @@ test_remote_hosts_ignore_inherited_transport_and_capability_state() {
 # separate socket directory is made and TMPDIR ends empty.
 test_remote_noop_under_a_short_tmpdir_keeps_its_socket_in_the_run_root() {
 	planning_setup_env
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" ||
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_short_tmpdir.log"
 	: >"$SSH_LOG"
@@ -847,8 +848,8 @@ test_remote_noop_under_a_short_tmpdir_keeps_its_socket_in_the_run_root() {
 			-R "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	)
 	l_short_status=$?
-	l_short_socket=$(awk '$1 == "-M" || index($0, " -M -S ") {
-		for (i = 1; i < NF; i++) if ($i == "-S") { print $(i + 1); exit }
+	l_short_socket=$(awk '$1 == "master" {
+		for (i = 2; i < NF; i++) if ($i == "-S") { print $(i + 1); exit }
 	}' "$SSH_LOG")
 	l_short_socket_root=${l_short_socket%/*}
 	case ${l_short_socket_root##*/} in
@@ -883,21 +884,13 @@ test_remote_master_close_at_exit_treats_a_gone_master_as_closed() {
 	for l_close_case in gone failed; do
 		: >"$SSH_LOG"
 		: >"$ZFS_LOG"
-		rm -rf "$CASE_DIR/fail_calls"
-		mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
-		(
-			MOCK_FAIL_TOOL=ssh
-			MOCK_FAIL_CALL=1
-			MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
-			MOCK_FAIL_MATCH='* -O exit *'
-			export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH
-			if [ "$l_close_case" = gone ]; then
-				MOCK_FAIL_STDERR="Control socket connect($CASE_DIR/ssh-origin.sock): Connection refused"
-				export MOCK_FAIL_STDERR
-			fi
+		l_close_stderr=-
+		if [ "$l_close_case" = gone ]; then
+			l_close_stderr="Control socket connect($CASE_DIR/ssh-origin.sock): Connection refused"
+		fi
+		blackbox_run_with_fault ssh 1 '* -O exit *' "" "$l_close_stderr" \
 			planning_run_remote_zxfer "$FIXTURE_DIR/noop" -O localhost -T 127.0.0.1 \
-				-R "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-		)
+			-R "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 		l_close_status=$?
 
 		assertEquals "[$l_close_case] exactly the origin close must have failed; ssh log: $(cat "$SSH_LOG")" \
@@ -930,17 +923,10 @@ test_remote_origin_master_failure_still_closes_the_target_master() {
 		fail "Unable to write socket-aware mock ssh."
 	SSH_LOG="$CASE_DIR/ssh_origin_master_failure.log"
 	: >"$SSH_LOG"
-	mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
 
-	(
-		MOCK_FAIL_TOOL=ssh
-		MOCK_FAIL_CALL=1
-		MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
-		MOCK_FAIL_MATCH='* -M -S * localhost'
-		export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR MOCK_FAIL_MATCH
+	blackbox_run_with_fault ssh 1 '* -M -S * localhost' "" - \
 		planning_run_remote_zxfer "$FIXTURE_DIR/incremental" -O localhost -T 127.0.0.1 \
-			-R "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
-	)
+		-R "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_master_status=$?
 
 	assertEquals "a failed origin master must fail the run" 1 "$l_master_status"
@@ -971,18 +957,11 @@ test_remote_failed_capability_preload_is_probed_again() {
 
 	for l_preload_mode in quiet -v; do
 		: >"$SSH_LOG"
-		rm -rf "$CASE_DIR/fail_calls"
-		mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
 		set -- -O localhost -R "$ZXFER_MOCKBIN_SOURCE_ROOT" "$ZXFER_MOCKBIN_DEST_ROOT"
 		[ "$l_preload_mode" = quiet ] || set -- "$l_preload_mode" "$@"
 		# Calls 1 and 2 are the support probe and the master open.
-		(
-			MOCK_FAIL_TOOL=ssh
-			MOCK_FAIL_CALL=3
-			MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
-			export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR
+		blackbox_run_with_fault ssh 3 "" "" - \
 			planning_run_remote_zxfer "$FIXTURE_DIR/noop" "$@"
-		)
 		l_preload_status=$?
 
 		assertEquals "[$l_preload_mode] a failed startup probe must not fail the run; stderr: $(cat "$CASE_DIR/zxfer.stderr")" \
@@ -1003,32 +982,6 @@ test_remote_failed_capability_preload_is_probed_again() {
 	done
 }
 
-# Purpose: Put an ssh stand-in in front of the socket-aware mock ssh (moved
-# to ssh.socket) that answers zxfer's capability probe with the contents of
-# $CASE_DIR/capability_answer and logs it to SSH_LOG. The probe is found by
-# its marker once the `d` chunk boundaries are removed.
-# Usage: planning_write_capability_answering_ssh
-planning_write_capability_answering_ssh() {
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh.socket" ||
-		fail "Unable to write socket-aware mock ssh."
-	cat >"$MOCKBIN_DIR/ssh" <<EOF
-#!/bin/sh
-for answer_arg in "\$@"; do
-	answer_command=\$answer_arg
-done
-answer_script=\$(printf '%s' "\${answer_command:-}" | sed "s/' 'd//g")
-case \$answer_script in
-*ZXFER_REMOTE_CAPS_V2*)
-	[ -z "\${MOCK_SSH_LOG:-}" ] || printf '%s\n' "\$*" >>"\$MOCK_SSH_LOG"
-	cat "$CASE_DIR/capability_answer"
-	exit 0
-	;;
-esac
-exec "$MOCKBIN_DIR/ssh.socket" "\$@"
-EOF
-	chmod +x "$MOCKBIN_DIR/ssh"
-}
-
 # Invariant (capability answers): a malformed answer, here one in the retired
 # V1 framing, is never used: zxfer asks the OS and zfs through direct probes
 # under the secure PATH, and the run succeeds. A well-formed answer that
@@ -1036,7 +989,10 @@ EOF
 # run before any zfs call with a dependency report naming the host.
 test_remote_capability_answers_decide_between_direct_probes_and_dependency_errors() {
 	planning_setup_env
-	planning_write_capability_answering_ssh
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" ||
+		fail "Unable to write socket-aware mock ssh."
+	MOCK_SSH_CAPABILITY_RESPONSE_FILE="$CASE_DIR/capability_answer"
+	export MOCK_SSH_CAPABILITY_RESPONSE_FILE
 	SSH_LOG="$CASE_DIR/ssh_capability_answers.log"
 	l_secure_path=$(zxfer_mockbin_secure_path_env "$MOCKBIN_DIR")
 

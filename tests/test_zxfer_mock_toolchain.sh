@@ -26,9 +26,14 @@ oneTimeSetUp() {
 
 setUp() {
 	unset MOCK_ZFS_LOG MOCK_ZFS_FIXTURE_DIR MOCK_ZFS_DEFAULT_STATUS \
-		MOCK_ZFS_STRICT_RECEIVE MOCK_SPAWN_LOG MOCK_SSH_LOG MOCK_FAIL_TOOL \
-		MOCK_FAIL_CALL MOCK_FAIL_MATCH MOCK_FAIL_DIR MOCK_FAIL_STDERR \
-		MOCK_FAIL_STATUS
+		MOCK_ZFS_STRICT_RECEIVE MOCK_ZFS_ARGV_LOG MOCK_ZFS_ARGV_VERBS \
+		MOCK_ZFS_ARGV_FORMAT MOCK_ZFS_DELAY_RECEIVE_GLOB \
+		MOCK_ZFS_DELAY_RECEIVE_SECONDS MOCK_ZFS_RECEIVE_BYTES_LOG \
+		MOCK_ZFS_RECEIVE_STREAM_DIR MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR \
+		MOCK_SPAWN_LOG MOCK_SSH_LOG MOCK_SSH_REJECT_CONTROL_MASTER \
+		MOCK_SSH_READ_STDIN MOCK_SSH_CAPABILITY_RESPONSE_FILE \
+		MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_MATCH MOCK_FAIL_DIR \
+		MOCK_FAIL_STDERR MOCK_FAIL_STATUS
 	CASE_DIR=$(mktemp -d "$TEST_TMPDIR/case.XXXXXX") ||
 		fail "Unable to create per-case temp directory."
 }
@@ -538,6 +543,10 @@ test_build_fixture_tree_layout_and_guids() {
 	# 6 discovery rules + 3 per-dataset depth-1 rules.
 	assertEquals "manifest rule count" 9 \
 		"$(wc -l <"$CASE_DIR/fixtures/noop/manifest" | tr -d '[:space:]')"
+	assertTrue "static fixture dirs should also build the .exact index" \
+		"[ -d '$CASE_DIR/fixtures/noop/.exact' ]"
+	assertEquals "indexed exact rule count" 9 \
+		"$(find "$CASE_DIR/fixtures/noop/.exact" -maxdepth 1 -type f ! -name '.*' | wc -l | tr -d '[:space:]')"
 
 	assertTrue "every record needs a deterministic 19-digit guid" \
 		"awk -F'\t' '\$2 !~ /^1[0-9]*$/ || length(\$2) != 19 { exit 1 }' \
@@ -641,6 +650,75 @@ test_zxfer_incremental_live_sends_per_dataset_increments() {
 		"list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT"
 	mocktest_assert_log_has_line \
 		"list -t filesystem,volume -Hr -o name $ZXFER_MOCKBIN_DEST_ROOT"
+}
+
+test_mock_manifest_index_preserves_glob_precedence_escapes_and_long_utf8_keys() {
+	l_mock_zfs="$CASE_DIR/zfs"
+	zxfer_mockbin_write_canned_zfs "$l_mock_zfs" || fail "Unable to write canned zfs."
+	l_idx_state="$CASE_DIR/index_edge_state"
+	mkdir -p "$l_idx_state"
+	printf 'glob-wins\n' >"$l_idx_state/glob.txt"
+	printf 'exact-shadowed\n' >"$l_idx_state/exact.txt"
+	printf 'escaped-backslash\n' >"$l_idx_state/escaped.txt"
+	printf 'long-utf8\n' >"$l_idx_state/utf8.txt"
+
+	l_utf8_char=$(printf '\303\251')
+	l_long_utf8="list -H tank/"
+	l_i=0
+	while [ "$l_i" -lt 130 ]; do
+		l_long_utf8="$l_long_utf8$l_utf8_char"
+		l_i=$((l_i + 1))
+	done
+
+	{
+		printf 'list -H early/exact\texact.txt\t0\n'
+		printf 'list -H empty/exact\t\t42\n'
+		printf 'list -H override/*\tglob.txt\t7\n'
+		printf 'list -H empty/glob*\t\t43\n'
+		printf 'list -H bracket/[ab]\tglob.txt\t9\n'
+		printf 'list -H override/child\texact.txt\t0\n'
+		printf 'list -H slash\\\\name\tescaped.txt\t0\n'
+		printf '%s\tutf8.txt\t0\n' "$l_long_utf8"
+	} >"$l_idx_state/manifest"
+
+	zxfer_mockbin_index_manifest "$l_idx_state"
+	assertEquals "Manifest indexing should succeed on >255-byte UTF-8 keys." 0 "$?"
+
+	l_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H early/exact)
+	assertEquals "Exact rules before the first glob should resolve from .exact." \
+		"exact-shadowed" "$l_out"
+
+	l_status=0
+	l_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H empty/exact 2>&1) ||
+		l_status=$?
+	assertEquals "Indexed empty-fixture rules must preserve their exit status." 42 "$l_status"
+	assertEquals "Indexed empty-fixture rules must emit nothing." "" "$l_out"
+
+	l_status=0
+	l_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H empty/glob1 2>&1) ||
+		l_status=$?
+	assertEquals "Glob empty-fixture rules must preserve their exit status." 43 "$l_status"
+	assertEquals "Glob empty-fixture rules must emit nothing." "" "$l_out"
+
+	l_status=0
+	l_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H bracket/a) ||
+		l_status=$?
+	assertEquals "Bracket glob rules must route to .globs and match." 9 "$l_status"
+
+	l_status=0
+	l_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H override/child) ||
+		l_status=$?
+	assertEquals "Earlier glob rule must retain first-match precedence over later exact rule." \
+		7 "$l_status"
+	assertEquals "Earlier glob rule fixture must win." "glob-wins" "$l_out"
+
+	l_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H 'slash\name')
+	assertEquals "Backslash-escaped pattern in manifest must match single literal backslash." \
+		"escaped-backslash" "$l_out"
+
+	l_out=$(MOCK_ZFS_FIXTURE_DIR="$l_idx_state" "$l_mock_zfs" list -H "${l_long_utf8#list -H }")
+	assertEquals "Keys exceeding 200 UTF-8 bytes must fall back cleanly to .globs." \
+		"long-utf8" "$l_out"
 }
 
 . "$SHUNIT2_BIN"

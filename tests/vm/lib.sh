@@ -20,6 +20,8 @@ if [ -z "${ZXFER_ROOT:-}" ] || [ ! -d "$ZXFER_ROOT/tests" ]; then
 	esac
 fi
 
+# shellcheck source=tests/helpers/runner_common.sh
+. "$ZXFER_ROOT/tests/helpers/runner_common.sh"
 # shellcheck source=tests/vm/common.sh
 . "$ZXFER_ROOT/tests/vm/common.sh"
 # shellcheck source=tests/vm/guest_catalog.sh
@@ -244,7 +246,7 @@ zxfer_vm_append_test_names() {
 	for l_test in $l_tests; do
 		[ -n "$l_test" ] || continue
 		case "$l_test" in
-		'' | [!a-z]* | *[!a-z0-9_]*)
+		'' | [!abcdefghijklmnopqrstuvwxyz]* | *[!abcdefghijklmnopqrstuvwxyz0123456789_]*)
 			l_invalid_test=$l_test
 			break
 			;;
@@ -417,7 +419,7 @@ zxfer_vm_integration_harness_extra_args() {
 	fi
 	for l_test in $ZXFER_VM_ONLY_TESTS; do
 		case "$l_test" in
-		'' | [!a-z]* | *[!a-z0-9_]*)
+		'' | [!abcdefghijklmnopqrstuvwxyz]* | *[!abcdefghijklmnopqrstuvwxyz0123456789_]*)
 			zxfer_vm_die "Invalid integration test name for --only-test: $l_test"
 			;;
 		esac

@@ -37,40 +37,14 @@ TESTS_DIR=$(dirname "$0")
 # shellcheck source=tests/helpers/blackbox.sh
 . "$TESTS_DIR/helpers/blackbox.sh"
 
-# Purpose: Put a strict receive in front of the canned zfs: each receive
-# appends "DATASET BYTES" to $CASE_DIR/receive.bytes and fails on 0 bytes.
-# Usage: sendrecv_write_strict_receive_zfs
-sendrecv_write_strict_receive_zfs() {
-	mv "$MOCKBIN_DIR/zfs" "$MOCKBIN_DIR/zfs.canned" ||
-		fail "Unable to stage the canned zfs behind the strict receive."
-	cat >"$MOCKBIN_DIR/zfs" <<EOF
-#!/bin/sh
-case "\${1:-}" in
-receive | recv)
-	for strict_arg in "\$@"; do
-		strict_dataset=\$strict_arg
-	done
-	strict_bytes=\$(wc -c | tr -d ' ')
-	printf '%s %s\n' "\$strict_dataset" "\$strict_bytes" >>"$CASE_DIR/receive.bytes"
-	if [ "\$strict_bytes" -eq 0 ]; then
-		echo "cannot receive: failed to read from stream" >&2
-		exit 1
-	fi
-	exec "$MOCKBIN_DIR/zfs.canned" "\$@" </dev/null
-	;;
-esac
-exec "$MOCKBIN_DIR/zfs.canned" "\$@"
-EOF
-	chmod +x "$MOCKBIN_DIR/zfs"
-}
-
-# Purpose: Build the -j incremental environment with the strict receive, both
-# %%size%% probes answering 4096, and a dialog that keeps one stream copy per
-# run in $CASE_DIR/dialog.<pid>.stream.
+# Purpose: Build the -j incremental environment with strict receive byte
+# counting, both %%size%% probes answering 4096, and a dialog that keeps one
+# stream copy per run in $CASE_DIR/dialog.<pid>.stream.
 # Usage: sendrecv_setup_progress_env <state-name>
 sendrecv_setup_progress_env() {
 	planning_setup_parallel_jobs_env "$1"
-	sendrecv_write_strict_receive_zfs
+	MOCK_ZFS_RECEIVE_BYTES_LOG="$CASE_DIR/receive.bytes"
+	export MOCK_ZFS_RECEIVE_BYTES_LOG
 	printf '4096\n' >"$STATE_DIR/written.value"
 	printf 'size\t4096\n' >"$STATE_DIR/send_estimate.list"
 	printf 'get -Hpo value written@* *\twritten.value\t0\nsend -nPv *\tsend_estimate.list\t0\n' \
@@ -194,32 +168,6 @@ sendrecv_run_zxfer() {
 	)
 }
 
-# Purpose: Leave destination child N in STATE_DIR without snapshots: no
-# recursive or depth-1 snapshot rows, while the dataset itself stays listed.
-# Usage: sendrecv_make_destination_child_empty N
-sendrecv_make_destination_child_empty() {
-	grep -v "^$D/child$1@" "$STATE_DIR/dst_snapshots.list" \
-		>"$STATE_DIR/dst_snapshots.list.new" || :
-	mv "$STATE_DIR/dst_snapshots.list.new" "$STATE_DIR/dst_snapshots.list" ||
-		fail "Unable to empty destination child$1."
-	: >"$STATE_DIR/dst_d1_$1.list"
-}
-
-# Purpose: Remove destination child N from STATE_DIR: no snapshots, not in
-# the dataset inventory, and `zfs list -H` answers that it does not exist.
-# Usage: sendrecv_make_destination_child_missing N
-sendrecv_make_destination_child_missing() {
-	sendrecv_make_destination_child_empty "$1"
-	grep -vx "$D/child$1" "$STATE_DIR/dst_datasets.list" \
-		>"$STATE_DIR/dst_datasets.list.new" || :
-	mv "$STATE_DIR/dst_datasets.list.new" "$STATE_DIR/dst_datasets.list" ||
-		fail "Unable to drop child$1 from the destination inventory."
-	printf "cannot open '%s': dataset does not exist\n" "$D/child$1" \
-		>"$STATE_DIR/missing_child$1.list"
-	printf 'list -H %s\tmissing_child%s.list\t1\n' "$D/child$1" "$1" \
-		>>"$STATE_DIR/manifest" || fail "Unable to append the missing-child rule."
-}
-
 # Purpose: Keep only @snap1 of source child N in STATE_DIR's listings.
 # Usage: sendrecv_keep_only_first_source_snapshot N
 sendrecv_keep_only_first_source_snapshot() {
@@ -236,12 +184,7 @@ sendrecv_keep_only_first_source_snapshot() {
 # Usage: sendrecv_fail_destination_child_probe N (after the missing rule)
 sendrecv_fail_destination_child_probe() {
 	printf "cannot open '%s': I/O error\n" "$D/child$1" >"$STATE_DIR/probe_error.list"
-	{
-		printf 'list -H %s\tprobe_error.list\t1\n' "$D/child$1"
-		cat "$STATE_DIR/manifest"
-	} >"$STATE_DIR/manifest.new" || fail "Unable to prepend the probe failure."
-	mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
-		fail "Unable to install the probe failure."
+	blackbox_prepend_manifest_rule "list -H $D/child$1	probe_error.list	1"
 }
 
 # Invariant: a destination child is seeded with its oldest pending snapshot
@@ -257,8 +200,8 @@ test_missing_and_empty_destination_children_are_seeded_before_incrementals() {
 		: >"$ZFS_LOG"
 		planning_clone_state "$FIXTURE_DIR/noop" "seeds$l_seed_verbose"
 		sendrecv_keep_only_first_source_snapshot 1
-		sendrecv_make_destination_child_missing 1
-		sendrecv_make_destination_child_empty 2
+		blackbox_drop_destination_child 1
+		blackbox_empty_destination_child 2
 
 		set -- -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
 		[ -z "$l_seed_verbose" ] || set -- "$l_seed_verbose" "$@"
@@ -308,7 +251,7 @@ test_failed_existence_probe_of_a_child_to_seed_stops_before_its_receive() {
 	for l_probe_fixture in noop incremental; do
 		: >"$ZFS_LOG"
 		planning_clone_state "$FIXTURE_DIR/$l_probe_fixture" "probe_$l_probe_fixture"
-		sendrecv_make_destination_child_missing 2
+		blackbox_drop_destination_child 2
 		sendrecv_fail_destination_child_probe 2
 
 		planning_run_zxfer "$STATE_DIR" -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
@@ -327,7 +270,7 @@ test_failed_existence_probe_of_a_child_to_seed_stops_before_its_receive() {
 test_child_with_only_unrelated_snapshots_is_never_fully_received() {
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/incremental" unrelated
-	sendrecv_make_destination_child_empty 2
+	blackbox_empty_destination_child 2
 	printf '%s/child2@foreign\t9999900200000000007\n' "$D" |
 		tee -a "$STATE_DIR/dst_snapshots.list" >>"$STATE_DIR/dst_d1_2.list" ||
 		fail "Unable to add the unrelated snapshot."
@@ -339,21 +282,6 @@ test_child_with_only_unrelated_snapshots_is_never_fully_received() {
 	assertEquals "nothing may be sent to or received into child2" \
 		"" "$(sendrecv_transfer_lines | grep 'child2' || :)"
 	planning_assert_no_mutations
-}
-
-# Purpose: Give the destination root in STATE_DIR a destination-only
-# snapshot for -d to destroy, with the creation times of it and the anchor.
-# Usage: sendrecv_add_destination_only_root_snapshot NAME CREATED ANCHOR
-# ANCHOR_CREATED
-sendrecv_add_destination_only_root_snapshot() {
-	for l_extra_list in dst_snapshots.list dst_d1_0.list; do
-		printf '%s@%s\t9999900009000000007\n' "$D" "$1" >>"$STATE_DIR/$l_extra_list" ||
-			fail "Unable to add the destination-only snapshot to $l_extra_list."
-	done
-	printf '%s@%s\t%s\n%s@%s\t%s\n' "$D" "$3" "$4" "$D" "$1" "$2" \
-		>"$STATE_DIR/dst_creation.list" || fail "Unable to write the creation times."
-	printf 'get -H -o name,value -p creation %s@*\tdst_creation.list\t0\n' "$D" \
-		>>"$STATE_DIR/manifest" || fail "Unable to append the creation-time rule."
 }
 
 # Purpose: Answer the root's first depth-1 listing, the re-plan after its
@@ -379,7 +307,7 @@ sendrecv_answer_replan_listing() {
 test_replan_after_a_destroy_refuses_when_the_anchor_is_gone() {
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/noop" anchor_gone
-	sendrecv_add_destination_only_root_snapshot snap9 1700000009 snap3 1700000003
+	planning_add_extra_destination_snapshot "" snap9 1700000009 snap3 1700000003
 	sendrecv_answer_replan_listing "$(printf '%s@snap1\t1000000001000000007\n%s@snap2\t1000000002000000007' "$D" "$D")"
 
 	planning_run_zxfer "$STATE_DIR" -d -F -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
@@ -396,7 +324,7 @@ test_replan_after_a_destroy_refuses_when_the_anchor_is_gone() {
 test_replan_after_a_destroy_reseeds_an_emptied_destination_from_its_anchor() {
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/noop" emptied_in_sync
-	sendrecv_add_destination_only_root_snapshot snap9 1700000009 snap3 1700000003
+	planning_add_extra_destination_snapshot "" snap9 1700000009 snap3 1700000003
 	sendrecv_answer_replan_listing ""
 
 	planning_run_zxfer "$STATE_DIR" -d -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
@@ -410,7 +338,7 @@ test_replan_after_a_destroy_reseeds_an_emptied_destination_from_its_anchor() {
 
 	: >"$ZFS_LOG"
 	planning_clone_state "$FIXTURE_DIR/incremental" emptied_behind
-	sendrecv_add_destination_only_root_snapshot snap9 1700000009 snap2 1700000002
+	planning_add_extra_destination_snapshot "" snap9 1700000009 snap2 1700000002
 	sendrecv_answer_replan_listing ""
 
 	planning_run_zxfer "$STATE_DIR" -d -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
@@ -438,7 +366,7 @@ receive $D/child2" "$(sendrecv_log_lines receive)"
 test_destroy_rolls_back_only_for_a_newer_snapshot_with_a_send_pending() {
 	planning_setup_env
 	planning_clone_state "$FIXTURE_DIR/incremental" older_destroyed
-	sendrecv_add_destination_only_root_snapshot snap0 1700000001 snap2 1700000002
+	planning_add_extra_destination_snapshot "" snap0 1700000001 snap2 1700000002
 
 	planning_run_zxfer "$STATE_DIR" -d -F -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
@@ -450,7 +378,7 @@ test_destroy_rolls_back_only_for_a_newer_snapshot_with_a_send_pending() {
 
 	: >"$ZFS_LOG"
 	planning_clone_state "$FIXTURE_DIR/noop" newer_nothing_pending
-	sendrecv_add_destination_only_root_snapshot snap9 1700000009 snap3 1700000003
+	planning_add_extra_destination_snapshot "" snap9 1700000009 snap3 1700000003
 
 	planning_run_zxfer "$STATE_DIR" -d -F -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
@@ -660,21 +588,6 @@ test_yield_passes_reread_properties_and_keep_the_newest_backup_rows() {
 # ---------------------------------------------------------------------------
 # Remote transport details that change what a run replicates.
 
-# Purpose: Write the socket-aware mock ssh of tests/helpers/blackbox.sh with
-# OpenSSH's stdin handling: the remote command reads the local stdin, so a
-# caller that lets ssh inherit a list it is still reading loses the rest.
-# Usage: sendrecv_write_stdin_reading_ssh PATH
-sendrecv_write_stdin_reading_ssh() {
-	planning_write_socket_mock_ssh "$1" || fail "Unable to write the mock ssh."
-	sed 's/^exec sh -c "\$\*"$/cat | sh -c "$*"/' "$1" >"$1.new" ||
-		fail "Unable to make the mock ssh read stdin."
-	if ! mv "$1.new" "$1" || ! chmod +x "$1"; then
-		fail "Unable to install the mock ssh."
-	fi
-	grep -q '^cat | sh -c ' "$1" ||
-		fail "The mock ssh no longer ends with the command it runs."
-}
-
 # Purpose: Build the post-seed environment on a noop STATE_DIR: property
 # fixtures, both destination children missing (the -P pass creates them
 # before their seed), and destination property reads that answer the tree
@@ -700,8 +613,8 @@ sendrecv_setup_post_seed_env() {
 		mv "$STATE_DIR/$l_post_seed_list.new" "$STATE_DIR/$l_post_seed_list" ||
 			fail "Unable to drop the children from $l_post_seed_list."
 	done
-	sendrecv_make_destination_child_missing 1
-	sendrecv_make_destination_child_missing 2
+	blackbox_drop_destination_child 1
+	blackbox_drop_destination_child 2
 	# One rule per recursive view: "VIEW|SUFFIX" of the tree fixtures.
 	for l_post_seed_rule in "-Hpo name,property,value,source|list" \
 		"-Ho name,property,value,source|list" "-Ho name,property|names"; do
@@ -768,7 +681,9 @@ test_post_seed_property_pass_reconciles_every_seeded_dataset_after_the_receives(
 	sendrecv_assert_post_seed_reconcile "-j 2"
 
 	sendrecv_setup_post_seed_env post_seed_target
-	sendrecv_write_stdin_reading_ssh "$MOCKBIN_DIR/ssh"
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" || fail "Unable to write the mock ssh."
+	MOCK_SSH_READ_STDIN=1
+	export MOCK_SSH_READ_STDIN
 	sendrecv_run_zxfer "" "$STATE_DIR" -T localhost -P -R "$S" "$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
 	assertEquals "-T -P over missing children should exit 0; stderr: $(cat "$CASE_DIR/zxfer.stderr")" 0 "$l_run_status"
@@ -780,7 +695,9 @@ test_post_seed_property_pass_reconciles_every_seeded_dataset_after_the_receives(
 # instead of losing the rest of its queue to the first one.
 test_remote_pull_over_an_ssh_that_reads_stdin_replicates_every_dataset() {
 	planning_setup_env
-	sendrecv_write_stdin_reading_ssh "$MOCKBIN_DIR/ssh"
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" || fail "Unable to write the mock ssh."
+	MOCK_SSH_READ_STDIN=1
+	export MOCK_SSH_READ_STDIN
 	sendrecv_run_zxfer "" "$FIXTURE_DIR/incremental" -O localhost -R "$S" \
 		"$ZXFER_MOCKBIN_DEST_ROOT"
 	l_run_status=$?
@@ -879,7 +796,7 @@ test_parallel_job_failure_over_the_target_keeps_its_status_and_stops_the_sibling
 	printf 'receive %s/child1\t-\t3\n' "$D" >>"$STATE_DIR/manifest" ||
 		fail "Unable to append the failing receive rule."
 	planning_delay_canned_zfs_receive "$D/child2" 30
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" || fail "Unable to write the mock ssh."
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" || fail "Unable to write the mock ssh."
 
 	l_failure_started=$(date '+%s')
 	sendrecv_run_zxfer "$JOB_TMP_DIR" "$STATE_DIR" -j 2 -T localhost -R "$S" \
@@ -935,29 +852,12 @@ test_parallel_jobs_check_a_converged_destination_only_after_its_receive() {
 # ---------------------------------------------------------------------------
 # The pipeline around each stream: -D progress stages and -z compression.
 
-# Purpose: Put a recorder in front of whatever zfs MOCKBIN_DIR holds: each
-# receive appends its stream to $CASE_DIR/received/<dataset>, with "/"
-# spelled "_", on its way to the wrapped zfs, whose status it keeps.
+# Purpose: Configure the canned zfs so each receive appends its stream to
+# $CASE_DIR/received/<dataset>, with "/" spelled "_".
 # Usage: sendrecv_record_received_streams
 sendrecv_record_received_streams() {
-	mv "$MOCKBIN_DIR/zfs" "$MOCKBIN_DIR/zfs.recorded" ||
-		fail "Unable to stage the zfs behind the stream recorder."
-	cat >"$MOCKBIN_DIR/zfs" <<EOF
-#!/bin/sh
-case "\${1:-}" in
-receive | recv)
-	for recorded_arg in "\$@"; do
-		recorded_dataset=\$recorded_arg
-	done
-	mkdir -p "$CASE_DIR/received" || exit 1
-	tee -a "$CASE_DIR/received/\$(printf '%s' "\$recorded_dataset" | tr / _)" |
-		"$MOCKBIN_DIR/zfs.recorded" "\$@"
-	exit
-	;;
-esac
-exec "$MOCKBIN_DIR/zfs.recorded" "\$@"
-EOF
-	chmod +x "$MOCKBIN_DIR/zfs"
+	MOCK_ZFS_RECEIVE_STREAM_DIR="$CASE_DIR/received"
+	export MOCK_ZFS_RECEIVE_STREAM_DIR
 }
 
 # Purpose: Fail unless each dataset of the tree received exactly its own
@@ -1044,7 +944,7 @@ test_progress_dialog_output_never_reaches_the_receive_and_its_status_is_ignored(
 # fails, the exact `zfs send -nPv` estimate answers instead.
 test_progress_size_falls_back_to_the_exact_estimate_for_full_and_incremental_sends() {
 	planning_setup_parallel_jobs_env progress_fallback
-	sendrecv_make_destination_child_missing 2
+	blackbox_drop_destination_child 2
 	printf 'size\t4096\n' >"$STATE_DIR/incremental_estimate.list"
 	printf 'size\t8192\n' >"$STATE_DIR/full_estimate.list"
 	printf '%s\t%s\t%s\n' \
@@ -1126,30 +1026,6 @@ test_progress_stage_failures_stop_the_run_before_its_send() {
 	assertFalse "no dialog ever started" "[ -s '$CASE_DIR/dialog.argv' ]"
 }
 
-# Purpose: Write a framing zstd to MOCKBIN_DIR: compressing prepends one
-# ZXFERMOCKZSTD line, and decompressing fails unless it can strip one. A
-# stream that skipped the compressor then fails, and one that skipped the
-# decompressor reaches its receive framed.
-# Usage: sendrecv_write_framing_zstd
-sendrecv_write_framing_zstd() {
-	cat >"$MOCKBIN_DIR/zstd" <<'EOF'
-#!/bin/sh
-case "${1:-}" in
--d)
-	IFS= read -r framing_header || exit 1
-	if [ "$framing_header" != ZXFERMOCKZSTD ]; then
-		echo "zstd: stdin is not a mock frame" >&2
-		exit 1
-	fi
-	exec cat
-	;;
-esac
-printf '%s\n' ZXFERMOCKZSTD
-exec cat
-EOF
-	chmod +x "$MOCKBIN_DIR/zstd"
-}
-
 # Invariant: -z compresses each stream on the sending side of its ssh hop and
 # decompresses it on the receiving side, pulling (-O), pushing (-T) and when
 # -O and -T name the same host (each side still picks the codec of its own
@@ -1159,8 +1035,8 @@ EOF
 test_compression_crosses_each_ssh_hop_and_leaves_every_stream_intact() {
 	planning_setup_parallel_jobs_env compression
 	sendrecv_record_received_streams
-	sendrecv_write_framing_zstd
-	planning_write_socket_mock_ssh "$MOCKBIN_DIR/ssh" || fail "Unable to write the mock ssh."
+	planning_write_mock_zstd "$MOCKBIN_DIR/zstd" || fail "Unable to write the mock zstd."
+	zxfer_mockbin_write_socket_ssh "$MOCKBIN_DIR/ssh" || fail "Unable to write the mock ssh."
 	cat >"$MOCKBIN_DIR/progress_dialog" <<EOF
 #!/bin/sh
 cat >>"$CASE_DIR/dialog.copy"

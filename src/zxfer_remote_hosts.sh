@@ -105,6 +105,17 @@ zxfer_fast_recursive_noop_options_are_eligible() {
 	return 0
 }
 
+# Purpose: Append the first literal token of CODEC_CMD to l_scope_candidates
+# when -z compression is active.
+# Usage: zxfer_append_remote_codec_head CODEC_CMD; internal to
+# zxfer_get_remote_capability_requested_tools_for_host.
+zxfer_append_remote_codec_head() {
+	[ "${g_option_z_compress:-0}" -eq 1 ] && [ -n "${1:-}" ] &&
+		zxfer_check_literal_token_string "$1" || return 0
+	zxfer_split_tokens_into_result "$1"
+	l_scope_candidates="$l_scope_candidates ${g_zxfer_split_tokens_result%%"$ZXFER_LF"*}"
+}
+
 # Purpose: Work out which helpers one capability probe asks a host about.
 # Usage: zxfer_get_remote_capability_requested_tools_for_host HOST_SPEC [TOOL];
 # publishes the space-separated list in
@@ -128,20 +139,12 @@ zxfer_get_remote_capability_requested_tools_for_host() {
 		fi
 		[ "${g_option_e_restore_property_mode:-0}" -ne 1 ] ||
 			l_scope_candidates="$l_scope_candidates cat"
-		if [ "${g_option_z_compress:-0}" -eq 1 ] &&
-			zxfer_check_literal_token_string "${g_cmd_compress:-}"; then
-			zxfer_split_tokens_into_result "${g_cmd_compress:-}"
-			l_scope_candidates="$l_scope_candidates ${g_zxfer_split_tokens_result%%"$ZXFER_LF"*}"
-		fi
+		zxfer_append_remote_codec_head "${g_cmd_compress:-}"
 	fi
 	if [ -n "${g_option_T_target_host:-}" ] && [ "$l_scope_host" = "$g_option_T_target_host" ]; then
 		[ "${g_option_k_backup_property_mode:-0}" -ne 1 ] ||
 			l_scope_candidates="$l_scope_candidates cat"
-		if [ "${g_option_z_compress:-0}" -eq 1 ] &&
-			zxfer_check_literal_token_string "${g_cmd_decompress:-}"; then
-			zxfer_split_tokens_into_result "${g_cmd_decompress:-}"
-			l_scope_candidates="$l_scope_candidates ${g_zxfer_split_tokens_result%%"$ZXFER_LF"*}"
-		fi
+		zxfer_append_remote_codec_head "${g_cmd_decompress:-}"
 	fi
 	zxfer_split_begin
 	# shellcheck disable=SC2086 # Space-separated tool names.
@@ -610,10 +613,11 @@ zxfer_resolve_remote_required_tool() {
 			;;
 		10) l_tool_status=1 ;;
 		*)
-			g_zxfer_required_tool_result="Failed to query dependency \"$l_tool_label\" on host $l_tool_host."
-			[ -z "${g_zxfer_remote_probe_stderr:-}" ] ||
+			if [ -n "${g_zxfer_remote_probe_stderr:-}" ]; then
 				g_zxfer_required_tool_result=$g_zxfer_remote_probe_stderr
-			return 1
+				return 1
+			fi
+			l_tool_status=2
 			;;
 		esac
 	fi

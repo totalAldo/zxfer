@@ -127,46 +127,32 @@ zxfer_find_tool_in_path() {
 	return 1
 }
 
-# Purpose: Undo the shell quoting that some /bin/sh builds (OmniOS) add to
-# command -v output, and drop trailing newlines as a $(...) capture would.
-# Usage: zxfer_normalize_resolved_tool_path PATH; publishes
-# g_zxfer_required_tool_result and prints nothing.
-zxfer_normalize_resolved_tool_path() {
-	g_zxfer_required_tool_result=$1
-	case $1 in
-	\'/*\')
-		l_unquoted_path=${1#\'}
-		l_unquoted_path=${l_unquoted_path%\'}
-		case $l_unquoted_path in
-		*\'*) ;;
-		*) g_zxfer_required_tool_result=$l_unquoted_path ;;
-		esac
-		;;
-	\"/*\")
-		l_unquoted_path=${1#\"}
-		l_unquoted_path=${l_unquoted_path%\"}
-		case $l_unquoted_path in
-		*\"*) ;;
-		*) g_zxfer_required_tool_result=$l_unquoted_path ;;
-		esac
-		;;
-	esac
-
-	while :; do
-		case $g_zxfer_required_tool_result in
-		*"$ZXFER_LF") g_zxfer_required_tool_result=${g_zxfer_required_tool_result%"$ZXFER_LF"} ;;
-		*) break ;;
-		esac
-	done
-}
-
-# Purpose: Check that a resolved helper path is one absolute line.
+# Purpose: Check that a resolved helper path is one absolute line, stripping
+# outer shell quotes (as OmniOS /bin/sh command -v adds) and trailing newlines.
 # Usage: zxfer_validate_resolved_tool_path PATH LABEL [SCOPE]; publishes the
 # normalized path in g_zxfer_required_tool_result, or returns 1 with the
 # operator message there.
 zxfer_validate_resolved_tool_path() {
-	zxfer_normalize_resolved_tool_path "$1"
-	l_validated_tool_path=$g_zxfer_required_tool_result
+	l_validated_tool_path=$1
+	for l_quote in \' \"; do
+		case $l_validated_tool_path in
+		"$l_quote"/*"$l_quote")
+			l_unquoted_path=${l_validated_tool_path#"$l_quote"}
+			l_unquoted_path=${l_unquoted_path%"$l_quote"}
+			case $l_unquoted_path in
+			*"$l_quote"*) ;;
+			*) l_validated_tool_path=$l_unquoted_path ;;
+			esac
+			;;
+		esac
+	done
+	while :; do
+		case $l_validated_tool_path in
+		*"$ZXFER_LF") l_validated_tool_path=${l_validated_tool_path%"$ZXFER_LF"} ;;
+		*) break ;;
+		esac
+	done
+
 	l_validated_tool_problem=""
 	if ! zxfer_value_is_single_line "$l_validated_tool_path"; then
 		l_validated_tool_problem="a single-line absolute path without control whitespace"
@@ -208,8 +194,8 @@ zxfer_require_tool() {
 
 # Purpose: Drop every inherited helper command and the secure PATH, and set the
 # default compression commands.
-# Usage: Called first by zxfer_reset_session_state: later resets copy g_cmd_zfs
-# and probe g_cmd_ssh, so neither may keep an inherited value.
+# Usage: Called first by zxfer_reset_session_state: the remote-host reset
+# copies g_cmd_zfs, so it must not keep an inherited value.
 zxfer_reset_dependency_state() {
 	g_zxfer_secure_path=""
 	g_cmd_awk=""
@@ -246,7 +232,8 @@ zxfer_init_dependency_tool_defaults() {
 	# parallel is optional, but a parallel that is present must validate.
 	g_cmd_parallel=""
 	if zxfer_find_tool_in_path parallel "$g_zxfer_secure_path"; then
-		zxfer_require_tool parallel
+		zxfer_validate_resolved_tool_path "$g_zxfer_tool_path_result" parallel ||
+			zxfer_throw_dependency_error "$g_zxfer_required_tool_result"
 		g_cmd_parallel=$g_zxfer_required_tool_result
 	fi
 	zxfer_require_tool ps

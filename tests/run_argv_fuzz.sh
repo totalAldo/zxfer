@@ -143,7 +143,7 @@ done
 for g_argv_fuzz_count in "$g_argv_fuzz_seed" "$g_argv_fuzz_iterations" \
 	"$g_argv_fuzz_first_case"; do
 	case $g_argv_fuzz_count in
-	'' | *[!0-9]* | ????????????????*)
+	'' | *[!0123456789]* | ????????????????*)
 		argv_fuzz_usage_error "not a decimal integer of at most 15 digits: $g_argv_fuzz_count"
 		;;
 	esac

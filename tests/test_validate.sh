@@ -22,6 +22,7 @@ reset_validate_fixture_root() {
 	: >"$VALIDATION_LOG"
 	ln -s "$VALIDATE_BIN" "$FAKE_ROOT/tests/validate.sh"
 	ln -s "$ZXFER_ROOT/tests/helpers/test_catalog.sh" "$FAKE_ROOT/tests/helpers/test_catalog.sh"
+	ln -s "$ZXFER_ROOT/tests/helpers/runner_common.sh" "$FAKE_ROOT/tests/helpers/runner_common.sh"
 	ln -s "$ZXFER_ROOT/tests/validation_map.tsv" "$FAKE_ROOT/tests/validation_map.tsv"
 	ln -s "$ZXFER_ROOT/tests/validation_profiles.tsv" "$FAKE_ROOT/tests/validation_profiles.tsv"
 }
@@ -122,48 +123,6 @@ test_validate_quick_expands_the_contract_token_of_a_map_row() {
 shunit:--jobs 4 tests/test_contract_alpha.sh tests/test_run_argv_fuzz.sh" "$(cat "$VALIDATION_LOG")"
 }
 
-test_validate_quick_maps_every_fragment_to_the_entry_suite_that_sources_it() {
-	set --
-	fragment_owners=
-	expected_suites=
-	for l_fragment_path in "$ZXFER_ROOT"/tests/suites/*.sh; do
-		l_fragment=tests/suites/${l_fragment_path##*/}
-		# The file inventory and its ShellCheck annotation give us an
-		# expected owner independent of the catalog's source-line parser.
-		l_entry=$(cd "$ZXFER_ROOT" && grep -Flx "# shellcheck source=$l_fragment" tests/test_*.sh)
-		if [ ! -f "$ZXFER_ROOT/$l_entry" ]; then
-			fail "Expected one suite entry for $l_fragment, found [$l_entry]."
-			return 1
-		fi
-		if [ ! -f "$FAKE_ROOT/$l_entry" ]; then
-			ln -s "$ZXFER_ROOT/$l_entry" "$FAKE_ROOT/$l_entry"
-			expected_suites="$expected_suites${expected_suites:+ }$l_entry"
-		fi
-		set -- "$@" "$l_fragment"
-		fragment_owners="$fragment_owners$l_fragment $l_entry
-"
-	done
-	unmarked_path=tests/suites/zxfer_unmarked_example_tests.sh
-
-	output=$(
-		VALIDATION_LOG="$VALIDATION_LOG" \
-			"$FAKE_ROOT/tests/validate.sh" quick "$@" "$unmarked_path"
-	)
-
-	while read -r l_fragment l_entry; do
-		[ -n "$l_fragment" ] || continue
-		assertContains "$l_fragment should map to $l_entry." \
-			"$(validation_mapping_block "$output" "$l_fragment")" "fragment of: $l_entry"
-	done <<EOF
-$fragment_owners
-EOF
-	assertNotContains "A path that no entry suite sources should map through the validation map itself." \
-		"$(validation_mapping_block "$output" "$unmarked_path")" "fragment of:"
-	assertEquals "Fragments should deduplicate to the entry suites that source them." \
-		"lint:budget
-shunit:--jobs 4 $expected_suites" "$(cat "$VALIDATION_LOG")"
-}
-
 # Purpose: Print integration/NAME_tests.sh for each integration fragment, the
 # set tests/run_integration_zxfer.sh loads.
 # Usage: integration_fragment_paths
@@ -244,8 +203,8 @@ test_validate_quick_maps_shared_unit_helpers_to_representative_suites() {
 		"$l_mapping_block" "Shared process-capture changes"
 
 	l_mapping_block=$(validation_mapping_block "$output" tests/helpers/loader.sh)
-	assertContains "Loader helpers should select launcher and fragment-registration coverage." \
-		"$l_mapping_block" "tests/test_zxfer_launcher.sh,tests/test_zxfer_runtime.sh"
+	assertContains "Loader helpers should select launcher module-loading coverage." \
+		"$l_mapping_block" "tests/test_zxfer_launcher.sh"
 	assertContains "Loader mappings should explain full module loading." \
 		"$l_mapping_block" "Shared loader changes"
 
@@ -257,7 +216,7 @@ test_validate_quick_maps_shared_unit_helpers_to_representative_suites() {
 
 	assertEquals "Shared helper mappings should deduplicate conservative representative suites." \
 		"lint:budget
-shunit:--jobs 4 tests/test_run_shunit_tests.sh tests/test_zxfer_launcher.sh tests/test_zxfer_runtime.sh tests/test_zxfer_backup_metadata.sh" \
+shunit:--jobs 4 tests/test_run_shunit_tests.sh tests/test_zxfer_launcher.sh tests/test_zxfer_backup_metadata.sh" \
 		"$(cat "$VALIDATION_LOG")"
 }
 

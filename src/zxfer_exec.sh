@@ -95,11 +95,8 @@ zxfer_init_background_shell_spawn_mode() {
 			wait "$l_spawn_mode_probe_pid" 2>/dev/null || exit 1
 			printf '%s\n' "$l_spawn_mode_probe_pid"
 		) || l_spawn_mode_probe=""
-		if [ "${l_spawn_mode_probe#*
-}" != "$l_spawn_mode_probe" ] &&
-			[ "${l_spawn_mode_probe%%
-*}" = "${l_spawn_mode_probe#*
-}" ]; then
+		if [ "${l_spawn_mode_probe#*"$ZXFER_LF"}" != "$l_spawn_mode_probe" ] &&
+			[ "${l_spawn_mode_probe%%"$ZXFER_LF"*}" = "${l_spawn_mode_probe#*"$ZXFER_LF"}" ]; then
 			g_zxfer_background_shell_spawn_mode=setsid
 			return 0
 		fi

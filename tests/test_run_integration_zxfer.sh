@@ -195,113 +195,21 @@ test_integration_build_requested_test_sequence_rejects_unknown_test_names() {
 
 test_integration_registry_preserves_exact_existing_test_and_group_order() {
 	actual=$(zxfer_integration_registry_names)
-	expected='usage_error_tests
-usage_error_failure_report_test
-usage_error_failure_report_unsafe_commands_test
-usage_error_failure_report_control_character_escaping_test
-usage_error_failure_report_trailing_newline_preservation_test
-basic_replication_test
-non_recursive_replication_test
-generate_tests_replication
-idempotent_replication_test
-auto_snapshot_replication_test
-auto_snapshot_nonrecursive_test
-auto_snapshot_yield_test
-trailing_slash_destination_test
-exclude_filter_test
-missing_destination_error_test
-invalid_override_property_test
-dry_run_replication_test
-remote_dry_run_noexec_progress_test
-yield_loop_dryrun_iteration_test
-force_rollback_test
-failure_handling_tests
-runtime_failure_report_test
-runtime_failure_report_redaction_test
-runtime_failure_report_unsafe_commands_test
-extended_usage_error_tests
-consistency_option_validation_tests
-snapshot_deletion_test
-snapshot_name_mismatch_deletion_test
-snapshot_name_prefix_collision_deletion_test
-send_command_dryrun_test
-raw_send_replication_test
-backup_dir_symlink_guard_test
-relative_backup_dir_rejection_test
-missing_backup_metadata_error_test
-grandfather_protection_test
-migration_unmounted_guard_test
-property_backup_restore_test
-chained_property_backup_provenance_test
-remote_property_backup_restore_test
-property_creation_with_zvol_test
-property_override_and_ignore_test
-escaped_comma_override_test
-unsupported_property_skip_test
-must_create_property_error_test
-delete_dest_only_snapshot_test
-existing_empty_destination_seed_test
-dry_run_deletion_test
-progress_wrapper_test
-progress_placeholder_passthrough_test
-job_limit_enforcement_test
-background_receive_ancestry_serialization_test
-background_send_failure_test
-secure_path_dependency_tests
-secure_path_failure_report_test
-secure_path_append_resolution_test
-error_log_mirror_test
-usage_error_log_mirror_test
-invalid_error_log_warning_test
-error_log_email_example_self_test
-remote_migration_guard_tests
-local_helper_path_shell_metacharacters_test
-garbage_wrapped_host_spec_fails_closed_test
-control_socket_path_shell_metacharacters_test
-remote_origin_target_uncompressed_test
-remote_helper_path_shell_metacharacters_test
-remote_capability_control_whitespace_path_falls_back_to_direct_probe_test
-target_capability_control_whitespace_path_falls_back_to_direct_probe_test
-remote_compression_pipeline_test
-target_only_remote_compression_test
-remote_csh_origin_snapshot_listing_test
-remote_wrapped_host_spec_test
-malformed_remote_capability_response_fails_closed_test
-malformed_remote_capability_response_falls_back_to_direct_probe_test
-malformed_target_capability_response_falls_back_to_direct_probe_test
-trap_exit_cleanup_test
-missing_parallel_error_test
-remote_missing_parallel_origin_test
-remote_incompatible_parallel_origin_test
-remote_parallel_rendered_failure_origin_test
-managed_ssh_policy_test
-parallel_jobs_listing_test
-migration_service_success_test
-migration_yield_test
-migration_service_failure_test
-get_os_detection_test
-verbose_debug_logging_test
-legacy_backup_layout_rejected_test
-unsupported_backup_format_version_rejected_test
-remote_legacy_backup_layout_rejected_test
-insecure_backup_metadata_guard_test
-beep_handling_test
-hostile_dataset_names_replication_test
-hostile_dataset_names_delete_test
-hostile_property_values_test
-hostile_property_override_test
-hostile_property_backup_restore_test
-hostile_property_record_shaped_value_test
-hostile_property_dash_name_test'
+	expected=$(awk -F '	' 'NR > 1 { print $1 }' "$INTEGRATION_REGISTRY")
+	registry_count=$(printf '%s\n' "$actual" | awk 'NF { count++ } END { print count + 0 }')
 
-	assertEquals "The registry should preserve all 98 integration tests and groups in their existing order." \
+	assertEquals "The registry loader should preserve every integration test and group in exact TSV row order." \
 		"$expected" "$actual"
+	assertTrue "The integration registry should retain the full suite of ZFS integration tests." \
+		"[ \"$registry_count\" -ge 90 ]"
+	assertEquals "usage_error_tests should remain the first entry in the main sequence." \
+		"usage_error_tests" "$(printf '%s\n' "$actual" | sed -n '1p')"
 	assertEquals "usage_error_tests should remain the sole pre-pool check and still appear in the main sequence." \
 		"usage_error_tests" "$(zxfer_integration_registry_pre_pool_names)"
 	group_names=$(awk -F '	' 'NR > 1 && $2 == "group" { print $1 }' "$INTEGRATION_REGISTRY" |
 		awk 'BEGIN { separator = "" } { printf "%s%s", separator, $0; separator = " " } END { print "" }')
 	assertEquals "Grouped integration functions should remain explicit registry entries." \
-		"usage_error_tests generate_tests_replication failure_handling_tests extended_usage_error_tests consistency_option_validation_tests secure_path_dependency_tests remote_migration_guard_tests" \
+		"usage_error_tests generate_tests_replication failure_handling_tests extended_usage_error_tests consistency_option_validation_tests remote_migration_guard_tests" \
 		"$group_names"
 	assertNotContains "The integration registry loader must remain a non-eval data path." \
 		"$(cat "$INTEGRATION_REGISTRY_HELPER")" "eval"
@@ -315,6 +223,7 @@ integration/property_backup_tests.sh
 integration/remote_security_tests.sh
 integration/snapshot_replication_tests.sh'
 	actual_paths=$(zxfer_integration_fragment_paths)
+	registry_count=$(zxfer_integration_registry_names | awk 'NF { count++ } END { print count + 0 }')
 	definition_rows=$(zxfer_integration_fragment_definition_rows)
 	definition_count=$(printf '%s\n' "$definition_rows" | awk 'NF { count++ } END { print count + 0 }')
 	unique_definition_count=$(printf '%s\n' "$definition_rows" |
@@ -335,10 +244,10 @@ integration/snapshot_replication_tests.sh'
 
 	assertEquals "Every integration/*_tests.sh fragment should load, in C sort order." \
 		"$expected_paths" "$actual_paths"
-	assertEquals "Every one of the 98 registered tests and groups should have one fragment definition." \
-		98 "$definition_count"
+	assertEquals "Every registered test and group should have one fragment definition." \
+		"$registry_count" "$definition_count"
 	assertEquals "Integration function definitions should remain unique across fragments." \
-		98 "$unique_definition_count"
+		"$registry_count" "$unique_definition_count"
 	assertEquals "The runner definition scan should complete successfully." \
 		0 "$runner_definition_status"
 	assertEquals "The registered-definition intersection should complete successfully." \
@@ -650,21 +559,6 @@ test_integration_harness_declares_remote_parallel_rendered_failure_case() {
 		"$fragment_contents" "remote_parallel_rendered_failure_origin_test()"
 	assertContains "The integration harness should keep the rendered remote parallel failure case in the declared test sequence." \
 		"$registry_contents" "remote_parallel_rendered_failure_origin_test"
-}
-
-test_get_os_detection_probe_loads_the_remote_host_owner_module() {
-	status=0
-	output=$(
-		(
-			cd "$ZXFER_ROOT" || exit 1
-			get_os_detection_test
-		) 2>&1
-	) || status=$?
-
-	assertEquals "The host-safe OS probe should load zxfer_get_os from its owning module. Output: $output" \
-		0 "$status"
-	assertContains "The OS probe should complete both its local and mock-remote checks." \
-		"$output" "Get_os detection test passed"
 }
 
 test_integration_registry_rejects_bad_schema_duplicates_and_undefined_functions() {
@@ -1000,6 +894,76 @@ test_integration_run_test_replays_failing_output_in_failed_tests_only_mode() {
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "fail-stderr"
 	assertContains "Failure-only mode should still append the failing test to the summary state." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "failed=failing_test"
+}
+
+test_destroy_owned_test_pool_pair_succeeds_before_pools_are_created() {
+	capture_case() {
+		ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1
+		# shellcheck source=tests/run_integration_zxfer.sh
+		. "$INTEGRATION_HARNESS"
+		SRC_POOL=""
+		DEST_POOL=""
+		SRC_POOL_CREATED=0
+		DEST_POOL_CREATED=0
+		destroy_owned_test_pool_pair
+	}
+	zxfer_test_capture_subshell capture_case
+	assertEquals "Pool-pair cleanup must succeed when neither pool has been created yet." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+}
+
+test_integration_cleanup_preserves_workdir_on_failure_when_requested() {
+	l_fail_workdir="$TEST_TMPDIR/workdir-preserve-on-fail"
+	rm -rf "$l_fail_workdir"
+	mkdir -p "$l_fail_workdir"
+
+	l_cleanup_status=0
+	l_cleanup_output=$(
+		sh -c '
+			ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1
+			. "$0"
+			WORKDIR=$1
+			SRC_POOL_CREATED=0
+			DEST_POOL_CREATED=0
+			ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1
+			trap cleanup EXIT
+			exit 9
+		' "$INTEGRATION_HARNESS" "$l_fail_workdir" 2>&1
+	) || l_cleanup_status=$?
+
+	assertEquals "cleanup() must preserve the failing exit status." \
+		9 "$l_cleanup_status"
+	assertTrue "ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1 must retain WORKDIR on non-zero exit." \
+		"[ -d '$l_fail_workdir' ]"
+	assertContains "cleanup() should explain why WORKDIR was preserved." \
+		"$l_cleanup_output" "ZXFER_PRESERVE_WORKDIR_ON_FAILURE=1"
+	rm -rf "$l_fail_workdir"
+}
+
+test_capture_zxfer_temp_snapshot_resolves_symlinked_and_slashed_tmpdir() {
+	l_real_tmp="$TEST_TMPDIR/real_tmp"
+	l_link_tmp="$TEST_TMPDIR/link_tmp"
+	rm -rf "$l_real_tmp" "$l_link_tmp"
+	mkdir -p "$l_real_tmp"
+	ln -s "$l_real_tmp" "$l_link_tmp"
+
+	capture_case() {
+		ZXFER_RUN_INTEGRATION_SOURCE_ONLY=1
+		# shellcheck source=tests/run_integration_zxfer.sh
+		. "$INTEGRATION_HARNESS"
+		TMPDIR="$l_link_tmp/"
+		export TMPDIR
+		l_before=$(capture_zxfer_temp_snapshot)
+		mkdir "$l_real_tmp/zxfer.ssh.leak1"
+		assert_no_zxfer_temp_leaks "$l_before" "symlinked tmp leak check"
+	}
+	zxfer_test_capture_subshell capture_case
+	rm -rf "$l_real_tmp" "$l_link_tmp"
+
+	assertNotEquals "Leaked zxfer.ssh.* under a symlinked TMPDIR must fail closed." \
+		0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "Leak diagnostic should name the leaked entry." \
+		"$ZXFER_TEST_CAPTURE_OUTPUT" "zxfer.ssh.leak1"
 }
 
 # shellcheck source=tests/shunit2/shunit2

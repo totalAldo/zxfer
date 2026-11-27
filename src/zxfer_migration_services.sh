@@ -95,7 +95,6 @@ zxfer_restore_migration_services_status_only() {
 
 	g_services_relaunch_in_progress=1
 	l_restore_services_failed=""
-	l_restore_services_failed_count=0
 	zxfer_split_begin
 	# shellcheck disable=SC2086 # The queue is a whitespace-separated service list.
 	set -- $g_zxfer_services_to_restart
@@ -108,18 +107,16 @@ zxfer_restore_migration_services_status_only() {
 			continue
 		fi
 		if ! svcadm enable "$l_restore_service"; then
-			l_restore_services_failed_count=$((l_restore_services_failed_count + 1))
 			l_restore_services_failed=${l_restore_services_failed:+$l_restore_services_failed }$l_restore_service
 		fi
 	done
 
-	if [ "$l_restore_services_failed_count" -gt 0 ]; then
+	if [ -n "$l_restore_services_failed" ]; then
 		g_zxfer_services_to_restart=$l_restore_services_failed
-		if [ "$l_restore_services_failed_count" -eq 1 ]; then
-			g_zxfer_migration_service_restore_failure_message="Couldn't re-enable service $l_restore_services_failed."
-		else
-			g_zxfer_migration_service_restore_failure_message="Couldn't re-enable services: $l_restore_services_failed."
-		fi
+		case $l_restore_services_failed in
+		*' '*) g_zxfer_migration_service_restore_failure_message="Couldn't re-enable services: $l_restore_services_failed." ;;
+		*) g_zxfer_migration_service_restore_failure_message="Couldn't re-enable service $l_restore_services_failed." ;;
+		esac
 		return 1
 	fi
 

@@ -111,9 +111,8 @@ shunit2, and coverage work on its Ubuntu 24.04 base, but it does not replace
 a ZFS-capable host, disposable VM, or QEMU-capable host for the integration
 runners.
 
-Run targeted suites when editing a specific area. The tests of
-`src/zxfer_NAME.sh` live in `tests/test_zxfer_NAME.sh` and the
-`tests/suites/zxfer_NAME_*_tests.sh` fragments it runs; the black-box contract
+Run targeted suites when editing a specific area. The unit tests of
+`src/zxfer_NAME.sh` live in `tests/test_zxfer_NAME.sh`; the black-box contract
 suites that drive the real launcher are `tests/test_contract_*.sh`. A new
 behavior gets a contract case first; unit tests cover what the canned zfs
 cannot express (`docs/testing.md`, "Where a new test goes"):

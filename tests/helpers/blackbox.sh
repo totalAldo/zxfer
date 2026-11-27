@@ -25,9 +25,21 @@ oneTimeSetUp() {
 	zxfer_test_create_tmpdir "zxfer_blackbox"
 }
 
-setUp() {
+planning_reset_mock_env() {
 	unset MOCK_ZFS_LOG MOCK_ZFS_FIXTURE_DIR MOCK_ZFS_DEFAULT_STATUS \
-		MOCK_SPAWN_LOG ZXFER_BACKUP_DIR
+		MOCK_ZFS_STRICT_RECEIVE MOCK_ZFS_ARGV_LOG MOCK_ZFS_ARGV_VERBS \
+		MOCK_ZFS_ARGV_FORMAT MOCK_ZFS_DELAY_RECEIVE_GLOB \
+		MOCK_ZFS_DELAY_RECEIVE_SECONDS MOCK_ZFS_RECEIVE_BYTES_LOG \
+		MOCK_ZFS_RECEIVE_STREAM_DIR MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR \
+		MOCK_SPAWN_LOG MOCK_SSH_LOG MOCK_SSH_HANDSHAKE_S MOCK_SSH_MUX_S \
+		MOCK_SSH_REJECT_CONTROL_MASTER MOCK_SSH_READ_STDIN \
+		MOCK_SSH_CAPABILITY_RESPONSE_FILE MOCK_PARALLEL_ARGV_LOG \
+		MOCK_SVCADM_FAIL MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_MATCH \
+		MOCK_FAIL_DIR MOCK_FAIL_STDERR MOCK_FAIL_STATUS ZXFER_BACKUP_DIR
+}
+
+setUp() {
+	planning_reset_mock_env
 	planning_use_fixture_roots "$planning_default_source_root" \
 		"$planning_default_dest_root" "$planning_default_dest_mapped_root"
 	CASE_DIR=$(mktemp -d "$TEST_TMPDIR/case.XXXXXX") ||
@@ -58,6 +70,7 @@ planning_use_fixture_roots() {
 # 2-child x 3-snapshot fixture tree in FIXTURE_DIR ("noop" and "incremental").
 # Usage: planning_setup_env
 planning_setup_env() {
+	planning_reset_mock_env
 	MOCKBIN_DIR="$CASE_DIR/mockbin"
 	FIXTURE_DIR="$CASE_DIR/fixtures"
 	ZFS_LOG="$CASE_DIR/zfs.log"
@@ -99,6 +112,122 @@ planning_clone_state() {
 		fail "Unable to clone fixture state directory."
 }
 
+# Purpose: Prepend one or more manifest rules in STATE_DIR so they match ahead
+# of existing rules.
+# Usage: blackbox_prepend_manifest_rule <rule>...
+blackbox_prepend_manifest_rule() {
+	rm -rf "$STATE_DIR/.exact"
+	if ! {
+		printf '%s\n' "$@"
+		cat "$STATE_DIR/manifest"
+	} >"$STATE_DIR/manifest.new" ||
+		! mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest"; then
+		fail "Unable to prepend manifest rules."
+	fi
+}
+
+# Purpose: Run a command with the mock fault injector armed for one call in an
+# isolated counter directory.
+# Usage: blackbox_run_with_fault <tool> <call> <match> <status> <stderr|->
+# <command> [arg...]; "-" leaves MOCK_FAIL_STDERR unset so the mock uses its
+# default operational error, while "" sets an empty stderr. Publishes and
+# returns BLACKBOX_FAULT_STATUS.
+blackbox_run_with_fault() {
+	l_fault_tool=$1
+	l_fault_call=$2
+	l_fault_match=$3
+	l_fault_status=$4
+	l_fault_stderr=$5
+	shift 5
+
+	rm -rf "$CASE_DIR/fail_calls"
+	mkdir "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
+	BLACKBOX_FAULT_STATUS=0
+	(
+		MOCK_FAIL_TOOL=$l_fault_tool
+		MOCK_FAIL_CALL=$l_fault_call
+		MOCK_FAIL_DIR="$CASE_DIR/fail_calls"
+		export MOCK_FAIL_TOOL MOCK_FAIL_CALL MOCK_FAIL_DIR
+		if [ -n "$l_fault_match" ]; then
+			MOCK_FAIL_MATCH=$l_fault_match
+			export MOCK_FAIL_MATCH
+		fi
+		if [ -n "$l_fault_status" ]; then
+			MOCK_FAIL_STATUS=$l_fault_status
+			export MOCK_FAIL_STATUS
+		fi
+		if [ "$l_fault_stderr" != "-" ]; then
+			MOCK_FAIL_STDERR=$l_fault_stderr
+			export MOCK_FAIL_STDERR
+		fi
+		"$@"
+	) </dev/null || BLACKBOX_FAULT_STATUS=$?
+	return "$BLACKBOX_FAULT_STATUS"
+}
+
+# Purpose: Fail unless the last run exited EXPECTED with one runtime failure
+# report naming STAGE and exactly MESSAGE, and started no change after the
+# injected failure (or at all, when none was injected).
+# Usage: blackbox_assert_stopped <label> <expected> <status> <stage> <message>
+blackbox_assert_stopped() {
+	assertEquals "$1: exit status; stderr: $(cat "$CASE_DIR/zxfer.stderr")" "$2" "$3"
+	for l_stopped_line in "exit_status: $2" "failure_class: runtime" "failure_stage: $4" \
+		"message: $5"; do
+		grep -Fqx -e "$l_stopped_line" "$CASE_DIR/zxfer.stderr" ||
+			fail "$1: missing report line: $l_stopped_line
+stderr: $(cat "$CASE_DIR/zxfer.stderr")"
+	done
+	assertEquals "$1: exactly one failure report" \
+		1 "$(grep -c '^zxfer: failure report begin$' "$CASE_DIR/zxfer.stderr")"
+	assertEquals "$1: no change starts after the failure; zfs log: $(cat "$ZFS_LOG")" "" \
+		"$(awk '/^FAIL / { failed = 1 } /^MUTATE / && (failed || !injected) { print }' \
+			injected="$(grep -c '^FAIL ' "$ZFS_LOG")" "$ZFS_LOG")"
+}
+
+# Purpose: Print how many control bytes other than LF and TAB a file holds.
+# Usage: blackbox_count_control_bytes <file>
+blackbox_count_control_bytes() {
+	LC_ALL=C tr -dc '\001-\010\013-\037\177' <"$1" | wc -c | tr -d ' '
+}
+
+# Purpose: Empty one destination child's snapshot listings in STATE_DIR while
+# keeping the dataset itself listed.
+# Usage: blackbox_empty_destination_child <N|childN>
+blackbox_empty_destination_child() {
+	l_empty_num=${1#child}
+	l_empty_dataset="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child$l_empty_num"
+	grep -v "^$l_empty_dataset@" "$STATE_DIR/dst_snapshots.list" \
+		>"$STATE_DIR/dst_snapshots.list.new" || :
+	mv "$STATE_DIR/dst_snapshots.list.new" "$STATE_DIR/dst_snapshots.list" ||
+		fail "Unable to empty $l_empty_dataset."
+	: >"$STATE_DIR/dst_d1_$l_empty_num.list"
+}
+
+# Purpose: Make one destination child missing in STATE_DIR: drop it from the
+# destination dataset, snapshot, and property inventories, and answer its exact
+# `zfs list -H` probe with zfs's missing-dataset line.
+# Usage: blackbox_drop_destination_child <N|childN>
+blackbox_drop_destination_child() {
+	l_drop_num=${1#child}
+	l_drop_name="child$l_drop_num"
+	l_drop_dataset="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/$l_drop_name"
+
+	blackbox_empty_destination_child "$l_drop_num"
+	for l_drop_fixture in dst_datasets.list dst_props_tree.list dst_props_tree.names; do
+		[ -f "$STATE_DIR/$l_drop_fixture" ] || continue
+		if ! awk -F'\t' -v dataset="$l_drop_dataset" '
+			$1 == dataset || index($1, dataset "@") == 1 { next }
+			{ print }' "$STATE_DIR/$l_drop_fixture" >"$STATE_DIR/$l_drop_fixture.new" ||
+			! mv "$STATE_DIR/$l_drop_fixture.new" "$STATE_DIR/$l_drop_fixture"; then
+			fail "Unable to drop $l_drop_dataset from $l_drop_fixture."
+		fi
+	done
+	printf "cannot open '%s': dataset does not exist\n" "$l_drop_dataset" \
+		>"$STATE_DIR/missing_$l_drop_name.list" ||
+		fail "Unable to write the missing-dataset line."
+	blackbox_prepend_manifest_rule "list -H $l_drop_dataset	missing_$l_drop_name.list	1"
+}
+
 # Purpose: Make one exact manifest key in STATE_DIR answer with no output and
 # a non-zero status.
 # Usage: planning_force_manifest_failure <argv-key> <status>
@@ -106,6 +235,7 @@ planning_force_manifest_failure() {
 	l_force_key=$1
 	l_force_status=$2
 
+	rm -rf "$STATE_DIR/.exact"
 	awk -F'\t' -v key="$l_force_key" -v status="$l_force_status" '
 		BEGIN { OFS = "\t" }
 		$1 == key { print $1, "-", status; next }
@@ -116,48 +246,26 @@ planning_force_manifest_failure() {
 		fail "Unable to install rewritten manifest."
 }
 
-# Purpose: Wrap the canned zfs so a receive into a matching dataset sleeps
+# Purpose: Configure the canned zfs so a receive into a matching dataset sleeps
 # first, keeping that receive in flight for ordering or signal tests.
 # Usage: planning_delay_canned_zfs_receive <dataset-glob> <seconds>; the glob
 # is a sh case pattern matched against the receive's last argument.
 planning_delay_canned_zfs_receive() {
-	mv "$MOCKBIN_DIR/zfs" "$MOCKBIN_DIR/zfs.canned" ||
-		fail "Unable to stage the canned zfs behind the delaying wrapper."
-	cat >"$MOCKBIN_DIR/zfs" <<EOF
-#!/bin/sh
-case "\${1:-}" in
-receive | recv)
-	for delay_arg in "\$@"; do
-		delay_dataset=\$delay_arg
-	done
-	case "\$delay_dataset" in
-	$1) sleep $2 || exit \$? ;;
-	esac
-	;;
-esac
-exec "$MOCKBIN_DIR/zfs.canned" "\$@"
-EOF
-	chmod +x "$MOCKBIN_DIR/zfs"
+	MOCK_ZFS_DELAY_RECEIVE_GLOB=$1
+	MOCK_ZFS_DELAY_RECEIVE_SECONDS=$2
+	export MOCK_ZFS_DELAY_RECEIVE_GLOB MOCK_ZFS_DELAY_RECEIVE_SECONDS
 }
 
-# Purpose: Wrap the canned zfs so each call also appends its arguments, each
-# in brackets ("[list] ... [my data] "), to ARGV_LOG: the argument boundaries
-# the space-joined zfs log cannot show.
+# Purpose: Configure the canned zfs so each call also appends its arguments,
+# each in brackets ("[list] ... [my data] "), to ARGV_LOG: the argument
+# boundaries the space-joined zfs log cannot show.
 # Usage: planning_log_canned_zfs_argv; sets ARGV_LOG.
 planning_log_canned_zfs_argv() {
 	ARGV_LOG="$CASE_DIR/zfs_argv.log"
-	mv "$MOCKBIN_DIR/zfs" "$MOCKBIN_DIR/zfs.canned" ||
-		fail "Unable to stage the canned zfs behind the argv-logging wrapper."
-	cat >"$MOCKBIN_DIR/zfs" <<EOF
-#!/bin/sh
-argv_line=""
-for argv_arg in "\$@"; do
-	argv_line="\$argv_line[\$argv_arg] "
-done
-printf '%s\n' "\$argv_line" >>"$ARGV_LOG"
-exec "$MOCKBIN_DIR/zfs.canned" "\$@"
-EOF
-	chmod +x "$MOCKBIN_DIR/zfs"
+	: >"$ARGV_LOG"
+	unset MOCK_ZFS_ARGV_VERBS MOCK_ZFS_ARGV_FORMAT
+	MOCK_ZFS_ARGV_LOG=$ARGV_LOG
+	export MOCK_ZFS_ARGV_LOG
 }
 
 # Purpose: Fail unless the zfs log holds the exact argv line.
@@ -241,23 +349,94 @@ stderr: $(cat "$CASE_DIR/zxfer.stderr")"
 # ---------------------------------------------------------------------------
 # Destination snapshot fixtures.
 
-# Purpose: Give the destination root in STATE_DIR one extra snapshot (@snap9,
-# guid unknown to the source, created 1700000009 = Nov 2023) in the recursive
-# and depth-1 listings, plus the creation-time rule -d planning issues.
-# Usage: planning_add_extra_destination_snapshot
+# Purpose: Give a destination dataset in STATE_DIR one extra destination-only
+# snapshot in the recursive and depth-1 listings, plus the creation-time rule
+# -d planning issues.
+# Usage: planning_add_extra_destination_snapshot [suffix [snap [created
+# [anchor [anchor-created]]]]]; defaults to "" snap9 1700000009 snap3
+# 1700000003.
 planning_add_extra_destination_snapshot() {
-	for l_extradst_fixture in dst_snapshots.list dst_d1_0.list; do
-		printf '%s@snap9\t9999900009000000007\n' "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
+	l_extradst_suffix=${1:-}
+	l_extradst_snap=${2:-snap9}
+	l_extradst_created=${3:-1700000009}
+	l_extradst_anchor=${4:-snap3}
+	l_extradst_anchor_created=${5:-1700000003}
+	l_extradst_dataset="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT$l_extradst_suffix"
+	case $l_extradst_suffix in
+	'')
+		l_extradst_d1=dst_d1_0.list
+		l_extradst_guid="9999900009000000007"
+		l_extradst_creation_file="dst_creation.list"
+		;;
+	/child*)
+		l_extradst_idx=${l_extradst_suffix#/child}
+		l_extradst_d1="dst_d1_$l_extradst_idx.list"
+		l_extradst_guid="9999900${l_extradst_idx}09000000007"
+		l_extradst_creation_file="dst_child${l_extradst_idx}_creation.list"
+		;;
+	esac
+	for l_extradst_fixture in dst_snapshots.list "$l_extradst_d1"; do
+		printf '%s@%s\t%s\n' "$l_extradst_dataset" "$l_extradst_snap" "$l_extradst_guid" \
 			>>"$STATE_DIR/$l_extradst_fixture" ||
 			fail "Unable to append extra snapshot to $l_extradst_fixture."
 	done
-	printf '%s@snap3\t1700000003\n%s@snap9\t1700000009\n' \
-		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
-		>"$STATE_DIR/dst_creation.list" ||
+	printf '%s@%s\t%s\n%s@%s\t%s\n' \
+		"$l_extradst_dataset" "$l_extradst_anchor" "$l_extradst_anchor_created" \
+		"$l_extradst_dataset" "$l_extradst_snap" "$l_extradst_created" \
+		>"$STATE_DIR/$l_extradst_creation_file" ||
 		fail "Unable to write creation-time fixture."
-	printf 'get -H -o name,value -p creation %s@*\tdst_creation.list\t0\n' \
-		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" >>"$STATE_DIR/manifest" ||
+	rm -rf "$STATE_DIR/.exact"
+	printf 'get -H -o name,value -p creation %s@*\t%s\t0\n' \
+		"$l_extradst_dataset" "$l_extradst_creation_file" >>"$STATE_DIR/manifest" ||
 		fail "Unable to append creation-time manifest rule."
+}
+
+# Purpose: Diverge child1's newest destination snapshot in STATE_DIR until its
+# convergence receive heals it, adding the creation-time and existence rules
+# that destroy and rollback read.
+# Usage: planning_make_child1_diverged_until_receive [diverged-snap
+# [anchor-snap]]; defaults to snap3 and snap2 (for noop STATE_DIR; pass snap2
+# snap1 for incremental STATE_DIR).
+planning_make_child1_diverged_until_receive() {
+	l_divchild_snap=${1:-snap3}
+	l_divchild_anchor=${2:-snap2}
+	l_divchild_num=${l_divchild_snap#snap}
+	l_divchild_anchor_num=${l_divchild_anchor#snap}
+	l_divchild_dataset="$ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child1"
+
+	awk -F'\t' -v name="$l_divchild_dataset@$l_divchild_snap" \
+		-v guid="999990010${l_divchild_num}000000007" 'BEGIN { OFS = "\t" }
+		$1 == name { $2 = guid }
+		{ print }
+	' "$STATE_DIR/dst_snapshots.list" >"$STATE_DIR/dst_snapshots_diverged.list" ||
+		fail "Unable to write the diverged child1 listing."
+	grep -v "^$l_divchild_dataset@$l_divchild_snap" "$STATE_DIR/dst_d1_1.list" \
+		>"$STATE_DIR/dst_d1_1_post_destroy.list" ||
+		fail "Unable to write the post-destroy child1 listing."
+	printf '%s@%s\t170000000%s\n%s@%s\t170000000%s\n' \
+		"$l_divchild_dataset" "$l_divchild_anchor" "$l_divchild_anchor_num" \
+		"$l_divchild_dataset" "$l_divchild_snap" "$l_divchild_num" \
+		>"$STATE_DIR/dst_child1_creation.list" ||
+		fail "Unable to write the child1 creation-time fixture."
+	printf '%s\t96K\t1.0G\t24K\t/%s\n' "$l_divchild_dataset" "$l_divchild_dataset" \
+		>"$STATE_DIR/dst_exists_child1.list" ||
+		fail "Unable to write the child1 existence fixture."
+	rm -rf "$STATE_DIR/.exact"
+	awk -F'\t' \
+		-v key="list -Hr -o name,guid -t snapshot $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
+		-v d1_key="list -H -d 1 -o name,guid -t snapshot $l_divchild_dataset" '
+		BEGIN { OFS = "\t" }
+		$1 == key { print key, "dst_snapshots_diverged.list", 0, "once" }
+		$1 == d1_key { print d1_key, "dst_d1_1_post_destroy.list", 0, "once" }
+		{ print }
+	' "$STATE_DIR/manifest" >"$STATE_DIR/manifest.new" ||
+		fail "Unable to stage the consumable diverged child1 listing rules."
+	mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
+		fail "Unable to install the consumable diverged child1 listing rules."
+	printf '%s\t%s\t0\n' \
+		"get -H -o name,value -p creation $l_divchild_dataset@*" dst_child1_creation.list \
+		"list -H $l_divchild_dataset" dst_exists_child1.list >>"$STATE_DIR/manifest" ||
+		fail "Unable to append the child1 creation-time and existence rules."
 }
 
 # Purpose: Diverge the destination root's newest snapshot in STATE_DIR (same
@@ -278,6 +457,7 @@ planning_make_destination_diverged() {
 		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" "$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" \
 		>"$STATE_DIR/dst_creation.list" ||
 		fail "Unable to write creation-time fixture."
+	rm -rf "$STATE_DIR/.exact"
 	printf 'get -H -o name,value -p creation %s@*\tdst_creation.list\t0\n' \
 		"$ZXFER_MOCKBIN_DEST_MAPPED_ROOT" >>"$STATE_DIR/manifest" ||
 		fail "Unable to append creation-time manifest rule."
@@ -340,6 +520,7 @@ planning_write_mock_parallel() {
 
 	cat >"$l_parallel_path" <<'EOF'
 #!/bin/sh
+[ -z "${MOCK_PARALLEL_ARGV_LOG:-}" ] || printf '%s\n' "$*" >>"$MOCK_PARALLEL_ARGV_LOG"
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--)
@@ -402,6 +583,7 @@ EOF
 # snapshot listing per source dataset.
 # Usage: planning_add_parallel_source_discovery_fixtures
 planning_add_parallel_source_discovery_fixtures() {
+	rm -rf "$STATE_DIR/.exact"
 	{
 		printf '%s\n' "$ZXFER_MOCKBIN_SOURCE_ROOT"
 		printf '%s/child1\n' "$ZXFER_MOCKBIN_SOURCE_ROOT"
@@ -455,52 +637,7 @@ planning_assert_no_parallel_job_leftovers() {
 }
 
 # ---------------------------------------------------------------------------
-# Remote transport fixtures.
-
-# Purpose: Write a mock ssh with control-master semantics: `-M` creates the
-# `-S` socket file, `-O exit` removes it, and any remaining command runs
-# locally through `sh -c` so helpers resolve from the inherited mock PATH.
-# Argv is logged to $MOCK_SSH_LOG.
-# Usage: planning_write_socket_mock_ssh <path>
-planning_write_socket_mock_ssh() {
-	l_ssh_path=$1
-
-	cat >"$l_ssh_path" <<'EOF'
-#!/bin/sh
-[ -n "${MOCK_SSH_LOG:-}" ] && printf '%s\n' "$*" >>"$MOCK_SSH_LOG"
-mock_socket=""
-mock_op=""
-while [ $# -gt 0 ]; do
-	case "$1" in
-	-M) shift ;;
-	-S)
-		mock_socket=$2
-		shift 2
-		;;
-	-O)
-		mock_op=$2
-		shift 2
-		;;
-	-o) shift 2 ;;
-	-*) shift ;;
-	*) break ;;
-	esac
-done
-if [ $# -gt 0 ]; then
-	shift
-fi
-if [ "$mock_op" = exit ]; then
-	rm -f "$mock_socket" 2>/dev/null
-	exit 0
-fi
-if [ -n "$mock_socket" ] && [ ! -e "$mock_socket" ]; then
-	: >"$mock_socket" 2>/dev/null || exit 255
-fi
-[ $# -gt 0 ] || exit 0
-exec sh -c "$*"
-EOF
-	chmod +x "$l_ssh_path"
-}
+# Remote transport assertions.
 
 # Purpose: Assert the ssh control-master lifecycle recorded in $SSH_LOG:
 # exactly MASTERS masters are opened, each on its own socket and before any
@@ -509,7 +646,7 @@ EOF
 # Usage: planning_assert_ssh_commands_multiplexed <masters>
 planning_assert_ssh_commands_multiplexed() {
 	l_mux_masters=$1
-	l_mux_report=$(awk '
+	l_mux_report=$(awk -F '\t' '
 		# Print the word after -S, or nothing.
 		function socket_of(line,    n, i, w) {
 			n = split(line, w, " ")
@@ -517,26 +654,32 @@ planning_assert_ssh_commands_multiplexed() {
 				if (w[i] == "-S") return w[i + 1]
 			return ""
 		}
-		$0 == "-M -V" { next }
-		index($0, " -M -S ") || index($0, "-M -S ") == 1 {
-			socket = socket_of($0)
+		$1 == "version" { next }
+		$1 == "master" {
+			socket = socket_of($2)
 			if (commands || exits) bad = bad " master-after-command:" NR
 			if (socket == "" || (socket in open)) bad = bad " master-socket:" NR
 			open[socket] = 1
 			masters++
 			next
 		}
-		{
-			socket = socket_of($0)
+		$1 == "control" && index($2, " -O exit ") {
+			socket = socket_of($2)
 			if (!(socket in open)) { bad = bad " direct:" NR; next }
-			if (index($0, " -O exit ")) {
-				if (socket in closed) bad = bad " second-exit:" NR
-				closed[socket] = 1
-				exits++
-				next
-			}
+			if (socket in closed) bad = bad " second-exit:" NR
+			closed[socket] = 1
+			exits++
+			next
+		}
+		$1 == "mux" {
+			socket = socket_of($2)
+			if (!(socket in open)) { bad = bad " direct:" NR; next }
 			if (exits) bad = bad " command-after-exit:" NR
 			commands++
+			next
+		}
+		$1 == "direct" || $1 == "control" || $1 == "fail" || $1 == "reject" {
+			bad = bad " " $1 ":" NR
 		}
 		END {
 			if (!commands) bad = bad " no-commands"
@@ -630,23 +773,16 @@ planning_add_property_fixtures_for_rows() {
 		cut -f1 "$STATE_DIR/$l_prop_list.list" >"$STATE_DIR/$l_prop_list.names"
 	done
 	printf 'filesystem\n' >"$STATE_DIR/type_filesystem.list"
+	rm -rf "$STATE_DIR/.exact"
+	zxfer_mockbin_append_property_tree_rules "$STATE_DIR/manifest" ||
+		fail "Unable to append shared property tree manifest rules."
 	printf '%s\t%s\t0\n' \
-		"get -r -t filesystem,volume -Ho name,property all $ZXFER_MOCKBIN_SOURCE_ROOT" src_props_tree.names \
-		"get -r -t filesystem,volume -Ho name,property all $ZXFER_MOCKBIN_DEST_ROOT" dst_props_tree.names \
 		"get -Ho property all $ZXFER_MOCKBIN_SOURCE_ROOT" src_props_root.names \
 		"get -Ho property all $ZXFER_MOCKBIN_SOURCE_ROOT/child*" src_props_child.names \
 		"get -Ho property all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" dst_props_root.names \
 		"get -Ho property all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child*" dst_props_child.names \
-		"get -r -t filesystem,volume -Hpo name,property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT" src_props_tree.list \
-		"get -r -t filesystem,volume -Ho name,property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT" src_props_tree.list \
-		"get -r -t filesystem,volume -Hpo name,property,value,source all $ZXFER_MOCKBIN_DEST_ROOT" dst_props_tree.list \
-		"get -r -t filesystem,volume -Ho name,property,value,source all $ZXFER_MOCKBIN_DEST_ROOT" dst_props_tree.list \
-		"get -Hpo property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT" src_props_root.list \
-		"get -Ho property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT" src_props_root.list \
 		"get -Hpo property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT/child*" src_props_child.list \
 		"get -Ho property,value,source all $ZXFER_MOCKBIN_SOURCE_ROOT/child*" src_props_child.list \
-		"get -Hpo property,value,source all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" dst_props_root.list \
-		"get -Ho property,value,source all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT" dst_props_root.list \
 		"get -Hpo property,value,source all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child*" dst_props_child.list \
 		"get -Ho property,value,source all $ZXFER_MOCKBIN_DEST_MAPPED_ROOT/child*" dst_props_child.list \
 		"get -Hpo value type $ZXFER_MOCKBIN_SOURCE_ROOT*" type_filesystem.list \
@@ -664,6 +800,8 @@ planning_add_property_fixtures_for_rows() {
 planning_add_unsupported_property_fixtures() {
 	l_unsupported_src_rows=$1
 	l_unsupported_dst_rows=$2
+
+	rm -rf "$STATE_DIR/.exact"
 
 	printf '%s\tfilesystem\n' "$ZXFER_MOCKBIN_SOURCE_ROOT" \
 		"$ZXFER_MOCKBIN_SOURCE_ROOT/child1" "$ZXFER_MOCKBIN_SOURCE_ROOT/child2" \
@@ -884,45 +1022,28 @@ planning_answer_manifest_key_with_nothing() {
 	planning_force_manifest_failure "$1" 0
 }
 
-# Purpose: Wrap the canned zfs so the first call whose space-joined argv is
-# exactly ARGV answers from the manifest as usual and then prints STDERR and
-# exits STATUS: a listing that dies after streaming its rows, or with STATUS
-# 0 one that succeeds with a warning. Later calls with that argv answer
-# normally. Calling the helper again re-arms the wrapper with new values.
+# Purpose: Configure the canned zfs so the first call whose space-joined argv
+# is exactly ARGV answers from the manifest as usual and then prints STDERR
+# and exits STATUS: a listing that dies after streaming its rows, or with
+# STATUS 0 one that succeeds with a warning. Later calls with that argv answer
+# normally. Calling the helper again re-arms the state with new values.
 # Usage: planning_fail_canned_zfs_after_output <argv> <status> [<stderr>]
 planning_fail_canned_zfs_after_output() {
 	l_after_dir="$CASE_DIR/after_output"
 	mkdir -p "$l_after_dir" ||
-		fail "Unable to create the after-output wrapper state."
+		fail "Unable to create the after-output state."
 	printf '%s\n' "$1" >"$l_after_dir/argv" ||
-		fail "Unable to arm the after-output wrapper."
+		fail "Unable to arm the after-output argv."
 	printf '%s\n' "$2" >"$l_after_dir/status" ||
-		fail "Unable to arm the after-output wrapper."
-	: >"$l_after_dir/stderr" || fail "Unable to arm the after-output wrapper."
+		fail "Unable to arm the after-output status."
+	: >"$l_after_dir/stderr" || fail "Unable to arm the after-output stderr."
 	if [ -n "${3:-}" ]; then
 		printf '%s\n' "$3" >"$l_after_dir/stderr" ||
 			fail "Unable to write the after-output stderr."
 	fi
 	rm -f "$l_after_dir/fired"
-	[ ! -f "$MOCKBIN_DIR/zfs.answering" ] || return 0
-	mv "$MOCKBIN_DIR/zfs" "$MOCKBIN_DIR/zfs.answering" ||
-		fail "Unable to stage the canned zfs behind the after-output wrapper."
-	cat >"$MOCKBIN_DIR/zfs" <<WRAPPER
-#!/bin/sh
-IFS= read -r after_argv <"$l_after_dir/argv"
-# The first matching call claims the marker; noclobber makes the claim
-# atomic when the no-op proof lists both sides at once.
-if [ "\$*" = "\$after_argv" ] &&
-	(set -C && printf '' >"$l_after_dir/fired") 2>/dev/null; then
-	"$MOCKBIN_DIR/zfs.answering" "\$@"
-	cat "$l_after_dir/stderr" >&2
-	IFS= read -r after_status <"$l_after_dir/status"
-	exit "\$after_status"
-fi
-exec "$MOCKBIN_DIR/zfs.answering" "\$@"
-WRAPPER
-	chmod +x "$MOCKBIN_DIR/zfs" ||
-		fail "Unable to make the after-output wrapper executable."
+	MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR=$l_after_dir
+	export MOCK_ZFS_FAIL_AFTER_OUTPUT_DIR
 }
 
 # Purpose: Write a zstd stand-in whose "compression" prefixes every line with
@@ -945,21 +1066,15 @@ EOF_ZSTD
 	chmod +x "$1"
 }
 
-# Purpose: Wrap the mock parallel so each call also appends its arguments,
+# Purpose: Configure the mock parallel so each call appends its arguments,
 # space-joined, to PARALLEL_ARGV_LOG, locally and on a mock-ssh origin alike.
 # Usage: planning_log_mock_parallel_argv, after planning_setup_parallel_jobs_env;
 # sets PARALLEL_ARGV_LOG.
 planning_log_mock_parallel_argv() {
 	PARALLEL_ARGV_LOG="$CASE_DIR/parallel.argv"
-	mv "$MOCKBIN_DIR/parallel" "$MOCKBIN_DIR/parallel.mock" ||
-		fail "Unable to stage the mock parallel behind its argv log."
-	cat >"$MOCKBIN_DIR/parallel" <<EOF_PARALLEL
-#!/bin/sh
-printf '%s\n' "\$*" >>"$PARALLEL_ARGV_LOG"
-exec "$MOCKBIN_DIR/parallel.mock" "\$@"
-EOF_PARALLEL
-	chmod +x "$MOCKBIN_DIR/parallel" ||
-		fail "Unable to make the parallel argv log executable."
+	: >"$PARALLEL_ARGV_LOG"
+	MOCK_PARALLEL_ARGV_LOG=$PARALLEL_ARGV_LOG
+	export MOCK_PARALLEL_ARGV_LOG
 }
 
 # Purpose: Make the -T destination root and its mapped datasets answer like
@@ -979,14 +1094,7 @@ planning_make_remote_destination_root_missing() {
 		printf "cannot open '%s': dataset does not exist\n" "$l_missing_dataset" \
 			>"$STATE_DIR/$l_missing_fixture" ||
 			fail "Unable to write the missing-dataset fixture."
-		# The first matching rule wins, so these go first.
-		{
-			printf 'list -H %s\t%s\t1\n' "$l_missing_dataset" "$l_missing_fixture"
-			cat "$STATE_DIR/manifest"
-		} >"$STATE_DIR/manifest.new" ||
-			fail "Unable to prepend the missing-dataset rule."
-		mv "$STATE_DIR/manifest.new" "$STATE_DIR/manifest" ||
-			fail "Unable to install the missing-dataset rule."
+		blackbox_prepend_manifest_rule "list -H $l_missing_dataset	$l_missing_fixture	1"
 	done
 	mkdir -p "$CASE_DIR/fail_calls" || fail "Unable to create the fault counter."
 	MOCK_FAIL_TOOL=zfs

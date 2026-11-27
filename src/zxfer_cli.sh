@@ -146,19 +146,11 @@ zxfer_read_command_line_switches() {
 		n) g_option_n_dryrun=1 ;;
 		N) g_option_N_nonrecursive=$OPTARG ;;
 		o) g_option_o_override_property=$OPTARG ;;
-		O)
-			g_option_O_origin_host=$OPTARG
-			# Rebuild rendered zfs commands after the origin host spec changes.
-			zxfer_refresh_remote_zfs_commands
-			;;
+		O) g_option_O_origin_host=$OPTARG ;;
 		P) g_option_P_transfer_property=1 ;;
 		R) g_option_R_recursive=$OPTARG ;;
 		s) g_option_s_make_snapshot=1 ;;
-		T)
-			g_option_T_target_host=$OPTARG
-			# Rebuild rendered zfs commands after the target host spec changes.
-			zxfer_refresh_remote_zfs_commands
-			;;
+		T) g_option_T_target_host=$OPTARG ;;
 		U) g_option_U_skip_unsupported_properties=1 ;;
 		v) g_option_v_verbose=1 ;;
 		V)
@@ -177,6 +169,7 @@ zxfer_read_command_line_switches() {
 		esac
 	done
 
+	zxfer_refresh_remote_zfs_commands
 	zxfer_refresh_compression_commands
 	# The eager run temp root decided TMPDIR safety before -V was parsed;
 	# replay a held unsafe-TMPDIR fallback advisory now that -V is known.

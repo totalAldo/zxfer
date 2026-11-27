@@ -7,9 +7,7 @@ remote_dry_run_noexec_progress_test() {
 	log "Starting remote dry-run no-exec progress test"
 
 	mock_path="$WORKDIR/mock_remote_dryrun"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	secure_path=$(setup_integration_mock_ssh_env "$mock_path")
 	ssh_log="$WORKDIR/mock_remote_dryrun.log"
 	progress_script="$WORKDIR/mock_remote_dryrun_progress.sh"
 	progress_log="$WORKDIR/mock_remote_dryrun_progress.log"
@@ -52,45 +50,6 @@ remote_dry_run_noexec_progress_test() {
 	fi
 
 	log "Remote dry-run no-exec progress test passed"
-}
-
-secure_path_dependency_tests() {
-	log "Starting secure PATH dependency tests"
-
-	mock_path="$WORKDIR/mock_secure_path"
-	safe_rm_rf "$mock_path"
-	mkdir -p "$mock_path"
-	cat >"$mock_path/ssh" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-	chmod +x "$mock_path/ssh"
-	for bin in awk cat sed date mktemp tr printf grep cut head sort; do
-		real_bin=$(resolve_host_command "$bin")
-		if [ "$real_bin" != "" ]; then
-			ln -s "$real_bin" "$mock_path/$bin"
-		else
-			fail "Required binary $bin not found on host; cannot run secure PATH test."
-		fi
-	done
-	# Deliberately omit zfs from the secure PATH to ensure zxfer aborts cleanly.
-	secure_path="$mock_path"
-
-	set +e
-	output=$(ZXFER_SECURE_PATH="$secure_path" ZXFER_SECURE_PATH_APPEND="" "$ZXFER_BIN" -R tank/src backup/target 2>&1)
-	status=$?
-	set -e
-
-	if [ "$status" -eq 0 ]; then
-		fail "zxfer should fail when secure PATH lacks required tools."
-	fi
-	if ! printf '%s\n' "$output" | grep -q 'Required dependency "zfs" not found'; then
-		fail "Expected missing zfs dependency error. Output: $output"
-	fi
-
-	safe_rm_rf "$mock_path"
-
-	log "Secure PATH dependency tests passed"
 }
 
 secure_path_failure_report_test() {
@@ -253,13 +212,11 @@ garbage_wrapped_host_spec_fails_closed_test() {
 	marker_rel="garbage_host_spec_marker"
 	marker="$WORKDIR/$marker_rel"
 	mock_path="$WORKDIR/mock_garbage_host_spec"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	secure_path=$(setup_integration_mock_ssh_env "$mock_path")
 	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
 		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
 	l_host_spec="garbage-host.example \$(touch $marker_rel)"
 	safe_rm_f "$marker"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
 
 	src_dataset="$SRC_POOL/garbage_host_spec_src"
 	dest_root="$DEST_POOL/garbage_host_spec_dest"
@@ -359,12 +316,10 @@ remote_origin_target_uncompressed_test() {
 	fi
 
 	mock_path="$WORKDIR/mock_remote_uncompressed"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	secure_path=$(setup_integration_mock_ssh_env "$mock_path")
 	ssh_log="$WORKDIR/mock_remote_uncompressed.log"
 	safe_rm_f "$ssh_log"
-	before_sockets=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'zxfer_ssh_control_socket.*' 2>/dev/null || true)
+	before_temp_snapshot=$(capture_zxfer_temp_snapshot)
 
 	src_dataset="$SRC_POOL/remote_uncompressed_src"
 	dest_root_origin="$DEST_POOL/remote_uncompressed_dest_origin"
@@ -391,17 +346,7 @@ remote_origin_target_uncompressed_test() {
 	assert_snapshot_exists "$dest_target" "rmt1"
 	assert_snapshot_exists "$dest_target" "rmt2"
 
-	socket_leaks=""
-	after_sockets=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'zxfer_ssh_control_socket.*' 2>/dev/null || true)
-	for dir in $after_sockets; do
-		case " $before_sockets " in
-		*" $dir "*) continue ;;
-		esac
-		socket_leaks="$socket_leaks $dir"
-	done
-	if [ -n "$socket_leaks" ]; then
-		fail "SSH control socket directories leaked: $socket_leaks"
-	fi
+	assert_no_zxfer_temp_leaks "$before_temp_snapshot" "Temporary artifacts or SSH control socket directories leaked"
 
 	log "Remote uncompressed origin/target test passed"
 }
@@ -460,117 +405,13 @@ remote_helper_path_shell_metacharacters_test() {
 
 remote_capability_control_whitespace_path_falls_back_to_direct_probe_test() {
 	log "Starting remote capability control-whitespace path fallback test"
-
-	marker_rel="remote_capability_control_whitespace_marker"
-	marker="$WORKDIR/$marker_rel"
-	mock_path="$WORKDIR/mock_remote_capability_control_whitespace"
-	capability_file="$WORKDIR/mock_remote_capability_control_whitespace.txt"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
-		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
-	l_host_spec="control-whitespace.example"
-	safe_rm_f "$marker" "$capability_file"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-
-	{
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
-		printf 'os\t%s\n' "MockRemoteOS"
-		printf "tool\tzfs\t0\t/tmp/mock_remote_helper.\$(touch %s)/zfs\r\n" "$marker_rel"
-		printf 'tool\tparallel\t1\t-\n'
-		printf 'tool\tcat\t1\t-\n'
-	} >"$capability_file"
-
-	src_dataset="$SRC_POOL/remote_capability_control_whitespace_src"
-	dest_root="$DEST_POOL/remote_capability_control_whitespace_dest"
-	dest_dataset="$dest_root/${src_dataset##*/}"
-
-	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	append_data_to_dataset "$src_dataset" "file.txt" "control-whitespace-path"
-	zfs snap -r "$src_dataset@rcw1"
-
-	set +e
-	output=$(
-		cd "$WORKDIR" &&
-			MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_file" \
-				ZXFER_SECURE_PATH="$secure_path" \
-				"$zxfer_bin_abs" -v -O "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
-	)
-	status=$?
-	set -e
-
-	if [ "$status" -ne 0 ]; then
-		fail "Remote capability responses with control-whitespace helper paths should degrade safely to the direct probe path when it is available. Output: $output"
-	fi
-	assert_snapshot_exists "$dest_dataset" "rcw1"
-	if [ -e "$marker" ]; then
-		fail "Control-whitespace helper paths from remote capabilities should not execute embedded shell fragments during fallback; marker file was created at $marker."
-	fi
-
-	safe_rm_rf "$mock_path"
-	safe_rm_f "$capability_file"
-
+	run_capability_fallback_case "remote_capability_control_whitespace" "-O" "control-whitespace.example" "control_whitespace" "pass" "rcw1"
 	log "Remote capability control-whitespace path fallback test passed"
 }
 
 target_capability_control_whitespace_path_falls_back_to_direct_probe_test() {
 	log "Starting target capability control-whitespace path fallback test"
-
-	marker_rel="target_capability_control_whitespace_marker"
-	marker="$WORKDIR/$marker_rel"
-	mock_path="$WORKDIR/mock_target_capability_control_whitespace"
-	capability_file="$WORKDIR/mock_target_capability_control_whitespace.txt"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
-		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
-	l_host_spec="target-control-whitespace.example"
-	safe_rm_f "$marker" "$capability_file"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-
-	{
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
-		printf 'os\t%s\n' "MockRemoteOS"
-		printf "tool\tzfs\t0\t/tmp/mock_remote_helper.\$(touch %s)/zfs\r\n" "$marker_rel"
-		printf 'tool\tparallel\t1\t-\n'
-		printf 'tool\tcat\t1\t-\n'
-	} >"$capability_file"
-
-	src_dataset="$SRC_POOL/target_capability_control_whitespace_src"
-	dest_root="$DEST_POOL/target_capability_control_whitespace_dest"
-	dest_dataset="$dest_root/${src_dataset##*/}"
-
-	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	append_data_to_dataset "$src_dataset" "file.txt" "target-control-whitespace-path"
-	zfs snap -r "$src_dataset@tcw1"
-
-	set +e
-	output=$(
-		cd "$WORKDIR" &&
-			MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_file" \
-				ZXFER_SECURE_PATH="$secure_path" \
-				"$zxfer_bin_abs" -v -T "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
-	)
-	status=$?
-	set -e
-
-	if [ "$status" -ne 0 ]; then
-		fail "Target capability responses with control-whitespace helper paths should degrade safely to the direct probe path when it is available. Output: $output"
-	fi
-	assert_snapshot_exists "$dest_dataset" "tcw1"
-	if [ -e "$marker" ]; then
-		fail "Target control-whitespace helper paths from remote capabilities should not execute embedded shell fragments during fallback; marker file was created at $marker."
-	fi
-
-	safe_rm_rf "$mock_path"
-	safe_rm_f "$capability_file"
-
+	run_capability_fallback_case "target_capability_control_whitespace" "-T" "target-control-whitespace.example" "control_whitespace" "pass" "tcw1"
 	log "Target capability control-whitespace path fallback test passed"
 }
 
@@ -583,10 +424,8 @@ remote_compression_pipeline_test() {
 	fi
 
 	mock_path="$WORKDIR/mock_remote_compress"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
+	secure_path=$(setup_integration_mock_ssh_env "$mock_path")
 	write_passthrough_zstd "$mock_path/zstd"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 
 	src_dataset="$SRC_POOL/remote_compress_src"
 	dest_root="$DEST_POOL/remote_compress_dest"
@@ -617,10 +456,8 @@ target_only_remote_compression_test() {
 
 	mock_path="$WORKDIR/mock_target_only_compress"
 	ssh_log="$WORKDIR/mock_target_only_compress.log"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
+	secure_path=$(setup_integration_mock_ssh_env "$mock_path")
 	write_passthrough_zstd "$mock_path/zstd"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 	safe_rm_f "$ssh_log"
 
 	src_dataset="$SRC_POOL/target_only_compress_src"
@@ -665,10 +502,8 @@ remote_csh_origin_snapshot_listing_test() {
 	fi
 
 	mock_path="$WORKDIR/mock_remote_csh_origin"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
+	secure_path=$(setup_integration_mock_ssh_env "$mock_path")
 	write_passthrough_zstd "$mock_path/zstd"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 
 	src_dataset="$SRC_POOL/remote_csh_src"
 	dest_root="$DEST_POOL/remote_csh_dest"
@@ -710,12 +545,10 @@ remote_wrapped_host_spec_test() {
 	fi
 
 	mock_path="$WORKDIR/mock_remote_wrapped"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
+	secure_path=$(setup_integration_mock_ssh_env "$mock_path")
 	write_passthrough_zstd "$mock_path/zstd"
 	write_exec_wrapper_script "$mock_path/pfexec"
 	write_exec_wrapper_script "$mock_path/doas"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 	wrapper_log="$WORKDIR/mock_remote_wrapped.log"
 	safe_rm_f "$wrapper_log"
 
@@ -752,182 +585,19 @@ remote_wrapped_host_spec_test() {
 
 malformed_remote_capability_response_fails_closed_test() {
 	log "Starting malformed remote capability response fail-closed test"
-
-	marker_rel="malformed_remote_capability_marker"
-	marker="$WORKDIR/$marker_rel"
-	mock_path="$WORKDIR/mock_malformed_remote_capability"
-	capability_file="$WORKDIR/mock_malformed_remote_capability.txt"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
-		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
-	l_host_spec="malformed-capability.example"
-	safe_rm_f "$marker" "$capability_file"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-
-	{
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
-		printf 'os\t%s\n' "MockRemoteOS"
-		printf 'tool\tzfs\t0\t%s\n' "/remote/bin/zfs"
-		printf 'tool\tparallel\t1\t-\n'
-		printf '%s\n' "\$(touch $marker_rel)"
-		printf 'tool\tcat\t1\t-\n'
-	} >"$capability_file"
-
-	src_dataset="$SRC_POOL/malformed_remote_capability_src"
-	dest_root="$DEST_POOL/malformed_remote_capability_dest"
-	dest_dataset="$dest_root/${src_dataset##*/}"
-
-	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	append_data_to_dataset "$src_dataset" "file.txt" "malformed-capability"
-	zfs snap -r "$src_dataset@mrc1"
-
-	set +e
-	output=$(
-		cd "$WORKDIR" &&
-			MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_file" \
-				MOCK_SSH_MISSING_TOOL="zfs" \
-				ZXFER_SECURE_PATH="$secure_path" \
-				"$zxfer_bin_abs" -v -O "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
-	)
-	status=$?
-	set -e
-
-	if [ "$status" -eq 0 ]; then
-		fail "Malformed remote capability responses should fail closed. Output: $output"
-	fi
-	if ! printf '%s\n' "$output" | grep -F "Required dependency \"zfs\" not found on host $l_host_spec" >/dev/null 2>&1; then
-		fail "Malformed remote capability responses should fall back to a secure remote dependency probe and fail closed. Output: $output"
-	fi
-	if [ -e "$marker" ]; then
-		fail "Malformed remote capability payloads should not execute embedded shell fragments; marker file was created at $marker."
-	fi
-	assert_dataset_absent "$dest_dataset"
-
-	safe_rm_rf "$mock_path"
-	safe_rm_f "$capability_file"
-
+	run_capability_fallback_case "malformed_remote_capability" "-O" "malformed-capability.example" "malformed" "fail_missing_zfs" "mrc1"
 	log "Malformed remote capability response fail-closed test passed"
 }
 
 malformed_remote_capability_response_falls_back_to_direct_probe_test() {
 	log "Starting malformed remote capability response fallback test"
-
-	marker_rel="malformed_remote_capability_fallback_marker"
-	marker="$WORKDIR/$marker_rel"
-	mock_path="$WORKDIR/mock_malformed_remote_capability_fallback"
-	capability_file="$WORKDIR/mock_malformed_remote_capability_fallback.txt"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
-		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
-	l_host_spec="malformed-fallback.example"
-	safe_rm_f "$marker" "$capability_file"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-
-	{
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
-		printf 'os\t%s\n' "MockRemoteOS"
-		printf 'tool\tzfs\t0\t%s\n' "/remote/bin/zfs"
-		printf 'tool\tparallel\t1\t-\n'
-		printf '%s\n' "\$(touch $marker_rel)"
-		printf 'tool\tcat\t1\t-\n'
-	} >"$capability_file"
-
-	src_dataset="$SRC_POOL/malformed_remote_capability_fallback_src"
-	dest_root="$DEST_POOL/malformed_remote_capability_fallback_dest"
-	dest_dataset="$dest_root/${src_dataset##*/}"
-
-	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	append_data_to_dataset "$src_dataset" "file.txt" "malformed-capability-fallback"
-	zfs snap -r "$src_dataset@mrf1"
-
-	set +e
-	output=$(
-		cd "$WORKDIR" &&
-			MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_file" \
-				ZXFER_SECURE_PATH="$secure_path" \
-				"$zxfer_bin_abs" -v -O "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
-	)
-	status=$?
-	set -e
-
-	if [ "$status" -ne 0 ]; then
-		fail "Malformed remote capability responses should fall back to direct probes and still allow replication. Output: $output"
-	fi
-	assert_snapshot_exists "$dest_dataset" "mrf1"
-	if [ -e "$marker" ]; then
-		fail "Malformed remote capability payloads should not execute embedded shell fragments during fallback; marker file was created at $marker."
-	fi
-
-	safe_rm_rf "$mock_path"
-	safe_rm_f "$capability_file"
-
+	run_capability_fallback_case "malformed_remote_capability_fallback" "-O" "malformed-fallback.example" "malformed" "pass" "mrf1"
 	log "Malformed remote capability response fallback test passed"
 }
 
 malformed_target_capability_response_falls_back_to_direct_probe_test() {
 	log "Starting malformed target capability response fallback test"
-
-	marker_rel="malformed_target_capability_fallback_marker"
-	marker="$WORKDIR/$marker_rel"
-	mock_path="$WORKDIR/mock_malformed_target_capability_fallback"
-	capability_file="$WORKDIR/mock_malformed_target_capability_fallback.txt"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	zxfer_bin_abs=$(compute_absolute_path "$ZXFER_BIN") ||
-		fail "Unable to resolve absolute path for ZXFER_BIN=$ZXFER_BIN"
-	l_host_spec="malformed-target-fallback.example"
-	safe_rm_f "$marker" "$capability_file"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-
-	{
-		printf '%s\n' "ZXFER_REMOTE_CAPS_V2"
-		printf 'os\t%s\n' "MockRemoteOS"
-		printf 'tool\tzfs\t0\t%s\n' "/remote/bin/zfs"
-		printf 'tool\tparallel\t1\t-\n'
-		printf '%s\n' "\$(touch $marker_rel)"
-		printf 'tool\tcat\t1\t-\n'
-	} >"$capability_file"
-
-	src_dataset="$SRC_POOL/malformed_target_capability_fallback_src"
-	dest_root="$DEST_POOL/malformed_target_capability_fallback_dest"
-	dest_dataset="$dest_root/${src_dataset##*/}"
-
-	destroy_test_datasets_if_present "$src_dataset" "$dest_root"
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	append_data_to_dataset "$src_dataset" "file.txt" "malformed-target-capability-fallback"
-	zfs snap -r "$src_dataset@mtf1"
-
-	set +e
-	output=$(
-		cd "$WORKDIR" &&
-			MOCK_SSH_CAPABILITY_RESPONSE_FILE="$capability_file" \
-				ZXFER_SECURE_PATH="$secure_path" \
-				"$zxfer_bin_abs" -v -T "$l_host_spec" -R "$src_dataset" "$dest_root" 2>&1
-	)
-	status=$?
-	set -e
-
-	if [ "$status" -ne 0 ]; then
-		fail "Malformed target capability responses should fall back to direct probes and still allow replication. Output: $output"
-	fi
-	assert_snapshot_exists "$dest_dataset" "mtf1"
-	if [ -e "$marker" ]; then
-		fail "Malformed target capability payloads should not execute embedded shell fragments during fallback; marker file was created at $marker."
-	fi
-
-	safe_rm_rf "$mock_path"
-	safe_rm_f "$capability_file"
-
+	run_capability_fallback_case "malformed_target_capability_fallback" "-T" "malformed-target-fallback.example" "malformed" "pass" "mtf1"
 	log "Malformed target capability response fallback test passed"
 }
 
@@ -978,192 +648,19 @@ missing_parallel_error_test() {
 
 remote_missing_parallel_origin_test() {
 	log "Starting remote missing parallel origin test"
-
-	if ! has_parallel; then
-		log "Skipping remote missing parallel origin test (local parallel not available)"
-		return
-	fi
-
-	mock_path="$WORKDIR/mock_remote_no_parallel"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-	real_parallel=$(resolve_host_command parallel)
-	if [ "$real_parallel" = "" ]; then
-		fail "parallel not found on host after availability probe."
-	fi
-	ln -s "$real_parallel" "$mock_path/parallel"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	tmpdir="$WORKDIR/remote_no_parallel_tmp"
-
-	src_dataset="$SRC_POOL/remote_no_parallel_src"
-	dest_root="$DEST_POOL/remote_no_parallel_dest"
-
-	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
-	safe_rm_rf "$tmpdir"
-	mkdir -p "$tmpdir"
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	i=1
-	while [ "$i" -le 16 ]; do
-		zfs create "$src_dataset/child$i"
-		i=$((i + 1))
-	done
-	zfs snap -r "$src_dataset@np1"
-
-	set +e
-	# Isolate the cross-process remote capability cache so earlier localhost tests
-	# do not mask this deliberate missing-parallel failure path.
-	output=$(TMPDIR="$tmpdir" MOCK_SSH_MISSING_TOOL=parallel ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -R "$src_dataset" "$dest_root" 2>&1)
-	status=$?
-	set -e
-
-	if [ "$status" -eq 0 ]; then
-		fail "Remote origin without parallel should fail closed when -j is requested. Output: $output"
-	fi
-	assert_dataset_absent "$dest_root/${src_dataset##*/}"
-	if ! printf '%s\n' "$output" | grep -q "parallel not found on origin host localhost but -j 2 was requested"; then
-		fail "Expected remote parallel missing-helper error. Output: $output"
-	fi
-
-	safe_rm_rf "$mock_path" "$tmpdir"
-
+	run_remote_parallel_failure_case "missing"
 	log "Remote missing parallel origin test passed"
 }
 
 remote_incompatible_parallel_origin_test() {
 	log "Starting remote incompatible parallel origin test"
-
-	mock_path="$WORKDIR/mock_remote_incompatible_parallel"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-	cat >"$mock_path/parallel" <<'EOF'
-#!/bin/sh
-if [ "$1" = "--will-cite" ]; then
-	shift
-fi
-if [ "$1" = "--version" ]; then
-	printf '%s\n' "parallel from elsewhere"
-	exit 0
-fi
-	printf '%s\n' "incompatible parallel mock cannot execute zxfer workloads" >&2
-exit 64
-EOF
-	chmod +x "$mock_path/parallel"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	tmpdir="$WORKDIR/remote_incompatible_parallel_tmp"
-
-	src_dataset="$SRC_POOL/remote_incompatible_parallel_src"
-	dest_root="$DEST_POOL/remote_incompatible_parallel_dest"
-
-	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
-	safe_rm_rf "$tmpdir"
-	mkdir -p "$tmpdir"
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	i=1
-	while [ "$i" -le 16 ]; do
-		zfs create "$src_dataset/child$i"
-		i=$((i + 1))
-	done
-	zfs snap -r "$src_dataset@ng1"
-
-	set +e
-	output=$(TMPDIR="$tmpdir" ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -R "$src_dataset" "$dest_root" 2>&1)
-	status=$?
-	set -e
-
-	if [ "$status" -eq 0 ]; then
-		fail "Remote origin with an incompatible parallel implementation should fail during source snapshot discovery. Output: $output"
-	fi
-	assert_dataset_absent "$dest_root/${src_dataset##*/}"
-	if ! printf '%s\n' "$output" | grep -q "incompatible parallel mock cannot execute zxfer workloads"; then
-		fail "Remote incompatible parallel diagnostics should be preserved from the rendered source snapshot pipeline. Output: $output"
-	fi
-	if ! printf '%s\n' "$output" | grep -q "Failed to retrieve snapshots from the source:"; then
-		fail "Remote incompatible parallel implementations should fail through the rendered source snapshot pipeline. Output: $output"
-	fi
-	if printf '%s\n' "$output" | grep -q "requires GNU parallel"; then
-		fail "Remote incompatible parallel implementations should not be rejected by an upfront GNU validation check. Output: $output"
-	fi
-	if printf '%s\n' "$output" | grep -q "is not GNU parallel"; then
-		fail "Remote incompatible parallel implementations should not be misreported as upfront GNU validation failures. Output: $output"
-	fi
-	if printf '%s\n' "$output" | grep -q "Falling back to serial source snapshot listing."; then
-		fail "Remote incompatible parallel implementations should not fall back to serial once the helper resolves. Output: $output"
-	fi
-
-	safe_rm_rf "$mock_path" "$tmpdir"
-
+	run_remote_parallel_failure_case "incompatible"
 	log "Remote incompatible parallel origin test passed"
 }
 
 remote_parallel_rendered_failure_origin_test() {
 	log "Starting remote rendered parallel failure origin test"
-
-	mock_path="$WORKDIR/mock_remote_rendered_failure_parallel"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-	cat >"$mock_path/parallel" <<'EOF'
-#!/bin/sh
-if [ "$1" = "--will-cite" ]; then
-	shift
-fi
-if [ "$1" = "--version" ]; then
-	printf '%s\n' "GNU parallel 20260122"
-	exit 0
-fi
-printf '%s\n' "remote parallel command failed during source listing" >&2
-exit 124
-EOF
-	chmod +x "$mock_path/parallel"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	tmpdir="$WORKDIR/remote_rendered_failure_parallel_tmp"
-
-	src_dataset="$SRC_POOL/remote_rendered_failure_parallel_src"
-	dest_root="$DEST_POOL/remote_rendered_failure_parallel_dest"
-
-	destroy_test_datasets_if_present "$dest_root" "$src_dataset"
-	safe_rm_rf "$tmpdir"
-	mkdir -p "$tmpdir"
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	i=1
-	while [ "$i" -le 16 ]; do
-		zfs create "$src_dataset/child$i"
-		i=$((i + 1))
-	done
-	zfs snap -r "$src_dataset@pf1"
-
-	set +e
-	output=$(TMPDIR="$tmpdir" ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -j 2 -O localhost -R "$src_dataset" "$dest_root" 2>&1)
-	status=$?
-	set -e
-
-	if [ "$status" -eq 0 ]; then
-		fail "Remote origin should fail closed when the rendered parallel listing command fails. Output: $output"
-	fi
-	assert_dataset_absent "$dest_root/${src_dataset##*/}"
-	if ! printf '%s\n' "$output" | grep -q "remote parallel command failed during source listing"; then
-		fail "Expected the rendered remote parallel failure diagnostic to be preserved. Output: $output"
-	fi
-	if printf '%s\n' "$output" | grep -q "requires GNU parallel"; then
-		fail "Rendered remote parallel failures should no longer be rejected by upfront GNU validation. Output: $output"
-	fi
-	if printf '%s\n' "$output" | grep -q "is not GNU parallel"; then
-		fail "Rendered remote parallel failures should no longer be misreported as upfront GNU validation failures. Output: $output"
-	fi
-	if ! printf '%s\n' "$output" | grep -q "Failed to retrieve snapshots from the source:"; then
-		fail "Rendered remote parallel failures should surface through the source snapshot pipeline. Output: $output"
-	fi
-	if printf '%s\n' "$output" | grep -q "Falling back to serial source snapshot listing."; then
-		fail "Rendered remote parallel failures should not fall back to serial discovery. Output: $output"
-	fi
-
-	safe_rm_rf "$mock_path" "$tmpdir"
-
+	run_remote_parallel_failure_case "rendered_failure"
 	log "Remote rendered parallel failure origin test passed"
 }
 
@@ -1171,9 +668,7 @@ managed_ssh_policy_test() {
 	log "Starting managed ssh policy test"
 
 	mock_path="$WORKDIR/mock_managed_ssh"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+	secure_path=$(setup_integration_mock_ssh_env "$mock_path")
 	ssh_log="$WORKDIR/mock_managed_ssh.log"
 	ssh_argv_log="$WORKDIR/mock_managed_ssh.argv.log"
 	known_hosts="$WORKDIR/mock_managed_ssh_known_hosts"

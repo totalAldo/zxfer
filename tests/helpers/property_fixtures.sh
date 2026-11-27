@@ -150,7 +150,7 @@ zxfer_property_test_create() {
 	zxfer_create_destination_dataset "$g_zxfer_property_plan_file" "$1" "$4" "$5" "$6" "$7"
 }
 
-# Purpose: Exercise direct command construction guards and dry-run rendering.
+# Purpose: Exercise direct command construction guards for dataset creation.
 # Usage: zxfer_property_test_run_create yes|no TYPE SIZE LIST DEST.
 zxfer_property_test_run_create() {
 	zxfer_property_test_write_actions create "$4" || return

@@ -73,10 +73,11 @@ At scale: 200 children x 100 snapshots, incremental, 4.96 s against 15.06 s
 (0.33, `--snapshots 100`); `props` at 100 children under `--shell /bin/dash`,
 3.57 s against 7.27 s (0.49); `-e` at 400 children now costs about the same
 as `-P` (it added 23-25 s under `/bin/sh`); a failing run with
-`ZXFER_ERROR_LOG` set takes 130 ms instead of 386 ms under bash 3.2. The
-`props` fixture's canned zfs scans a manifest of about five lines per dataset
-on every call, which both trees pay: without it the `-P` work at 200 children
-is about 2.2 s in either shell. Which change produced which gain is recorded
+`ZXFER_ERROR_LOG` set takes 130 ms instead of 386 ms under bash 3.2. Static
+canned-zfs fixtures (`tests/mock_toolchain_helper.sh`) pre-index exact manifest
+rules under `.exact/` so large benchmark trees avoid per-call linear manifest
+scans while cloned per-test state directories continue to honor dynamic `once`
+and glob rules. Which change produced which gain is recorded
 per item in `CHANGELOG.txt`.
 
 ## Remaining Candidates
@@ -115,11 +116,6 @@ quoting, structured error reporting, secure `PATH` or cleanup. Measure first.
 - Serial versus GNU `parallel` source discovery for the changed-source
   fallback: fanout can lose on small remote trees. The clean no-op proof
   stays one serial recursive stream even with `-j`.
-- Harness: the canned zfs (`tests/mock_toolchain_helper.sh`) scans its
-  manifest line by line on every call, and the `props` fixture adds about
-  five rules per dataset, a cost both trees pay, so A/B ratios understate
-  `-P` gains in zxfer itself. An indexed manifest would let
-  `tests/run_perf_ab.sh` show them.
 
 ## Measurement
 

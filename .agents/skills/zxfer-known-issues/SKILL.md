@@ -19,7 +19,7 @@ description: Assess zxfer risks, bugs, and compatibility gaps against KNOWN_ISSU
 ## Context to Load
 
 - Read `AGENTS.md`, `KNOWN_ISSUES.md`, and the current diff or bug report before editing.
-- Inspect relevant source modules, their `tests/test_zxfer_NAME.sh` entries (with the `tests/suites/` fragments they run), the `tests/test_contract_*.sh` suites, and user-facing docs when the candidate affects public behavior, validation flow, platform behavior, security, or replication semantics.
+- Inspect relevant source modules, their `tests/test_zxfer_NAME.sh` unit suites, the `tests/test_contract_*.sh` suites, and user-facing docs when the candidate affects public behavior, validation flow, platform behavior, security, or replication semantics.
 - For review-derived candidates, use the repo evidence behind the finding rather than copying review text unverified.
 - When the candidate touches portability, release docs, or validation scope, use the matching zxfer skill alongside this one.
 

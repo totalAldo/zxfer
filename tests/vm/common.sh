@@ -70,62 +70,25 @@ zxfer_vm_reset_shared_state() {
 zxfer_vm_detect_host_platform() {
 	l_kernel=${ZXFER_VM_UNAME_S:-$(uname -s)}
 	l_machine=${ZXFER_VM_UNAME_M:-$(uname -m)}
-	l_osrelease_file=${ZXFER_VM_PROC_OSRELEASE_FILE:-/proc/sys/kernel/osrelease}
-	l_version_file=${ZXFER_VM_PROC_VERSION_FILE:-/proc/version}
-
-	case "$l_kernel" in
-	Linux)
-		if [ -r "$l_osrelease_file" ] &&
-			grep -Eqi '(microsoft|wsl)' "$l_osrelease_file" 2>/dev/null; then
-			ZXFER_VM_HOST_OS=wsl2
-		elif [ -r "$l_version_file" ] &&
-			grep -Eqi '(microsoft|wsl)' "$l_version_file" 2>/dev/null; then
-			ZXFER_VM_HOST_OS=wsl2
-		else
-			ZXFER_VM_HOST_OS=linux
-		fi
+	l_detect_status=0
+	zxfer_runner_detect_host_os_arch 1 "$l_kernel" "$l_machine" || l_detect_status=$?
+	case "$l_detect_status" in
+	0)
+		ZXFER_VM_HOST_OS=$ZXFER_RUNNER_HOST_OS
+		ZXFER_VM_HOST_ARCH=$ZXFER_RUNNER_HOST_ARCH
 		;;
-	Darwin)
-		ZXFER_VM_HOST_OS=darwin
-		;;
-	*)
-		zxfer_vm_die "Unsupported VM-matrix host OS: $l_kernel"
-		;;
-	esac
-
-	case "$l_machine" in
-	x86_64 | amd64)
-		ZXFER_VM_HOST_ARCH=amd64
-		;;
-	arm64 | aarch64)
-		ZXFER_VM_HOST_ARCH=arm64
-		;;
-	*)
-		zxfer_vm_die "Unsupported VM-matrix host architecture: $l_machine"
-		;;
+	1) zxfer_vm_die "Unsupported VM-matrix host OS: $l_kernel" ;;
+	*) zxfer_vm_die "Unsupported VM-matrix host architecture: $l_machine" ;;
 	esac
 }
 
 zxfer_vm_set_default_paths() {
-	if [ -n "${ZXFER_VM_CACHE_DIR:-}" ]; then
-		:
-	elif [ -n "${XDG_CACHE_HOME:-}" ]; then
-		ZXFER_VM_CACHE_DIR=$XDG_CACHE_HOME/zxfer/vm-images
-	elif [ -n "${HOME:-}" ]; then
-		ZXFER_VM_CACHE_DIR=$HOME/.cache/zxfer/vm-images
-	else
-		ZXFER_VM_CACHE_DIR=${TMPDIR:-/tmp}/zxfer-vm-images
-	fi
-
-	if [ -n "${ZXFER_VM_ARTIFACT_ROOT:-}" ]; then
-		:
-	elif [ -n "${XDG_STATE_HOME:-}" ]; then
-		ZXFER_VM_ARTIFACT_ROOT=$XDG_STATE_HOME/zxfer/vm-matrix
-	elif [ -n "${HOME:-}" ]; then
-		ZXFER_VM_ARTIFACT_ROOT=$HOME/.local/state/zxfer/vm-matrix
-	else
-		ZXFER_VM_ARTIFACT_ROOT=${TMPDIR:-/tmp}/zxfer-vm-matrix
-	fi
+	ZXFER_VM_CACHE_DIR=$(zxfer_runner_resolve_cache_dir \
+		"${ZXFER_VM_CACHE_DIR:-}" "${XDG_CACHE_HOME:-}" \
+		"zxfer/vm-images" ".cache/zxfer/vm-images" "zxfer-vm-images")
+	ZXFER_VM_ARTIFACT_ROOT=$(zxfer_runner_resolve_cache_dir \
+		"${ZXFER_VM_ARTIFACT_ROOT:-}" "${XDG_STATE_HOME:-}" \
+		"zxfer/vm-matrix" ".local/state/zxfer/vm-matrix" "zxfer-vm-matrix")
 }
 
 zxfer_vm_mkdir_p() {
@@ -159,31 +122,11 @@ zxfer_vm_remove_word() {
 }
 
 zxfer_vm_positive_integer_p() {
-	case "$1" in
-	'' | *[!0-9]* | 0)
-		return 1
-		;;
-	*)
-		return 0
-		;;
-	esac
+	zxfer_runner_positive_integer_p "$1"
 }
 
 zxfer_vm_signal_exit_status() {
-	case "$1" in
-	HUP)
-		printf '%s\n' "129"
-		;;
-	INT)
-		printf '%s\n' "130"
-		;;
-	TERM)
-		printf '%s\n' "143"
-		;;
-	*)
-		printf '%s\n' "1"
-		;;
-	esac
+	zxfer_runner_signal_exit_status "$1" 1
 }
 
 zxfer_vm_stderr_is_tty() {
@@ -204,26 +147,11 @@ zxfer_vm_should_show_progress_bar() {
 }
 
 zxfer_vm_list_contains() {
-	l_list=$1
-	l_word=$2
-
-	case " $l_list " in
-	*" $l_word "*) return 0 ;;
-	*) return 1 ;;
-	esac
+	zxfer_runner_list_contains "$1" "$2"
 }
 
 zxfer_vm_count_words() {
-	l_list=$1
-
-	if [ -z "$l_list" ]; then
-		printf '0\n'
-		return 0
-	fi
-
-	# shellcheck disable=SC2086  # Intentional word splitting of space-delimited guest lists.
-	set -- $l_list
-	printf '%s\n' "$#"
+	zxfer_runner_count_words "$1"
 }
 
 zxfer_vm_shell_quote() {
@@ -248,18 +176,13 @@ zxfer_vm_shell_quote() {
 }
 
 zxfer_vm_sha256_file() {
-	l_file=$1
-
-	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum "$l_file" | awk '{print $1}'
-		return 0
-	fi
-	if command -v shasum >/dev/null 2>&1; then
-		shasum -a 256 "$l_file" | awk '{print $1}'
-		return 0
-	fi
-
-	zxfer_vm_die "A SHA-256 tool is required (sha256sum or shasum)."
+	l_vm_sha_status=0
+	zxfer_runner_sha256_file "$1" || l_vm_sha_status=$?
+	case "$l_vm_sha_status" in
+	0) return 0 ;;
+	127) zxfer_vm_die "A SHA-256 tool is required (sha256sum or shasum)." ;;
+	*) zxfer_vm_die "Failed to compute SHA-256 checksum for $1" ;;
+	esac
 }
 
 zxfer_vm_file_size_bytes() {
@@ -379,14 +302,16 @@ zxfer_vm_refresh_cached_download() {
 zxfer_vm_download_and_verify_file() {
 	l_url=$1
 	l_dest=$2
-	l_expected_sha256=$3
+	l_expected_sha256=${3:-}
 	l_actual_sha256=
 
 	ZXFER_VM_LAST_DOWNLOAD_ACTION=
 	ZXFER_VM_LAST_DOWNLOAD_SIZE_BYTES=
+	[ -n "$l_expected_sha256" ] ||
+		zxfer_vm_die "Missing expected SHA-256 checksum for $(basename "$l_dest")"
 
 	if [ -f "$l_dest" ]; then
-		l_actual_sha256=$(zxfer_vm_sha256_file "$l_dest")
+		l_actual_sha256=$(zxfer_vm_sha256_file "$l_dest") || return 1
 		if [ "$l_actual_sha256" = "$l_expected_sha256" ]; then
 			ZXFER_VM_LAST_DOWNLOAD_ACTION=cached
 			ZXFER_VM_LAST_DOWNLOAD_SIZE_BYTES=$(zxfer_vm_file_size_bytes "$l_dest")
@@ -395,8 +320,8 @@ zxfer_vm_download_and_verify_file() {
 		rm -f "$l_dest"
 	fi
 
-	zxfer_vm_download_file "$l_url" "$l_dest"
-	l_actual_sha256=$(zxfer_vm_sha256_file "$l_dest")
+	zxfer_vm_download_file "$l_url" "$l_dest" || return 1
+	l_actual_sha256=$(zxfer_vm_sha256_file "$l_dest") || return 1
 	[ "$l_actual_sha256" = "$l_expected_sha256" ] ||
 		zxfer_vm_die "Checksum mismatch for $(basename "$l_dest"): expected $l_expected_sha256, got $l_actual_sha256"
 	# shellcheck disable=SC2034  # Cached for later logging and shunit assertions.

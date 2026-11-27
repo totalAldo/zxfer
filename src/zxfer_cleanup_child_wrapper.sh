@@ -47,7 +47,7 @@ zxfer_cleanup_child_wrapper_get_process_start_token() {
 	l_cleanup_wrapper_token_pid=$1
 	l_cleanup_wrapper_token_selector=${2:-lstart}
 	case "$l_cleanup_wrapper_token_pid" in
-	'' | *[!0-9]*) return 1 ;;
+	'' | *[!0123456789]*) return 1 ;;
 	esac
 	case "$l_cleanup_wrapper_token_selector" in
 	lstart | stime) ;;
@@ -120,20 +120,18 @@ zxfer_cleanup_child_wrapper_list_descendants() {
 	# -A is required: without it ps only lists same-terminal processes, so a
 	# wrapper running without a controlling terminal (cron, CI, supervised
 	# background jobs) would miss its own descendants and leak them on TERM.
-	l_cleanup_wrapper_snapshot_selector=lstart
-	if l_cleanup_wrapper_snapshot=$(LC_ALL=C ps -A -o pid= -o ppid= -o lstart= 2>/dev/null); then
-		:
-	elif l_cleanup_wrapper_snapshot=$(LC_ALL=C ps -A -o pid -o ppid -o lstart 2>/dev/null); then
-		:
-	else
-		l_cleanup_wrapper_snapshot_selector=stime
-		if l_cleanup_wrapper_snapshot=$(LC_ALL=C ps -A -o pid= -o ppid= -o stime= 2>/dev/null); then
-			:
-		else
-			l_cleanup_wrapper_snapshot=$(LC_ALL=C ps -A -o pid -o ppid -o stime 2>/dev/null) ||
-				l_cleanup_wrapper_snapshot_status=$?
+	for l_cleanup_wrapper_ps_spec in "lstart:=" "lstart:" "stime:=" "stime:"; do
+		l_cleanup_wrapper_snapshot_selector=${l_cleanup_wrapper_ps_spec%%:*}
+		l_cleanup_wrapper_ps_eq=${l_cleanup_wrapper_ps_spec#*:}
+		if l_cleanup_wrapper_snapshot=$(LC_ALL=C ps -A \
+			-o "pid$l_cleanup_wrapper_ps_eq" \
+			-o "ppid$l_cleanup_wrapper_ps_eq" \
+			-o "$l_cleanup_wrapper_snapshot_selector$l_cleanup_wrapper_ps_eq" 2>/dev/null); then
+			l_cleanup_wrapper_snapshot_status=0
+			break
 		fi
-	fi
+		l_cleanup_wrapper_snapshot_status=$?
+	done
 	[ "$l_cleanup_wrapper_snapshot_status" -eq 0 ] || return "$l_cleanup_wrapper_snapshot_status"
 
 	l_cleanup_wrapper_descendants_status=0
@@ -198,6 +196,25 @@ zxfer_cleanup_child_wrapper_pid_is_running() {
 	return 0
 }
 
+# Purpose: Check one recorded PID against its start token.
+# Usage: zxfer_cleanup_child_wrapper_verify_record PID TOKEN; returns 0 when
+# PID still matches TOKEN, 1 when PID has already exited, or 2 when PID still
+# runs with a mismatched or unreadable start token.
+zxfer_cleanup_child_wrapper_verify_record() {
+	l_cleanup_wrapper_current_token=$(
+		zxfer_cleanup_child_wrapper_get_process_start_token \
+			"$1" "${2%%:*}" 2>/dev/null
+	) || l_cleanup_wrapper_current_token=""
+	if [ -n "$l_cleanup_wrapper_current_token" ] &&
+		[ "$l_cleanup_wrapper_current_token" = "$2" ]; then
+		return 0
+	fi
+	if zxfer_cleanup_child_wrapper_pid_is_running "$1"; then
+		return 2
+	fi
+	return 1
+}
+
 # Purpose: Print "$$" plus every recorded pid whose start token still matches,
 # the roots that let the post-TERM refresh find children of helpers still
 # alive in the grace window.
@@ -211,18 +228,14 @@ zxfer_cleanup_child_wrapper_build_validated_descendant_roots() {
 
 	while IFS='	' read -r l_cleanup_wrapper_root_pid l_cleanup_wrapper_root_token || [ -n "${l_cleanup_wrapper_root_pid}${l_cleanup_wrapper_root_token}" ]; do
 		[ -n "$l_cleanup_wrapper_root_pid" ] || continue
-		l_cleanup_wrapper_root_selector=${l_cleanup_wrapper_root_token%%:*}
-		l_cleanup_wrapper_current_token=$(
-			zxfer_cleanup_child_wrapper_get_process_start_token \
-				"$l_cleanup_wrapper_root_pid" \
-				"$l_cleanup_wrapper_root_selector" 2>/dev/null
-		) || l_cleanup_wrapper_current_token=""
-		if [ -n "$l_cleanup_wrapper_current_token" ] &&
-			[ "$l_cleanup_wrapper_current_token" = "$l_cleanup_wrapper_root_token" ]; then
-			l_cleanup_wrapper_validated_roots="$l_cleanup_wrapper_validated_roots $l_cleanup_wrapper_root_pid"
-		elif zxfer_cleanup_child_wrapper_pid_is_running "$l_cleanup_wrapper_root_pid"; then
-			l_cleanup_wrapper_validated_status=1
-		fi
+		l_cleanup_wrapper_verify_status=0
+		zxfer_cleanup_child_wrapper_verify_record \
+			"$l_cleanup_wrapper_root_pid" "$l_cleanup_wrapper_root_token" ||
+			l_cleanup_wrapper_verify_status=$?
+		case $l_cleanup_wrapper_verify_status in
+		0) l_cleanup_wrapper_validated_roots="$l_cleanup_wrapper_validated_roots $l_cleanup_wrapper_root_pid" ;;
+		2) l_cleanup_wrapper_validated_status=1 ;;
+		esac
 	done <<-EOF
 		$l_cleanup_wrapper_root_records
 	EOF
@@ -243,18 +256,18 @@ zxfer_cleanup_child_wrapper_signal_descendant_records() {
 
 	while IFS='	' read -r l_cleanup_wrapper_pid l_cleanup_wrapper_start_token || [ -n "${l_cleanup_wrapper_pid}${l_cleanup_wrapper_start_token}" ]; do
 		[ -n "$l_cleanup_wrapper_pid" ] || continue
-		l_cleanup_wrapper_expected_selector=${l_cleanup_wrapper_start_token%%:*}
-		l_cleanup_wrapper_current_token=$(
-			zxfer_cleanup_child_wrapper_get_process_start_token \
-				"$l_cleanup_wrapper_pid" \
-				"$l_cleanup_wrapper_expected_selector" 2>/dev/null
-		) || l_cleanup_wrapper_current_token=""
-		if [ -z "$l_cleanup_wrapper_current_token" ] ||
-			[ "$l_cleanup_wrapper_current_token" != "$l_cleanup_wrapper_start_token" ]; then
-			zxfer_cleanup_child_wrapper_pid_is_running "$l_cleanup_wrapper_pid" &&
-				l_cleanup_wrapper_descendants_status=1
+		l_cleanup_wrapper_verify_status=0
+		zxfer_cleanup_child_wrapper_verify_record \
+			"$l_cleanup_wrapper_pid" "$l_cleanup_wrapper_start_token" ||
+			l_cleanup_wrapper_verify_status=$?
+		case $l_cleanup_wrapper_verify_status in
+		0) ;;
+		2)
+			l_cleanup_wrapper_descendants_status=1
 			continue
-		fi
+			;;
+		*) continue ;;
+		esac
 		if ! kill -s "$l_cleanup_wrapper_descendants_signal" \
 			"$l_cleanup_wrapper_pid" 2>/dev/null; then
 			kill -s 0 "$l_cleanup_wrapper_pid" 2>/dev/null &&
@@ -310,22 +323,6 @@ $l_cleanup_wrapper_extend_new_records"
 	return "$l_cleanup_wrapper_extend_status"
 }
 
-# Purpose: KILL and reap the wrapper's direct child.
-# Usage: zxfer_cleanup_child_wrapper_kill_and_wait_direct_child; when KILL
-# fails on a live child it returns 1 without waiting, so trap cleanup stays
-# bounded.
-zxfer_cleanup_child_wrapper_kill_and_wait_direct_child() {
-	l_cleanup_wrapper_kill_pid=${l_cleanup_wrapper_child_pid:-}
-	[ -n "$l_cleanup_wrapper_kill_pid" ] || return 0
-	if kill -s 0 "$l_cleanup_wrapper_kill_pid" 2>/dev/null; then
-		if ! kill -s KILL "$l_cleanup_wrapper_kill_pid" 2>/dev/null; then
-			kill -s 0 "$l_cleanup_wrapper_kill_pid" 2>/dev/null && return 1
-		fi
-	fi
-	wait "$l_cleanup_wrapper_kill_pid" 2>/dev/null || :
-	return 0
-}
-
 # Purpose: Bounded signal teardown for hosts without an isolated process
 # group: TERM the descendants, wait one grace second, then STOP, refresh twice
 # and KILL them; the direct child is always stopped, KILLed and reaped.
@@ -359,19 +356,16 @@ zxfer_cleanup_child_wrapper_on_signal() {
 	fi
 
 	l_cleanup_wrapper_kill_records=$l_cleanup_wrapper_signal_records
-	l_cleanup_wrapper_refresh_status=0
-	zxfer_cleanup_child_wrapper_extend_stopped_descendant_records \
-		"$l_cleanup_wrapper_kill_records" || l_cleanup_wrapper_refresh_status=$?
-	l_cleanup_wrapper_kill_records=$g_zxfer_cleanup_wrapper_extended_records
-	[ "$l_cleanup_wrapper_teardown_status" -ne 0 ] ||
-		l_cleanup_wrapper_teardown_status=$l_cleanup_wrapper_refresh_status
-
-	l_cleanup_wrapper_refresh_status=0
-	zxfer_cleanup_child_wrapper_extend_stopped_descendant_records \
-		"$l_cleanup_wrapper_kill_records" || l_cleanup_wrapper_refresh_status=$?
-	l_cleanup_wrapper_kill_records=$g_zxfer_cleanup_wrapper_extended_records
-	[ "$l_cleanup_wrapper_teardown_status" -ne 0 ] ||
-		l_cleanup_wrapper_teardown_status=$l_cleanup_wrapper_refresh_status
+	l_cleanup_wrapper_refresh_pass=1
+	while [ "$l_cleanup_wrapper_refresh_pass" -le 2 ]; do
+		l_cleanup_wrapper_refresh_status=0
+		zxfer_cleanup_child_wrapper_extend_stopped_descendant_records \
+			"$l_cleanup_wrapper_kill_records" || l_cleanup_wrapper_refresh_status=$?
+		l_cleanup_wrapper_kill_records=$g_zxfer_cleanup_wrapper_extended_records
+		[ "$l_cleanup_wrapper_teardown_status" -ne 0 ] ||
+			l_cleanup_wrapper_teardown_status=$l_cleanup_wrapper_refresh_status
+		l_cleanup_wrapper_refresh_pass=$((l_cleanup_wrapper_refresh_pass + 1))
+	done
 
 	l_cleanup_wrapper_kill_status=0
 	zxfer_cleanup_child_wrapper_signal_descendant_records \
@@ -379,8 +373,15 @@ zxfer_cleanup_child_wrapper_on_signal() {
 		l_cleanup_wrapper_kill_status=$?
 	[ "$l_cleanup_wrapper_teardown_status" -ne 0 ] ||
 		l_cleanup_wrapper_teardown_status=$l_cleanup_wrapper_kill_status
-	zxfer_cleanup_child_wrapper_kill_and_wait_direct_child ||
-		l_cleanup_wrapper_teardown_status=$?
+	if [ -n "${l_cleanup_wrapper_child_pid:-}" ]; then
+		if kill -s 0 "$l_cleanup_wrapper_child_pid" 2>/dev/null &&
+			! kill -s KILL "$l_cleanup_wrapper_child_pid" 2>/dev/null &&
+			kill -s 0 "$l_cleanup_wrapper_child_pid" 2>/dev/null; then
+			l_cleanup_wrapper_teardown_status=1
+		else
+			wait "$l_cleanup_wrapper_child_pid" 2>/dev/null || :
+		fi
+	fi
 	[ "$l_cleanup_wrapper_teardown_status" -eq 0 ] || exit 125
 	exit 143
 }

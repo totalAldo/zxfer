@@ -575,56 +575,7 @@ must_create_property_error_test() {
 
 legacy_backup_layout_rejected_test() {
 	log "Starting legacy backup layout rejection test"
-
-	src_dataset="$SRC_POOL/legacy_backup_src"
-	dest_root="$DEST_POOL/legacy_backup_dest"
-	restore_root="$DEST_POOL/legacy_backup_restore"
-	backup_dir="$WORKDIR/legacy_backup_dir"
-
-	destroy_test_datasets_if_present "$dest_root" "$restore_root" "$src_dataset"
-	safe_rm_rf "$backup_dir"
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	zfs set test:prop=legacy "$src_dataset"
-	append_data_to_dataset "$src_dataset" "file.txt" "legacy content"
-	zfs snap -r "$src_dataset@legacy1"
-
-	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$src_dataset" "$dest_root"
-
-	ZXFER_BACKUP_DIR="$backup_dir" run_zxfer -v -k -R "$src_dataset" "$restore_root"
-	restore_dataset="$restore_root/${src_dataset##*/}"
-	restore_backup_file=$(find_backup_metadata_file_for_exact_pair "$backup_dir" "$src_dataset" "$restore_dataset")
-	if [ "$restore_backup_file" = "" ]; then
-		fail "Exact-pair restore backup metadata file not found for legacy rejection test."
-	fi
-
-	src_mount=$(get_mountpoint "$src_dataset")
-	legacy_backup="$src_mount/.zxfer_backup_info.${src_dataset##*/}"
-	mv "$restore_backup_file" "$legacy_backup"
-	chmod 600 "$legacy_backup"
-
-	destroy_test_datasets_if_present "$dest_root" "$restore_root"
-	zfs create "$dest_root"
-	zfs set test:prop=mutated "$src_dataset"
-	zfs snap -r "$src_dataset@legacy2"
-	safe_rm_rf "$backup_dir"
-
-	set +e
-	output=$(ZXFER_BACKUP_DIR="$backup_dir" "$ZXFER_BIN" -v -e -R "$src_dataset" "$restore_root" 2>&1)
-	status=$?
-	set -e
-
-	if [ "$status" -eq 0 ]; then
-		fail "Restore with legacy backup metadata should fail closed. Output: $output"
-	fi
-	if ! printf '%s\n' "$output" | grep -q "Cannot find backup property file" >/dev/null 2>&1; then
-		fail "Expected missing-backup failure for legacy backup metadata. Output: $output"
-	fi
-	if zfs list "$restore_dataset" >/dev/null 2>&1; then
-		fail "Restore dataset should not be created when only legacy backup metadata is available."
-	fi
-
+	run_legacy_backup_rejection_case "local"
 	log "Legacy backup layout rejection test passed"
 }
 
@@ -697,61 +648,7 @@ unsupported_backup_format_version_rejected_test() {
 
 remote_legacy_backup_layout_rejected_test() {
 	log "Starting remote legacy backup layout rejection test"
-
-	mock_path="$WORKDIR/mock_remote_legacy_backup"
-	prepare_mock_bin_dir "$mock_path" ssh
-	write_mock_ssh_script "$mock_path/ssh"
-	secure_path="$mock_path:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
-	backup_dir="$WORKDIR/remote_legacy_backup_dir"
-
-	src_dataset="$SRC_POOL/remote_legacy_backup_src"
-	dest_root="$DEST_POOL/remote_legacy_backup_dest"
-	restore_root="$DEST_POOL/remote_legacy_backup_restore"
-
-	destroy_test_datasets_if_present "$dest_root" "$restore_root" "$src_dataset"
-	safe_rm_rf "$backup_dir"
-
-	zfs create "$src_dataset"
-	zfs create "$dest_root"
-	zfs set test:prop=legacy "$src_dataset"
-	append_data_to_dataset "$src_dataset" "file.txt" "remote legacy content"
-	zfs snap -r "$src_dataset@remotelegacy1"
-
-	ZXFER_BACKUP_DIR="$backup_dir" ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -k -T localhost -R "$src_dataset" "$dest_root"
-
-	ZXFER_BACKUP_DIR="$backup_dir" ZXFER_SECURE_PATH="$secure_path" run_zxfer -v -k -T localhost -R "$src_dataset" "$restore_root"
-	restore_dataset="$restore_root/${src_dataset##*/}"
-	restore_backup_file=$(find_backup_metadata_file_for_exact_pair "$backup_dir" "$src_dataset" "$restore_dataset")
-	if [ "$restore_backup_file" = "" ]; then
-		fail "Exact-pair remote restore backup metadata file not found for legacy rejection test."
-	fi
-
-	src_mount=$(get_mountpoint "$src_dataset")
-	legacy_backup="$src_mount/.zxfer_backup_info.${src_dataset##*/}"
-	mv "$restore_backup_file" "$legacy_backup"
-	chmod 600 "$legacy_backup"
-
-	destroy_test_datasets_if_present "$dest_root" "$restore_root"
-	zfs create "$dest_root"
-	zfs set test:prop=mutated "$src_dataset"
-	zfs snap -r "$src_dataset@remotelegacy2"
-	safe_rm_rf "$backup_dir"
-
-	set +e
-	output=$(ZXFER_BACKUP_DIR="$backup_dir" ZXFER_SECURE_PATH="$secure_path" "$ZXFER_BIN" -v -e -O localhost -R "$src_dataset" "$restore_root" 2>&1)
-	status=$?
-	set -e
-
-	if [ "$status" -eq 0 ]; then
-		fail "Remote restore with legacy backup metadata should fail closed. Output: $output"
-	fi
-	if ! printf '%s\n' "$output" | grep -q "Cannot find backup property file" >/dev/null 2>&1; then
-		fail "Expected missing-backup failure for remote legacy backup metadata. Output: $output"
-	fi
-	if zfs list "$restore_dataset" >/dev/null 2>&1; then
-		fail "Remote restore dataset should not be created when only legacy backup metadata is available."
-	fi
-
+	run_legacy_backup_rejection_case "remote"
 	log "Remote legacy backup layout rejection test passed"
 }
 

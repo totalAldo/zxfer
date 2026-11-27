@@ -68,7 +68,9 @@ write_fake_named_suite() {
 	l_fake_suite_marker=$2
 	shift 2
 	case "$l_fake_suite_marker" in
-	'' | *[!A-Za-z0-9_-]*) fail "Invalid fake suite marker: $l_fake_suite_marker" ;;
+	'' | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]*)
+		fail "Invalid fake suite marker: $l_fake_suite_marker"
+		;;
 	esac
 	{
 		printf '%s\n' '#!/bin/sh'
@@ -78,7 +80,7 @@ write_fake_named_suite() {
 			*) fail "Invalid fake test name: $l_fake_test_name" ;;
 			esac
 			case "$l_fake_test_name" in
-			'' | [!A-Za-z_]* | *[!A-Za-z0-9_]*)
+			'' | [!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_]* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*)
 				fail "Invalid fake test name: $l_fake_test_name"
 				;;
 			esac
@@ -159,66 +161,6 @@ test_run_shunit_tests_lists_suites_and_named_tests_without_running_them() {
 		"$test_output" "helper_case"
 	assertEquals "Listing should not execute the selected suite." \
 		"" "$(cat "$FAKE_SUITE_LOG")"
-}
-
-# shellcheck disable=SC2016,SC2317,SC2329  # Invoked indirectly by shunit2.
-test_run_shunit_tests_lists_named_tests_from_declared_behavior_fragments() {
-	l_suite_dir="$TEST_TMPDIR/catalog with spaces"
-	l_suite_path="$l_suite_dir/fragmented-suite.sh"
-	mkdir -p "$l_suite_dir/suites"
-	{
-		printf '%s\n' '#!/bin/sh' 'exit 37' 'test_main_case() {' ':' '}'
-		printf '%s\n' '  .  "$TESTS_DIR/suites/z_last.sh" # first fragment' '. "${TESTS_DIR}/suites/a_first.sh"'
-	} >"$l_suite_path"
-	printf '%s\n' 'test_z_case() {' ':' '}' 'fragment_helper() {' ':' '}' >"$l_suite_dir/suites/z_last.sh"
-	printf '%s\n' 'test_a_case() {' ':' '}' >"$l_suite_dir/suites/a_first.sh"
-
-	test_output=$("$RUN_SHUNIT_TESTS_BIN" --list-tests "$l_suite_path")
-	assertEquals "Discovery must read entry tests first, then literal source order without executing the suite." \
-		"$(printf '%s\t%s\n' "$l_suite_path" test_main_case "$l_suite_path" test_z_case "$l_suite_path" test_a_case)" \
-		"$test_output"
-	registered=$(
-		cd "$l_suite_dir" || exit 1
-		suite_addTest() { printf '%s\n' "$1"; }
-		zxfer_test_register_suite_tests fragmented-suite.sh
-	)
-	assertEquals "Registration must agree with listing, including a basename entry in a path with spaces." \
-		"$(printf '%s\n' test_main_case test_z_case test_a_case)" "$registered"
-}
-
-# shellcheck disable=SC2016,SC2317,SC2329 # Invoked indirectly by shunit2.
-test_run_shunit_tests_rejects_unsafe_or_missing_fragment_sources() {
-	l_suite_path="$TEST_TMPDIR/invalid-fragment-suite.sh"
-	for l_fragment in '../outside.sh' 'missing.sh' unquoted split_quote; do
-		case "$l_fragment" in
-		unquoted) printf '%s\n' '. $TESTS_DIR/suites/cases.sh' >"$l_suite_path" ;;
-		split_quote) printf '%s\n' '. "$TESTS_DIR"/suites/cases.sh' >"$l_suite_path" ;;
-		*) printf '. "$TESTS_DIR/suites/%s"\n' "$l_fragment" >"$l_suite_path" ;;
-		esac
-		test_output=$("$RUN_SHUNIT_TESTS_BIN" --list-tests "$l_suite_path" 2>&1)
-		status=$?
-		assertEquals "An unsafe or missing fragment must fail discovery [$l_fragment]." 1 "$status"
-		case "$l_fragment" in
-		../*) assertContains "$test_output" 'Invalid suite test fragment path' ;;
-		unquoted | split_quote) assertContains "$test_output" 'Invalid suite test fragment source' ;;
-		*) assertContains "$test_output" 'Missing suite test fragment' ;;
-		esac
-	done
-	# shunit2 ignores its suite hook status: rejected source syntax must exit,
-	# even when the shell successfully loaded that fragment before registration.
-	mkdir -p "$TEST_TMPDIR/suites"
-	printf ':\n' >"$TEST_TMPDIR/suites/existing.sh"
-	printf '%s\n' 'TESTS_DIR=$(dirname "$0")' \
-		'. "$ZXFER_ROOT/tests/helpers/loader.sh"' \
-		'. "$TESTS_DIR"/suites/existing.sh' \
-		'test_entry_case() { : >"$REACHED_FILE"; }' \
-		'suite() { zxfer_test_register_suite_tests "$0"; }' \
-		'. "$ZXFER_ROOT/tests/shunit2/shunit2"' >"$l_suite_path"
-	test_output=$(ZXFER_ROOT="$ZXFER_ROOT" REACHED_FILE="$TEST_TMPDIR/catalog-fell-through" \
-		/bin/sh "$l_suite_path" 2>&1)
-	status=$?
-	assertNotEquals "Failed registration must stop shunit2: $test_output" 0 "$status"
-	assertFalse "No entry test may run after failed registration." "[ -e '$TEST_TMPDIR/catalog-fell-through' ]"
 }
 
 test_run_shunit_tests_list_tests_requires_one_explicit_suite() {
@@ -1080,14 +1022,6 @@ test_run_shunit_tests_checks_names_and_numbers_as_ascii_in_a_utf8_locale() {
 	l_suite_path="$TEST_TMPDIR/utf8-suite.sh"
 	write_fake_suite "$l_suite_path" "utf8"
 	chmod +x "$l_suite_path"
-	l_fragment_suite_path="$TEST_TMPDIR/utf8-fragment-suite.sh"
-	mkdir -p "$TEST_TMPDIR/suites"
-	{
-		printf '%s\n' '#!/bin/sh'
-		printf '. "$TESTS_DIR/suites/name%s.sh"\n' "$l_e_acute"
-	} >"$l_fragment_suite_path"
-	chmod +x "$l_fragment_suite_path"
-	printf '%s\n' 'test_fragment_case() {' ':' '}' >"$TEST_TMPDIR/suites/name$l_e_acute.sh"
 
 	jobs_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
 		"$RUN_SHUNIT_TESTS_BIN" --jobs "$l_roman_six" "$l_suite_path" 2>&1)
@@ -1098,9 +1032,6 @@ test_run_shunit_tests_checks_names_and_numbers_as_ascii_in_a_utf8_locale() {
 	name_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
 		"$RUN_SHUNIT_TESTS_BIN" --test "test_name$l_e_acute" "$l_suite_path" 2>&1)
 	name_status=$?
-	fragment_output=$(FAKE_SUITE_LOG=$FAKE_SUITE_LOG LC_ALL=en_US.UTF-8 \
-		"$RUN_SHUNIT_TESTS_BIN" --list-tests "$l_fragment_suite_path" 2>&1)
-	fragment_status=$?
 
 	assertEquals "A non-ASCII digit in --jobs should fail in a UTF-8 locale." 1 "$jobs_status"
 	assertContains "The --jobs failure should be the positive-integer check." \
@@ -1113,10 +1044,6 @@ test_run_shunit_tests_checks_names_and_numbers_as_ascii_in_a_utf8_locale() {
 		1 "$name_status"
 	assertContains "The --test failure should be the function-name check." \
 		"$name_output" "--test requires a shell function name"
-	assertEquals "An accented letter in a fragment path should fail in a UTF-8 locale." \
-		1 "$fragment_status"
-	assertContains "The fragment failure should be the path check." \
-		"$fragment_output" "Invalid suite test fragment path"
 	assertEquals "No suite should run." "" "$(cat "$FAKE_SUITE_LOG")"
 }
 

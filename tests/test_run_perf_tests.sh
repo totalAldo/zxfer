@@ -725,5 +725,80 @@ test_perf_main_rejects_a_bad_baseline_binary_before_confirmation() {
 		"$both_output$missing_output" "Type YES"
 }
 
+test_runner_common_sha256_and_signal_traps_fail_closed_and_preserve_ifs() {
+	l_dash_dir="$TEST_TMPDIR/sha-dash"
+	mkdir -p "$l_dash_dir"
+	l_bs_hash=$(
+		cd "$l_dash_dir" || exit 1
+		printf 'abc\n' >./-dashfile
+		zxfer_runner_sha256_file -dashfile >/dev/null || exit 1
+		printf 'abc\n' >'./a\b'
+		zxfer_runner_sha256_file './a\b'
+	)
+	assertEquals "zxfer_runner_sha256_file must accept dash- and backslash-containing filenames." 0 "$?"
+	assertEquals "Backslash filenames must not prefix a backslash onto the hex digest." \
+		"edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb" "$l_bs_hash"
+
+	l_missing_status=0
+	zxfer_runner_sha256_file "$TEST_TMPDIR/no-such-sha-file" >/dev/null 2>&1 ||
+		l_missing_status=$?
+	assertEquals "zxfer_runner_sha256_file must return 1 for missing files." \
+		1 "$l_missing_status"
+
+	l_notool_status=0
+	sh -c '
+		. "$1/helpers/runner_common.sh"
+		PATH=$2
+		export PATH
+		zxfer_runner_sha256_file "$3" >/dev/null 2>&1
+	' sh "$TESTS_DIR" "$TEST_TMPDIR/empty-sha-path:/nonexistent" "$l_dash_dir/-dashfile" ||
+		l_notool_status=$?
+	assertEquals "zxfer_runner_sha256_file must return 127 when no SHA-256 tool is installed." \
+		127 "$l_notool_status"
+
+	l_cleanup_child_pid_file="$TEST_TMPDIR/perf-cleanup-child.pid"
+	rm -f "$l_cleanup_child_pid_file"
+	sh -c '
+		ZXFER_RUN_PERF_SOURCE_ONLY=1
+		ZXFER_PERF_TESTS_DIR=$1
+		l_workdir=$2
+		l_pid_file=$3
+		. "$0"
+		TEST_RUN_ID="1.$$"
+		WORKDIR=$l_workdir
+		mkdir -p "$WORKDIR"
+		sleep 30 &
+		l_bg_pid=$!
+		printf "%s\n" "$l_bg_pid" >"$l_pid_file"
+		ps() { printf "%s %s\n" "$l_bg_pid" "$$"; }
+		destroy_owned_test_pool_pair() {
+			IFS= read -r l_cpid <"$l_pid_file"
+			! kill -0 "$l_cpid" 2>/dev/null
+		}
+		zxfer_perf_cleanup
+	' "$PERF_RUNNER" "$TESTS_DIR" "$TEST_TMPDIR/perf-cleanup-jobs" "$l_cleanup_child_pid_file"
+	assertEquals "zxfer_perf_cleanup must terminate active child jobs before pool teardown." 0 "$?"
+
+	l_ifs_out=$(
+		IFS=:
+		l_list=$(zxfer_runner_append_csv_words "alpha" "beta,gamma")
+		l_count=$(zxfer_runner_count_words "$l_list")
+		printf '%s|%s|%s\n' "$IFS" "$l_list" "$l_count"
+	)
+	assertEquals "CSV/word helpers must ignore and preserve non-default caller IFS." \
+		":|alpha beta gamma|3" "$l_ifs_out"
+
+	capture_case() {
+		ZXFER_RUN_PERF_SOURCE_ONLY=1
+		ZXFER_PERF_TESTS_DIR="$TESTS_DIR"
+		# shellcheck source=tests/run_perf_tests.sh
+		. "$PERF_RUNNER"
+		zxfer_perf_handle_signal TERM
+	}
+	zxfer_test_capture_subshell capture_case
+	assertEquals "zxfer_perf_handle_signal TERM should exit 143." \
+		143 "$ZXFER_TEST_CAPTURE_STATUS"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

@@ -14,6 +14,8 @@ set -eu
 
 ZXFER_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TEST_DIR="$ZXFER_ROOT/tests"
+# shellcheck source=tests/helpers/runner_common.sh
+. "$TEST_DIR/helpers/runner_common.sh"
 COVERAGE_DIR=${COVERAGE_DIR:-"$ZXFER_ROOT/coverage"}
 ZXFER_COVERAGE_MODE=${ZXFER_COVERAGE_MODE:-auto}
 ZXFER_COVERAGE_INCLUDE_ENTRYPOINT=${ZXFER_COVERAGE_INCLUDE_ENTRYPOINT:-1}
@@ -207,12 +209,7 @@ cleanup_coverage_runner() {
 # Usage: installed by main's traps only.
 handle_coverage_signal() {
 	trap '' HUP INT QUIT TERM
-	case "$1" in
-	HUP) l_coverage_signal_exit=129 ;;
-	INT) l_coverage_signal_exit=130 ;;
-	QUIT) l_coverage_signal_exit=131 ;;
-	*) l_coverage_signal_exit=143 ;;
-	esac
+	l_coverage_signal_exit=$(zxfer_runner_signal_exit_status "$1" 143)
 	if [ -n "$COVERAGE_RUNNER_PID" ]; then
 		kill -s TERM "$COVERAGE_RUNNER_PID" 2>/dev/null || :
 		wait "$COVERAGE_RUNNER_PID" 2>/dev/null || :
@@ -673,9 +670,15 @@ BEGIN {
 	}
 	finish_read(merged_trace_file, trace_status)
 
+	total_coverable = 0
+	total_hit = 0
+	total_miss = 0
 	for (i = 1; i <= file_count; i++) {
 		file = files[i]
 		miss_count[file] = coverable_count[file] - hit_count[file]
+		total_coverable += coverable_count[file]
+		total_hit += hit_count[file]
+		total_miss += miss_count[file]
 		if (coverable_count[file] > 0) {
 			pct = (hit_count[file] * 100.0) / coverable_count[file]
 		} else {
@@ -693,37 +696,14 @@ BEGIN {
 			printf "\n" >> missing_file
 		}
 	}
+	if (total_coverable > 0) {
+		total_pct = (total_hit * 100.0) / total_coverable
+	} else {
+		total_pct = 100.0
+	}
+	printf "%.2f\t%d\t%d\t%d\tTOTAL\n", total_pct, total_coverable, total_hit, total_miss >> summary_file
 }
 ' /dev/null >&2
-}
-
-append_total_summary_row() {
-	l_summary_file=$1
-	l_tmp_file=$l_summary_file.tmp.$$
-
-	awk -F '\t' '
-BEGIN {
-	OFS = "\t"
-	total_coverable = 0
-	total_hit = 0
-	total_miss = 0
-}
-NF >= 5 && $5 != "TOTAL" {
-	print $0
-	total_coverable += $2
-	total_hit += $3
-	total_miss += $4
-}
-END {
-	if (total_coverable > 0) {
-		pct = (total_hit * 100.0) / total_coverable
-	} else {
-		pct = 100.0
-	}
-	printf "%.2f\t%d\t%d\t%d\tTOTAL\n", pct, total_coverable, total_hit, total_miss
-}
-' "$l_summary_file" >"$l_tmp_file"
-	mv "$l_tmp_file" "$l_summary_file"
 }
 
 run_with_bash_xtrace() {
@@ -780,7 +760,6 @@ run_with_bash_xtrace() {
 	done
 
 	render_bash_xtrace_report "$l_target_list_file" "$l_merged_trace" "$l_summary_file" "$l_missing_file" || return "$?"
-	append_total_summary_row "$l_summary_file"
 
 	echo "Coverage summary: $l_summary_file"
 	echo "Missing lines: $l_missing_file"

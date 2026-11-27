@@ -66,17 +66,6 @@
 # records a seed receive as the new anchor through
 # zxfer_publish_snapshot_transfer_plan.
 
-# Purpose: Forget the run-scoped snapshot plan, creation-time and slice files.
-# Usage: Called by session initialization; the next use allocates a fresh
-# file under the run root.
-zxfer_reset_snapshot_delete_artifact_state() {
-	g_zxfer_snapshot_plan_file=""
-	g_zxfer_snapshot_recheck_file=""
-	g_zxfer_snapshot_creation_file=""
-	g_zxfer_snapshot_slice_base=""
-	zxfer_forget_snapshot_slices
-}
-
 # Purpose: Forget the prepared pass and the current dataset's selection.
 # Usage: zxfer_forget_snapshot_slices; the planner then reads the whole
 # record files until the next preparation.
@@ -88,7 +77,7 @@ zxfer_forget_snapshot_slices() {
 }
 
 # Purpose: Reset the per-dataset plan, delete, and divergence state.
-# Usage: Called by session initialization.
+# Usage: Called by session initialization and test resets.
 zxfer_reset_snapshot_plan_state() {
 	zxfer_publish_snapshot_transfer_plan "" "" "" 0 ""
 	g_did_delete_dest_snapshots=0
@@ -106,6 +95,17 @@ zxfer_reset_snapshot_plan_state() {
 	g_zxfer_diverged_snapshot_examples=""
 	g_zxfer_diverged_converged_datasets=""
 	g_zxfer_diverged_converged_marker_source=""
+}
+
+# Purpose: Reset all snapshot plan, slice, and scratch state for a new session.
+# Usage: zxfer_reset_snapshot_plan_session_state, from session initialization.
+zxfer_reset_snapshot_plan_session_state() {
+	g_zxfer_snapshot_plan_file=""
+	g_zxfer_snapshot_recheck_file=""
+	g_zxfer_snapshot_creation_file=""
+	g_zxfer_snapshot_slice_base=""
+	zxfer_forget_snapshot_slices
+	zxfer_reset_snapshot_plan_state
 }
 
 # Purpose: Publish the current dataset's transfer range and exact eligibility.
@@ -256,7 +256,7 @@ EOF
 		# Never restore an empty umask: ksh reads it as 0777.
 		l_split_umask=${g_zxfer_run_umask:-}
 		case $l_split_umask in
-		'' | *[!0-7]*) l_split_umask=$(umask) ;;
+		'' | *[!01234567]*) l_split_umask=$(umask) ;;
 		esac
 		umask 077
 		ZXFER_AWK_SLICE_BASE=$g_zxfer_snapshot_slice_base \
@@ -383,7 +383,11 @@ function plan_finish(    i, target, at) {
 }'
 # shellcheck disable=SC2016 # Append the single-dataset awk driver literally.
 ZXFER_PLAN_DATASET_SNAPSHOTS_AWK=$ZXFER_SNAPSHOT_PLAN_AWK'
-BEGIN { plan_file = ENVIRON["ZXFER_AWK_PLAN_FILE"] }
+BEGIN {
+	plan_file = ENVIRON["ZXFER_AWK_PLAN_FILE"]
+	source_dataset = ENVIRON["ZXFER_AWK_SOURCE_DATASET"]
+	destination_dataset = ENVIRON["ZXFER_AWK_DESTINATION_DATASET"]
+}
 $1 == (side == "destination" ? destination_dataset : source_dataset) {
 	plan_record($0, side)
 	if (missing_guid) exit 3
@@ -475,8 +479,9 @@ zxfer_plan_dataset_snapshots() {
 		l_plan_file=$g_zxfer_runtime_artifact_path_result
 		ZXFER_AWK_PLAN_FILE=$l_plan_file \
 			ZXFER_AWK_PLAN_VERBOSE=${g_option_v_verbose:-0} \
-			"${g_cmd_awk:-awk}" -F@ -v source_dataset="$l_plan_source" \
-			-v destination_dataset="$l_plan_dest" "$ZXFER_PLAN_DATASET_SNAPSHOTS_AWK" \
+			ZXFER_AWK_SOURCE_DATASET=$l_plan_source \
+			ZXFER_AWK_DESTINATION_DATASET=$l_plan_dest \
+			"${g_cmd_awk:-awk}" -F@ "$ZXFER_PLAN_DATASET_SNAPSHOTS_AWK" \
 			side=destination "$l_plan_dest_file" side=source "$l_plan_source_file" ||
 			l_plan_status=$?
 	fi
@@ -792,7 +797,10 @@ zxfer_find_diverged_converged_marker() {
 	l_marker_dest=$1
 
 	g_zxfer_diverged_converged_marker_source=""
-	[ -n "${g_zxfer_diverged_converged_datasets:-}" ] || return 1
+	case $ZXFER_LF${g_zxfer_diverged_converged_datasets:-} in
+	*"$ZXFER_LF$l_marker_dest$ZXFER_TAB"*) ;;
+	*) return 1 ;;
+	esac
 
 	while IFS='	' read -r l_marker_record_dest l_marker_record_source; do
 		[ -n "$l_marker_record_dest" ] || continue
@@ -818,12 +826,7 @@ zxfer_unmark_diverged_converged_dataset() {
 	while IFS='	' read -r l_marker_record_dest l_marker_record_source; do
 		[ -n "$l_marker_record_dest" ] || continue
 		[ "$l_marker_record_dest" = "$l_unmark_dest" ] && continue
-		if [ -n "$l_remaining_markers" ]; then
-			l_remaining_markers="$l_remaining_markers
-$l_marker_record_dest	$l_marker_record_source"
-		else
-			l_remaining_markers="$l_marker_record_dest	$l_marker_record_source"
-		fi
+		l_remaining_markers=${l_remaining_markers:+$l_remaining_markers$ZXFER_LF}$l_marker_record_dest$ZXFER_TAB$l_marker_record_source
 	done <<-EOF
 		${g_zxfer_diverged_converged_datasets:-}
 	EOF
@@ -843,12 +846,7 @@ zxfer_render_diverged_snapshot_example_lines() {
 	while IFS='	' read -r l_example_name l_example_src_guid l_example_dst_guid; do
 		[ -n "$l_example_name" ] || continue
 		l_example_line="  $l_example_dest_dataset@$l_example_name: source guid $l_example_src_guid vs destination guid $l_example_dst_guid"
-		if [ -n "$l_example_lines" ]; then
-			l_example_lines="$l_example_lines
-$l_example_line"
-		else
-			l_example_lines=$l_example_line
-		fi
+		l_example_lines=${l_example_lines:+$l_example_lines$ZXFER_LF}$l_example_line
 	done <<-EOF
 		${g_zxfer_diverged_snapshot_examples:-}
 	EOF
@@ -886,12 +884,7 @@ zxfer_enforce_destination_divergence_contract() {
 		zxfer_warn_stderr "WARNING: destination dataset [$g_actual_dest] has ${g_zxfer_diverged_snapshot_count} snapshot(s) whose names match source dataset [$l_divergence_source] but whose guids differ (the destination diverged under identical snapshot names), e.g.:
 $l_diverged_example_lines
 -d and -F are active; converging: destroy + rollback + resend (destroy the diverged destination snapshots, roll back to the last guid-matching common snapshot, and resend the source range over them)."
-		if [ -n "${g_zxfer_diverged_converged_datasets:-}" ]; then
-			g_zxfer_diverged_converged_datasets="$g_zxfer_diverged_converged_datasets
-$g_actual_dest	$l_divergence_source"
-		else
-			g_zxfer_diverged_converged_datasets="$g_actual_dest	$l_divergence_source"
-		fi
+		g_zxfer_diverged_converged_datasets=${g_zxfer_diverged_converged_datasets:+$g_zxfer_diverged_converged_datasets$ZXFER_LF}$g_actual_dest$ZXFER_TAB$l_divergence_source
 		return 0
 	fi
 
