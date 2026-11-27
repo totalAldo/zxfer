@@ -983,5 +983,42 @@ test_abort_all_send_jobs_never_evaluates_a_non_numeric_grace_knob() {
 	assertFalse "The grace knob never reaches arithmetic as an expression." "[ -e '$marker' ]"
 }
 
+test_abort_all_send_jobs_refreshes_jobs_in_grace_poll_loop() {
+	zxfer_test_send_job_fixture_setup
+	l_out=$(
+		(
+			g_zxfer_send_jobs="a	401	backup/a	$TEST_TMPDIR/bgjob_jobs_poll.none	tank/a@snap	pgid"
+			g_count_zfs_send_jobs=1
+			g_zxfer_send_job_abort_grace_seconds=1
+			g_zxfer_send_job_poll_seconds=1
+			l_reaped=0
+			l_slept=0
+			zxfer_signal_background_shell() { return 0; }
+			command() {
+				if [ "${1:-}" = -v ] && [ "${2:-}" = jobs ]; then
+					return 0
+				elif [ "${1:-}" = jobs ]; then
+					l_reaped=$((l_reaped + 1))
+					return 0
+				fi
+				return 1
+			}
+			kill() {
+				# Simulate a dead-on-TERM zombie that kill -0 reports alive until jobs runs.
+				[ "$l_reaped" -eq 0 ]
+			}
+			sleep() {
+				l_slept=$((l_slept + 1))
+			}
+			wait() { :; }
+			zxfer_abort_all_send_jobs
+			printf 'status=%s reaped=%s slept=%s count=%s\n' "$?" "$l_reaped" "$l_slept" "$g_count_zfs_send_jobs"
+		)
+	)
+
+	assertEquals "Abort grace polling should call jobs before kill -0 so dead-on-TERM zombies do not stall the grace window." \
+		"status=0 reaped=1 slept=0 count=0" "$l_out"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

@@ -199,7 +199,8 @@ test_zxfer_note_destination_dataset_exists_appends_each_dataset_once_and_marks_i
 	zxfer_note_destination_dataset_exists "backup/dst/child"
 	zxfer_note_destination_dataset_exists "backup/dst/child"
 	zxfer_note_destination_dataset_exists "backup/dst/ch"
-	zxfer_note_destination_dataset_exists "" || :
+	zxfer_note_destination_dataset_exists ""
+	assertEquals "Noting an empty dataset name should be a clean no-op." 0 "$?"
 	assertEquals "Later datasets should be appended once each, as whole newline-delimited names." \
 		"backup/dst
 backup/dst/child
@@ -463,6 +464,61 @@ test_probe_destination_existence_returns_without_throwing_under_very_verbose_on_
 	)
 	assertEquals "zxfer_probe_destination_existence must return non-zero without exiting under -V." \
 		"returned=1 error=present" "$l_probe_output"
+}
+
+test_very_verbose_remote_destination_probes_and_live_listing_stay_clean() {
+	l_fake_ssh="$TEST_TMPDIR/dest_very_verbose_ssh"
+	cat >"$l_fake_ssh" <<'EOF'
+#!/bin/sh
+l_cmd=""
+for l_arg in "$@"; do
+	l_cmd=$l_arg
+done
+case $l_cmd in
+*"'list' '-H' 'backup/missing'"*)
+	# Empty stderr on SunOS triggers the parent recursive fallback.
+	exit 1
+	;;
+*"'list' '-H' '-r' '-o' 'name' 'backup'"*)
+	printf 'backup\n'
+	exit 0
+	;;
+*"'list' '-H' '-d' '1' '-o' 'name,guid' '-t' 'snapshot' 'backup/dst'"*)
+	printf 'backup/dst@s1\t101\n'
+	exit 0
+	;;
+esac
+exit 99
+EOF
+	chmod +x "$l_fake_ssh"
+	l_caller_err="$TEST_TMPDIR/dest_very_verbose.err"
+	: >"$l_caller_err"
+
+	l_out=$(
+		g_cmd_ssh=$l_fake_ssh
+		g_target_cmd_zfs=/target/sbin/zfs
+		g_option_T_target_host=target.example
+		g_option_V_very_verbose=1
+		g_destination_operating_system=SunOS
+		zxfer_reset_ssh_transport_state
+		g_cmd_ssh=$l_fake_ssh
+		zxfer_refresh_remote_zfs_commands
+
+		l_probe_status=0
+		zxfer_probe_destination_existence "backup/missing" live 2>>"$l_caller_err" ||
+			l_probe_status=$?
+		l_live_status=0
+		zxfer_get_live_destination_record_file "backup/dst" 2>>"$l_caller_err" ||
+			l_live_status=$?
+		printf 'probe=%s:%s|live=%s:<%s>\n' "$l_probe_status" \
+			"$g_zxfer_destination_exists_result" "$l_live_status" \
+			"$(cat "$g_zxfer_live_destination_listing_file")"
+	)
+
+	assertEquals "Under -V -T, SunOS empty-stderr ambiguity fallback and depth-1 live listing must stay free of -V trace contamination." \
+		"probe=0:0|live=0:<backup/dst@s1	101>" "$l_out"
+	assertEquals "All three remote -V commands must still log to the caller's unredirected stderr." \
+		3 "$(grep -c -F "Running remote command [target: target.example]: '$l_fake_ssh'" "$l_caller_err")"
 }
 
 # shellcheck source=tests/shunit2/shunit2

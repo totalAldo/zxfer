@@ -135,8 +135,9 @@ zxfer_cleanup_child_wrapper_list_descendants() {
 	[ "$l_cleanup_wrapper_snapshot_status" -eq 0 ] || return "$l_cleanup_wrapper_snapshot_status"
 
 	l_cleanup_wrapper_descendants_status=0
+	# shellcheck disable=SC2016,SC2154 # awk fields are literal; g_cmd_awk is optional when sourced.
 	l_cleanup_wrapper_descendants=$(printf '%s\n' "$l_cleanup_wrapper_snapshot" |
-		awk -v roots="$l_cleanup_wrapper_snapshot_roots" -v selector="$l_cleanup_wrapper_snapshot_selector" '
+		LC_ALL=C "${g_cmd_awk:-awk}" -v roots="$l_cleanup_wrapper_snapshot_roots" -v selector="$l_cleanup_wrapper_snapshot_selector" '
 	{
 		pid = $1
 		ppid = $2
@@ -175,6 +176,7 @@ zxfer_cleanup_child_wrapper_list_descendants() {
 	}') || l_cleanup_wrapper_descendants_status=$?
 	[ "$l_cleanup_wrapper_descendants_status" -eq 0 ] ||
 		return "$l_cleanup_wrapper_descendants_status"
+	[ -n "$l_cleanup_wrapper_descendants" ] || return 0
 
 	printf '%s\n' "$l_cleanup_wrapper_descendants" | LC_ALL=C sort -nr
 }

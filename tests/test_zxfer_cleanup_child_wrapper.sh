@@ -371,6 +371,7 @@ waited:4242" "$(cat "$marker_file")"
 
 test_cleanup_child_wrapper_list_descendants_preserves_awk_failures() {
 	capture_case() {
+		g_cmd_awk=""
 		ps() {
 			printf "%s\n" "$$ 1 wrapper-token" "701 $$ child-token"
 		}
@@ -385,6 +386,41 @@ test_cleanup_child_wrapper_list_descendants_preserves_awk_failures() {
 
 	assertContains "Cleanup child wrapper descendant discovery must not let sort mask an awk failure." \
 		"$ZXFER_TEST_CAPTURE_OUTPUT" "status=41"
+}
+
+test_cleanup_child_wrapper_list_descendants_uses_c_locale_g_cmd_awk_and_skips_sort_when_empty() {
+	l_awk_log="$TEST_TMPDIR/cleanup_child_wrapper.awk_env"
+	l_fake_awk="$TEST_TMPDIR/cleanup_child_wrapper_fake_awk"
+	l_real_awk=$(command -v awk)
+	: >"$l_awk_log"
+	cat >"$l_fake_awk" <<EOF
+#!/bin/sh
+printf 'LC_ALL=%s\n' "\${LC_ALL:-unset}" >>"$l_awk_log"
+exec "$l_real_awk" "\$@"
+EOF
+	chmod +x "$l_fake_awk"
+
+	capture_case() {
+		LC_ALL=fr_FR
+		export LC_ALL
+		g_cmd_awk=$l_fake_awk
+		ps() {
+			printf '%s\n' "$$ 1 wrapper-token"
+		}
+		sort() {
+			printf 'unexpected sort\n' >&2
+			return 99
+		}
+
+		l_empty_out=$(zxfer_cleanup_child_wrapper_list_descendants)
+		printf 'status=%s out=<%s>\n' "$?" "$l_empty_out"
+	}
+	zxfer_test_capture_subshell capture_case
+
+	assertEquals "Empty descendant sets should return 0 with no output and skip sort." \
+		"status=0 out=<>" "$ZXFER_TEST_CAPTURE_OUTPUT"
+	assertEquals "Descendant discovery should invoke g_cmd_awk under LC_ALL=C." \
+		"LC_ALL=C" "$(cat "$l_awk_log")"
 }
 
 # A descendant that exited while its parent was stopped is a zombie. illumos

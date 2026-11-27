@@ -360,11 +360,11 @@ zxfer_capture_remote_probe_output() {
 		# their string result and trailing-newline behavior.
 		# Keep invocation scratch and its profiling increments in the same
 		# subshell as string capture; the parent already recorded this call.
-		(zxfer_invoke_ssh_shell_command_for_host "$1" "$2" "${3:-}" \
+		(zxfer_invoke_ssh_shell_command_for_host "$1" "$2" "${3:-}" quiet \
 			>|"$4" 2>|"$l_probe_stderr_file") || l_probe_status=$?
 	else
 		g_zxfer_remote_probe_stdout=$(zxfer_invoke_ssh_shell_command_for_host \
-			"$1" "$2" "${3:-}" 2>|"$l_probe_stderr_file") || l_probe_status=$?
+			"$1" "$2" "${3:-}" quiet 2>|"$l_probe_stderr_file") || l_probe_status=$?
 	fi
 
 	# The run root owns the file; an empty capture needs no read.

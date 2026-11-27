@@ -695,6 +695,50 @@ err_line1=Running remote probe [origin: origin.example]: 'true'" "$output"
 		"13|throw=13:Error creating temporary file." "$trunc_status|$trunc_output"
 }
 
+test_zxfer_capture_remote_probe_output_keeps_probe_stderr_clean_under_very_verbose() {
+	l_fake_ssh="$TEST_TMPDIR/probe_clean_ssh"
+	cat >"$l_fake_ssh" <<'EOF'
+#!/bin/sh
+printf 'probe-ok\n'
+[ -z "${PROBE_SSH_STDERR:-}" ] || printf '%s\n' "$PROBE_SSH_STDERR" >&2
+exit "${PROBE_SSH_STATUS:-0}"
+EOF
+	chmod +x "$l_fake_ssh"
+	l_caller_err="$TEST_TMPDIR/probe_clean_caller.err"
+	: >"$l_caller_err"
+
+	l_out=$(
+		g_cmd_ssh=$l_fake_ssh
+		g_option_O_origin_host=origin.example
+		g_option_V_very_verbose=1
+		zxfer_refresh_remote_zfs_commands
+
+		l_reads=0
+		zxfer_read_runtime_artifact_file() {
+			l_reads=$((l_reads + 1))
+			g_zxfer_runtime_artifact_read_result=$(cat "$1")
+		}
+		PROBE_SSH_STDERR=""
+		PROBE_SSH_STATUS=0
+		export PROBE_SSH_STDERR PROBE_SSH_STATUS
+		zxfer_capture_remote_probe_output origin.example "'true'" source 2>>"$l_caller_err"
+		printf 'clean=%s|reads=%s|stderr=<%s>|file_nonempty=%s\n' \
+			"$?" "$l_reads" "$g_zxfer_remote_probe_stderr" \
+			"$([ -s "$g_zxfer_remote_probe_stderr_file" ] && printf 1 || printf 0)"
+
+		PROBE_SSH_STDERR="Permission denied (publickey)."
+		PROBE_SSH_STATUS=255
+		zxfer_capture_remote_probe_output origin.example "'true'" source 2>>"$l_caller_err"
+		printf 'fail=%s|stderr=<%s>\n' "$?" "$g_zxfer_remote_probe_stderr"
+	)
+
+	assertEquals "Clean -V remote probes must leave stderr staging empty without reading it, and failed probes must hold only remote stderr." \
+		"clean=0|reads=0|stderr=<>|file_nonempty=0
+fail=255|stderr=<Permission denied (publickey).>" "$l_out"
+	assertEquals "-V probes must log Running remote probe without leaking Running remote command." \
+		"2|0" "$(grep -c -F "Running remote probe [origin: origin.example]: 'true'" "$l_caller_err")|$(grep -c -F "Running remote command [" "$l_caller_err")"
+}
+
 test_zxfer_emit_remote_probe_failure_message_prefers_staged_stderr() {
 	default_output=$(zxfer_emit_remote_probe_failure_message "default probe failure.")
 	default_status=$?

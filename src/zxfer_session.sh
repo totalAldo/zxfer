@@ -130,9 +130,11 @@ zxfer_trap_exit() {
 	# get the exit status of the last command
 	g_zxfer_trap_exit_status=$?
 	# A signal can land while zxfer_create_runtime_artifact_file holds umask
-	# 077 and noclobber, or between zxfer_split_begin and zxfer_split_end.
-	# Put the run's shell modes back before any cleanup or report write.
+	# 077 and noclobber, between zxfer_split_begin and zxfer_split_end, or
+	# while monitor-mode spawning holds set -m. Put the run's shell modes
+	# back before any cleanup or report write.
 	set +C +f
+	set +m 2>/dev/null || :
 	IFS=" $ZXFER_TAB$ZXFER_LF"
 	case ${g_zxfer_run_umask:-} in
 	'' | *[!01234567]*) ;;
@@ -284,7 +286,10 @@ zxfer_prepare_remote_host_connections() {
 	else
 		zxfer_ensure_local_ssh_command ||
 			zxfer_throw_dependency_error "$g_zxfer_required_tool_result"
-		zxfer_refresh_ssh_control_socket_support_state
+		g_ssh_supports_control_sockets=0
+		if zxfer_ssh_supports_control_sockets; then
+			g_ssh_supports_control_sockets=1
+		fi
 		zxfer_open_ssh_control_sockets
 		if [ -n "$g_option_O_origin_host" ]; then
 			zxfer_preload_remote_host_capabilities "$g_option_O_origin_host" source || :

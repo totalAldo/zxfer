@@ -104,8 +104,9 @@ zxfer_get_live_destination_record_file() {
 	g_zxfer_live_destination_listing_file=$g_zxfer_runtime_artifact_path_result
 
 	l_live_record_status=0
-	zxfer_run_destination_zfs_cmd list -H -d 1 -o name,guid -t snapshot "$l_live_record_dest" \
-		>"$g_zxfer_live_destination_listing_file" 2>&1 || l_live_record_status=$?
+	zxfer_run_zfs_cmd_capturing_stderr destination merge \
+		list -H -d 1 -o name,guid -t snapshot "$l_live_record_dest" \
+		>"$g_zxfer_live_destination_listing_file" || l_live_record_status=$?
 	if [ "$l_live_record_status" -ne 0 ]; then
 		zxfer_read_runtime_artifact_file_trimmed "$g_zxfer_live_destination_listing_file" || :
 		g_zxfer_live_destination_record_file_error=${g_zxfer_runtime_artifact_read_result:-}
@@ -233,7 +234,7 @@ zxfer_mark_destination_hierarchy_exists() {
 zxfer_note_destination_dataset_exists() {
 	l_note_destination_dataset_exists_dataset=$1
 
-	[ -n "$l_note_destination_dataset_exists_dataset" ] || return
+	[ -n "$l_note_destination_dataset_exists_dataset" ] || return 0
 
 	zxfer_mark_destination_hierarchy_exists "$l_note_destination_dataset_exists_dataset"
 
@@ -327,7 +328,8 @@ zxfer_exists_destination_via_parent_recursive_listing() {
 		zxfer_trace_zfs_command_for_role "$l_parent_probe_trace" \
 			destination list -H -r -o name "$l_parent_probe_parent"
 		l_parent_probe_missing=$l_parent_probe_child
-		if l_parent_probe_listing=$(zxfer_run_destination_zfs_cmd list -H -r -o name "$l_parent_probe_parent" 2>&1); then
+		if l_parent_probe_listing=$(zxfer_run_zfs_cmd_capturing_stderr \
+			destination merge list -H -r -o name "$l_parent_probe_parent"); then
 			# Literal whole-line membership, without grep processes. Finding
 			# an ancestor's child cannot prove the original destination absent.
 			case "$ZXFER_LF$l_parent_probe_listing$ZXFER_LF" in
@@ -398,7 +400,8 @@ zxfer_probe_destination_existence() {
 	zxfer_trace_zfs_command_for_role "Checking if destination exists" \
 		destination list -H "$l_probe_exists_dest"
 
-	if l_probe_exists_output=$(zxfer_run_destination_zfs_cmd list -H "$l_probe_exists_dest" 2>&1); then
+	if l_probe_exists_output=$(zxfer_run_zfs_cmd_capturing_stderr \
+		destination merge list -H "$l_probe_exists_dest"); then
 		zxfer_set_destination_existence_cache_entry "$l_probe_exists_dest" 1
 		g_zxfer_destination_exists_result=1
 		return 0
@@ -428,9 +431,9 @@ zxfer_probe_destination_existence() {
 }
 
 # Purpose: Probe whether a destination dataset exists, throwing on probe error.
-# Usage: if zxfer_destination_exists DATASET [live]; then ...; preserves the
-# probe's exit status on operational failure and returns 0 when present, 1 when
-# missing.
+# Usage: if zxfer_destination_exists DATASET [live]; then ...; throws with
+# zxfer_probe_destination_existence's failure status (1 on operational probe
+# failure) and returns 0 when present, 1 when missing.
 zxfer_destination_exists() {
 	zxfer_probe_destination_existence "$@" ||
 		zxfer_throw_error "$g_zxfer_destination_exists_error" "$?"

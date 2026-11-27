@@ -107,12 +107,12 @@ zxfer_calculate_size_estimate() {
 	if [ -n "${g_option_O_origin_host:-}" ] || [ -n "${g_option_T_target_host:-}" ] ||
 		[ "${g_option_j_jobs:-1}" -gt 1 ]; then
 		if [ -n "$l_size_previous" ]; then
-			l_size_output=$(zxfer_run_source_zfs_cmd get -Hpo value \
-				"written@${l_size_previous#*@}" "${l_size_current%@*}" 2>&1) ||
-				l_size_output=""
+			l_size_output=$(zxfer_run_zfs_cmd_capturing_stderr source merge \
+				get -Hpo value "written@${l_size_previous#*@}" \
+				"${l_size_current%@*}") || l_size_output=""
 		else
-			l_size_output=$(zxfer_run_source_zfs_cmd list -Hp -o referenced \
-				"$l_size_current" 2>&1) || l_size_output=""
+			l_size_output=$(zxfer_run_zfs_cmd_capturing_stderr source merge \
+				list -Hp -o referenced "$l_size_current") || l_size_output=""
 		fi
 		# The property value is the last line of the probe output.
 		l_size_output=${l_size_output##*"$ZXFER_LF"}
@@ -127,11 +127,12 @@ zxfer_calculate_size_estimate() {
 
 	l_size_status=0
 	if [ -n "$l_size_previous" ]; then
-		l_size_output=$(zxfer_run_source_zfs_cmd send -nPv -I "$l_size_previous" \
-			"$l_size_current" 2>&1) || l_size_status=$?
-	else
-		l_size_output=$(zxfer_run_source_zfs_cmd send -nPv "$l_size_current" 2>&1) ||
+		l_size_output=$(zxfer_run_zfs_cmd_capturing_stderr source merge \
+			send -nPv -I "$l_size_previous" "$l_size_current") ||
 			l_size_status=$?
+	else
+		l_size_output=$(zxfer_run_zfs_cmd_capturing_stderr source merge \
+			send -nPv "$l_size_current") || l_size_status=$?
 	fi
 	# The size is the -P "size" row, or a bare number on the last line. A
 	# failed probe that still printed a size is accepted.
@@ -647,6 +648,11 @@ EOF
 	[ "$g_zxfer_send_job_poll_seconds" != 0.2 ] ||
 		l_abort_job_ticks=$((l_abort_job_ticks * 5))
 	while [ "$l_abort_job_ticks" -gt 0 ]; do
+		# Refresh child status before kill -0 so dead-on-TERM zombies in
+		# dash, ksh93, and FreeBSD sh do not stall the grace window.
+		if command -v jobs >/dev/null 2>&1; then
+			command jobs >/dev/null 2>&1 || :
+		fi
 		l_abort_job_live=0
 		while IFS="$ZXFER_TAB" read -r l_abort_job_id l_abort_job_pid l_abort_job_dest l_abort_job_status_file l_abort_job_snapshot l_abort_job_scope; do
 			[ -n "$l_abort_job_id" ] || continue

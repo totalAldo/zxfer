@@ -519,8 +519,9 @@ test_remote_command_context_label_names_the_role() {
 	g_option_T_target_host="target.example doas"
 	# Each row: host spec|side|label. Without a side the -O/-T match decides.
 	while IFS='|' read -r l_host l_side l_expected_label; do
+		zxfer_get_remote_command_context_label_into_result "$l_host" "$l_side"
 		assertEquals "[$l_host|$l_side] label" "$l_expected_label" \
-			"$(zxfer_get_remote_command_context_label "$l_host" "$l_side")"
+			"$g_zxfer_remote_command_context_label_result"
 	done <<'EOF'
 origin.example|source|origin: origin.example
 target.example doas|destination|target: target.example doas
@@ -531,8 +532,9 @@ misc.example||remote: misc.example
 ||remote
 EOF
 	g_option_T_target_host=origin.example
+	zxfer_get_remote_command_context_label_into_result origin.example
 	assertEquals "A spec that is both -O and -T should be origin/target without a side." \
-		"origin/target: origin.example" "$(zxfer_get_remote_command_context_label origin.example)"
+		"origin/target: origin.example" "$g_zxfer_remote_command_context_label_result"
 	g_option_V_very_verbose=1
 	assertEquals "-V should print the labeled command, quoted once." \
 		"Running remote command [remote: misc.example doas]: '/bin/echo' 'hello'" \
@@ -828,6 +830,8 @@ zxfer_test_socket_dir_failure_case() {
 				g_zxfer_temp_root_candidate_result=$l_root/missing-parent
 		}
 		[ "$l_case" != foreign_answer ] || PATH="$l_root/fake-mktemp:$PATH"
+		[ "$l_case" != slash_suffix ] || PATH="$l_root/fake-mktemp-slash:$PATH"
+		[ "$l_case" != newline_suffix ] || PATH="$l_root/fake-mktemp-nl:$PATH"
 		zxfer_ensure_ssh_control_socket_dir
 		printf '%s=%s handle=<%s> dir=<%s>\n' "$l_case" "$?" \
 			"$g_zxfer_ssh_control_socket_short_dir" \
@@ -870,9 +874,11 @@ zxfer_test_open_failure_case() {
 test_ssh_control_socket_dir_fails_closed_without_a_short_private_directory() {
 	zxfer_test_remote_host_fixture_setup || return
 	l_root="$TEST_TMPDIR/socket_dir_failures"
-	mkdir -p "$l_root/fake-mktemp" "$l_root/default"
+	mkdir -p "$l_root/fake-mktemp" "$l_root/fake-mktemp-slash" "$l_root/fake-mktemp-nl" "$l_root/default"
 	printf '#!/bin/sh\nexit 0\n' >"$l_root/fake-mktemp/mktemp"
-	chmod 755 "$l_root/fake-mktemp/mktemp"
+	printf '#!/bin/sh\nprintf "%%s/zxfer.ssh.abc/nested\\n" "%s"\n' "$l_root/default" >"$l_root/fake-mktemp-slash/mktemp"
+	printf '#!/bin/sh\nprintf "%%s/zxfer.ssh.abc\\nextra\\n" "%s"\n' "$l_root/default" >"$l_root/fake-mktemp-nl/mktemp"
+	chmod 755 "$l_root/fake-mktemp/mktemp" "$l_root/fake-mktemp-slash/mktemp" "$l_root/fake-mktemp-nl/mktemp"
 	l_long_suffix=""
 	while [ "${#l_long_suffix}" -lt 150 ]; do
 		l_long_suffix="${l_long_suffix}xxxxxxxxxx"
@@ -882,18 +888,20 @@ test_ssh_control_socket_dir_fails_closed_without_a_short_private_directory() {
 	zxfer_is_ssh_control_socket_path_short_enough "/tmp/$l_long_suffix/ssh-origin.sock"
 	l_long_status=$?
 	l_output=$(
-		for l_case in no_run_root no_default_root mktemp_fails foreign_answer still_too_long; do
+		for l_case in no_run_root no_default_root mktemp_fails foreign_answer slash_suffix newline_suffix still_too_long; do
 			zxfer_test_socket_dir_failure_case "$l_case" "$l_root"
 		done
 	)
 
 	assertEquals "The sun_path check should accept a short socket path and reject a long one." \
 		"0 1" "$l_short_status $l_long_status"
-	assertEquals "Without a run root, a default temp root, a mktemp directory named from the template, or one short enough, no socket directory may be used." \
+	assertEquals "Without a run root, a default temp root, a direct mktemp directory named from the template, or one short enough, no socket directory may be used." \
 		"no_run_root=1 handle=<> dir=<>
 no_default_root=1 handle=<> dir=<>
 mktemp_fails=1 handle=<> dir=<>
 foreign_answer=1 handle=<> dir=<>
+slash_suffix=1 handle=<> dir=<>
+newline_suffix=1 handle=<> dir=<>
 still_too_long=1 handle=<> dir=<>" "$l_output"
 	assertEquals "A short directory still too long should be removed at once." \
 		"" "$(ls -A "$l_root/default")"
@@ -1095,6 +1103,99 @@ test_trace_zfs_command_for_role_redacts_stale_last_command_on_render_failure() {
 
 	assertEquals "Render failures during command tracing must overwrite stale last_command with [redacted]." \
 		"ws=<[redacted]> role=<[redacted]>" "$l_trace_out"
+}
+
+test_run_zfs_cmd_capturing_stderr_routes_very_verbose_trace_to_caller_stderr() {
+	zxfer_test_exec_fixture_setup
+	l_fake_ssh="$TEST_TMPDIR/capture_stderr_ssh"
+	cat >"$l_fake_ssh" <<'EOF'
+#!/bin/sh
+[ -z "${FAKE_CAP_STDOUT:-}" ] || printf '%s\n' "$FAKE_CAP_STDOUT"
+[ -z "${FAKE_CAP_STDERR:-}" ] || printf '%s\n' "$FAKE_CAP_STDERR" >&2
+exit "${FAKE_CAP_STATUS:-0}"
+EOF
+	chmod +x "$l_fake_ssh"
+
+	l_merge_trace="$TEST_TMPDIR/capture_merge.trace"
+	l_stderr_only_trace="$TEST_TMPDIR/capture_stderr_only.trace"
+	l_file_trace="$TEST_TMPDIR/capture_file.trace"
+	l_file_out="$TEST_TMPDIR/capture_file.out"
+	l_file_err="$TEST_TMPDIR/capture_file.err"
+	l_quiet_err="$TEST_TMPDIR/capture_quiet.err"
+	l_out=$(
+		g_cmd_ssh=$l_fake_ssh
+		g_target_cmd_zfs=/target/sbin/zfs
+		g_option_T_target_host=target.example
+		g_option_V_very_verbose=1
+		zxfer_refresh_remote_zfs_commands
+
+		FAKE_CAP_STDOUT="remote-stdout"
+		FAKE_CAP_STDERR="remote-stderr"
+		FAKE_CAP_STATUS=37
+		export FAKE_CAP_STDOUT FAKE_CAP_STDERR FAKE_CAP_STATUS
+		l_merge_status=0
+		l_merge_val=$(zxfer_run_zfs_cmd_capturing_stderr destination merge list -H backup/dst 2>"$l_merge_trace") ||
+			l_merge_status=$?
+		printf 'merge=%s|<%s>|suppress=%s\n' "$l_merge_status" "$l_merge_val" "${g_zxfer_ssh_suppress_echoV_command:-0}"
+
+		l_only_status=0
+		l_only_val=$(zxfer_run_zfs_cmd_capturing_stderr destination stderr-only list -H backup/dst 2>"$l_stderr_only_trace") ||
+			l_only_status=$?
+		printf 'only=%s|<%s>\n' "$l_only_status" "$l_only_val"
+
+		FAKE_CAP_STDOUT="clean-stdout"
+		FAKE_CAP_STDERR=""
+		FAKE_CAP_STATUS=0
+		zxfer_run_zfs_cmd_capturing_stderr destination "$l_file_err" list -H backup/dst >"$l_file_out" 2>"$l_file_trace"
+		printf 'file_clean=%s|out=<%s>|err_bytes=%s\n' "$?" "$(cat "$l_file_out")" "$(wc -c <"$l_file_err" | tr -d ' ')"
+
+		zxfer_invoke_ssh_shell_command_for_host target.example "'true'" destination quiet >/dev/null 2>"$l_quiet_err"
+		printf 'quiet_status=%s|quiet_bytes=%s\n' "$?" "$(wc -c <"$l_quiet_err" | tr -d ' ')"
+
+		zxfer_run_zfs_cmd_capturing_stderr destination "" list -H backup/dst
+		l_empty_status=$?
+		l_bad_role=$(zxfer_run_zfs_cmd_capturing_stderr unknown merge list -H backup/dst 2>&1)
+		printf 'empty=%s|bad=%s:%s\n' "$l_empty_status" "$?" "$l_bad_role"
+	)
+
+	assertEquals "Captured stderr modes must return pure command output, preserve status, and keep run_quiet silent under -V." \
+		"merge=37|<remote-stdout
+remote-stderr>|suppress=0
+only=37|<remote-stderr>
+file_clean=0|out=<clean-stdout>|err_bytes=0
+quiet_status=0|quiet_bytes=0
+empty=1|bad=1:zxfer: unknown zfs command role [unknown]." "$l_out"
+	for l_trace_file in "$l_merge_trace" "$l_stderr_only_trace" "$l_file_trace"; do
+		assertEquals "Each captured mode must emit exactly one -V remote command line on caller stderr ($l_trace_file)." \
+			1 "$(grep -c -F "Running remote command [target: target.example]: '$l_fake_ssh'" "$l_trace_file")"
+	done
+}
+
+test_ssh_control_socket_action_command_renders_only_for_very_verbose_exit() {
+	zxfer_test_remote_host_fixture_setup || return
+	l_stub_ssh="$TEST_TMPDIR/cmd_gate_ssh"
+	printf '#!/bin/sh\nexit 0\n' >"$l_stub_ssh"
+	chmod +x "$l_stub_ssh"
+	l_out=$(
+		g_cmd_ssh=$l_stub_ssh
+		g_option_V_very_verbose=1
+		zxfer_run_ssh_control_socket_action open origin.example "$TEST_TMPDIR/cmd_gate.sock" 2>/dev/null
+		wait "$g_zxfer_ssh_control_socket_action_pid" 2>/dev/null || :
+		printf 'open_V=<%s>\n' "$g_zxfer_ssh_control_socket_action_command"
+
+		g_option_V_very_verbose=0
+		zxfer_run_ssh_control_socket_action exit origin.example "$TEST_TMPDIR/cmd_gate.sock" 2>/dev/null
+		printf 'exit_quiet=<%s>\n' "$g_zxfer_ssh_control_socket_action_command"
+
+		g_option_V_very_verbose=1
+		zxfer_run_ssh_control_socket_action exit origin.example "$TEST_TMPDIR/cmd_gate.sock" 2>/dev/null
+		printf 'exit_V=<%s>\n' "$g_zxfer_ssh_control_socket_action_command"
+	)
+
+	assertEquals "g_zxfer_ssh_control_socket_action_command must be rendered only for exit under -V." \
+		"open_V=<>
+exit_quiet=<>
+exit_V=<'$l_stub_ssh' '-o' 'BatchMode=yes' '-o' 'StrictHostKeyChecking=yes' '-S' '$TEST_TMPDIR/cmd_gate.sock' '-O' 'exit' 'origin.example'>" "$l_out"
 }
 
 # shellcheck source=tests/shunit2/shunit2

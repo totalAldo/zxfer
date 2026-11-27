@@ -139,13 +139,20 @@ zxfer_spawn_background_shell() {
 
 	zxfer_init_background_shell_spawn_mode
 	g_zxfer_background_shell_scope=pgid
+	l_spawn_shell_restore_monitor=0
 	case $g_zxfer_background_shell_spawn_mode in
 	setsid)
 		set -- setsid /bin/sh -c "$l_spawn_shell_cmd" zxfer-job "$@"
 		;;
 	monitor)
 		set -- /bin/sh -c "$l_spawn_shell_cmd" zxfer-job "$@"
-		set -m
+		case $- in
+		*m*) ;;
+		*)
+			l_spawn_shell_restore_monitor=1
+			set -m
+			;;
+		esac
 		;;
 	*)
 		[ -r "$ZXFER_CLEANUP_CHILD_WRAPPER" ] || return 1
@@ -163,7 +170,7 @@ zxfer_spawn_background_shell() {
 		"$@" </dev/null &
 	fi
 	g_last_background_pid=$!
-	[ "$g_zxfer_background_shell_spawn_mode" != monitor ] || set +m
+	[ "$l_spawn_shell_restore_monitor" -eq 0 ] || set +m
 }
 
 # Purpose: Stop a fallback wrapper and its validated descendants.
@@ -223,14 +230,29 @@ zxfer_signal_background_shell() {
 		# Only a launcher still in zxfer's own process group is that case;
 		# any other holder of the PID is a recycled, unrelated process.
 		if kill -s 0 "$l_signal_shell_pid" 2>/dev/null &&
-			l_signal_shell_pgid=$(ps -o pgid= -p "$l_signal_shell_pid" 2>/dev/null) &&
-			l_signal_shell_own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) &&
-			zxfer_is_uint "${l_signal_shell_own_pgid##*[ ]}" &&
-			[ "${l_signal_shell_pgid##*[ ]}" = "${l_signal_shell_own_pgid##*[ ]}" ]; then
-			kill -s "$l_signal_shell_name" "$l_signal_shell_pid" 2>/dev/null || {
-				! kill -s 0 "$l_signal_shell_pid" 2>/dev/null || return 1
-			}
-			zxfer_signal_process_group "$l_signal_shell_name" "$l_signal_shell_pid" && return 0
+			l_signal_shell_pgid=$(LC_ALL=C ps -o pgid= -p "$l_signal_shell_pid" 2>/dev/null) &&
+			l_signal_shell_own_pgid=$(LC_ALL=C ps -o pgid= -p "$$" 2>/dev/null); then
+			while :; do
+				case $l_signal_shell_pgid in
+				' '* | "$ZXFER_TAB"*) l_signal_shell_pgid=${l_signal_shell_pgid#?} ;;
+				*' ' | *"$ZXFER_TAB") l_signal_shell_pgid=${l_signal_shell_pgid%?} ;;
+				*) break ;;
+				esac
+			done
+			while :; do
+				case $l_signal_shell_own_pgid in
+				' '* | "$ZXFER_TAB"*) l_signal_shell_own_pgid=${l_signal_shell_own_pgid#?} ;;
+				*' ' | *"$ZXFER_TAB") l_signal_shell_own_pgid=${l_signal_shell_own_pgid%?} ;;
+				*) break ;;
+				esac
+			done
+			if zxfer_is_uint "$l_signal_shell_own_pgid" &&
+				[ "$l_signal_shell_pgid" = "$l_signal_shell_own_pgid" ]; then
+				kill -s "$l_signal_shell_name" "$l_signal_shell_pid" 2>/dev/null || {
+					! kill -s 0 "$l_signal_shell_pid" 2>/dev/null || return 1
+				}
+				zxfer_signal_process_group "$l_signal_shell_name" "$l_signal_shell_pid" && return 0
+			fi
 		fi
 		! zxfer_signal_process_group 0 "$l_signal_shell_pid"
 		return "$?"

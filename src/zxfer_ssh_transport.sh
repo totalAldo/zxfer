@@ -42,8 +42,10 @@
 #   the per-role control sockets and their directory (with
 #   g_zxfer_ssh_control_socket_short_dir, the short directory this module
 #   creates and removes when the run root's socket path is too long), the
-#   control-socket action results, host-resolution results, and
-#   g_zxfer_remote_command_context_label_result. Rendered SSH argv uses
+#   control-socket action results, host-resolution results,
+#   g_zxfer_remote_command_context_label_result, and the internal
+#   g_zxfer_ssh_suppress_echoV_command flag used by
+#   zxfer_run_zfs_cmd_capturing_stderr. Rendered SSH argv uses
 #   quoting's g_zxfer_shell_command_result directly; the full remote
 #   command stays in the dispatch's l_ssh_* scratch.
 # reads globals: g_option_O_origin_host, g_option_T_target_host, g_cmd_zfs,
@@ -52,8 +54,8 @@
 # mutates caches: sets g_cmd_ssh on first remote use; opens the per-run ssh
 #   control masters (each open is in the runtime cleanup-PID registry until
 #   it finishes) and closes them at exit.
-# returns via stdout: remote command output and the remote context label
-#   wrapper; role command renderers publish g_zxfer_shell_command_result.
+# returns via stdout: remote command output; role command renderers publish
+#   g_zxfer_shell_command_result.
 
 ZXFER_SSH_CONTROL_SOCKET_PATH_MAX=104
 ZXFER_SSH_CONTROL_SOCKET_TEMP_SUFFIX_SAMPLE=".Mvij6x1tYLn6woxm"
@@ -75,16 +77,6 @@ zxfer_ssh_supports_control_sockets() {
 	"$g_cmd_ssh" -M -V >/dev/null 2>&1
 }
 
-# Purpose: Record whether the local ssh supports control sockets.
-# Usage: Called by zxfer_prepare_remote_host_connections after ssh is resolved;
-# sets g_ssh_supports_control_sockets to 1 or 0.
-zxfer_refresh_ssh_control_socket_support_state() {
-	g_ssh_supports_control_sockets=0
-	if zxfer_ssh_supports_control_sockets; then
-		g_ssh_supports_control_sockets=1
-	fi
-}
-
 # Purpose: Reset all per-run ssh transport state before a new session.
 # Usage: Called by zxfer_reset_session_state; clears cached policy, host specs,
 # control-socket paths, and support state without running ssh.
@@ -96,6 +88,7 @@ zxfer_reset_ssh_transport_state() {
 	g_zxfer_ssh_shell_host_result=""
 	g_zxfer_ssh_shell_context_error_result=""
 	g_zxfer_remote_command_context_label_result=""
+	g_zxfer_ssh_suppress_echoV_command=0
 	zxfer_reset_ssh_control_socket_action_state
 
 	# -O/-T host specs parsed by zxfer_refresh_remote_zfs_commands.
@@ -319,14 +312,6 @@ zxfer_get_remote_command_context_label_into_result() {
 	fi
 }
 
-# Purpose: Label a remote command with its role and host spec for -V output.
-# Usage: zxfer_get_remote_command_context_label HOST_SPEC [source|destination|other];
-# prints "origin: HOST", "target: HOST", "origin/target: HOST" or "remote: HOST".
-zxfer_get_remote_command_context_label() {
-	zxfer_get_remote_command_context_label_into_result "$@"
-	printf '%s\n' "$g_zxfer_remote_command_context_label_result"
-}
-
 # Purpose: Print one remote command under -V.
 # Usage: zxfer_echoV_remote_command_for_host HOST_SPEC PROFILE_SIDE ARG...;
 # renders nothing unless -V is on.
@@ -343,12 +328,16 @@ zxfer_echoV_remote_command_for_host() {
 }
 
 # Purpose: Build the ssh argv for one host spec and remote shell command, then
-# run it, render it or record it.
-# Usage: zxfer_ssh_shell_command_for_host run|render|record HOST_SPEC
-# REMOTE_CMD [PROFILE_SIDE]. render publishes g_zxfer_shell_command_result;
-# record only stores the argv as the report's last command, for a caller that
-# runs it in a subshell; run returns the ssh status. Policy, ssh lookup and
-# host-spec failures throw; an empty host or command returns 1.
+# run it, render it, record it, or emit its -V trace.
+# Usage: zxfer_ssh_shell_command_for_host run|run_quiet|render|record|echoV
+# HOST_SPEC REMOTE_CMD [PROFILE_SIDE]. render publishes
+# g_zxfer_shell_command_result; record only stores the argv as the report's
+# last command, for a caller that runs it in a subshell; echoV only prints
+# the -V trace to stderr; run_quiet executes ssh without printing the -V
+# trace (for callers that already logged it); run prints the -V trace unless
+# suppressed by zxfer_run_zfs_cmd_capturing_stderr and returns the ssh status.
+# Policy, ssh lookup and host-spec failures throw; an empty host or command
+# returns 1.
 zxfer_ssh_shell_command_for_host() {
 	l_ssh_mode=$1
 	l_ssh_host_spec=$2
@@ -356,8 +345,11 @@ zxfer_ssh_shell_command_for_host() {
 	l_ssh_profile_side=${4:-}
 
 	[ -n "$l_ssh_remote_cmd" ] || return 1
-	[ "$l_ssh_mode" != run ] ||
+	case $l_ssh_mode in
+	run | run_quiet)
 		zxfer_profile_record_ssh_invocation "$l_ssh_host_spec" "$l_ssh_profile_side"
+		;;
+	esac
 	zxfer_prepare_ssh_transport ||
 		zxfer_throw_error "$g_zxfer_ssh_transport_error"
 	zxfer_resolve_ssh_host_spec "$l_ssh_host_spec" || {
@@ -390,17 +382,32 @@ zxfer_ssh_shell_command_for_host() {
 		zxfer_render_shell_command_from_argv "$@"
 		return 0
 	fi
+	if [ "$l_ssh_mode" = echoV ]; then
+		zxfer_echoV_remote_command_for_host "$l_ssh_host_spec" "$l_ssh_profile_side" "$@"
+		return 0
+	fi
 	zxfer_record_last_command_argv "$@"
-	[ "$l_ssh_mode" = run ] || return 0
-	zxfer_echoV_remote_command_for_host "$l_ssh_host_spec" "$l_ssh_profile_side" "$@"
+	case $l_ssh_mode in
+	run)
+		[ "${g_zxfer_ssh_suppress_echoV_command:-0}" -eq 1 ] ||
+			zxfer_echoV_remote_command_for_host "$l_ssh_host_spec" "$l_ssh_profile_side" "$@"
+		;;
+	run_quiet) ;;
+	*) return 0 ;;
+	esac
 	"$@"
 }
 
 # Purpose: Run a shell-ready remote command over ssh.
 # Usage: zxfer_invoke_ssh_shell_command_for_host HOST_SPEC REMOTE_CMD
-# [PROFILE_SIDE]; REMOTE_CMD is already quoted for the remote shell and
-# travels as one ssh argument after any wrapper tokens.
+# [PROFILE_SIDE] [quiet]; REMOTE_CMD is already quoted for the remote shell
+# and travels as one ssh argument after any wrapper tokens. Pass "quiet" when
+# the caller already logged the remote invocation under -V and captures stderr.
 zxfer_invoke_ssh_shell_command_for_host() {
+	if [ "${4:-}" = quiet ]; then
+		zxfer_ssh_shell_command_for_host run_quiet "$1" "$2" "${3:-}"
+		return
+	fi
 	zxfer_ssh_shell_command_for_host run "$@"
 }
 
@@ -511,17 +518,18 @@ zxfer_publish_prepared_ssh_shell_command_for_host_or_throw() {
 # ZFS COMMANDS BY ROLE
 ################################################################################
 
-# Purpose: Select one role's endpoint and run or render its zfs command.
-# Usage: zxfer_zfs_command_for_role run|render source|destination|local ARG...;
-# run preserves direct local argv execution and returns the zfs/ssh status;
-# render publishes g_zxfer_shell_command_result without recording a call.
+# Purpose: Select one role's endpoint and run, render, or trace its zfs command.
+# Usage: zxfer_zfs_command_for_role run|render|echoV source|destination|local
+# ARG...; run preserves direct local argv execution and returns the zfs/ssh
+# status; render publishes g_zxfer_shell_command_result without recording a
+# call; echoV emits only the -V remote command trace on stderr.
 # The endpoint and command live only in this dispatch; no prepared role
 # channel is published for another helper to consume.
 zxfer_zfs_command_for_role() {
 	l_zfs_dispatch_mode=$1
 	l_zfs_dispatch_side=$2
 	case $l_zfs_dispatch_mode in
-	run | render) ;;
+	run | render | echoV) ;;
 	*) return 1 ;;
 	esac
 	case $2 in
@@ -551,6 +559,7 @@ zxfer_zfs_command_for_role() {
 			zxfer_render_shell_command_from_argv "$g_cmd_zfs" "$@"
 			return 0
 		fi
+		[ "$l_zfs_dispatch_mode" = run ] || return 0
 		zxfer_record_last_command_argv "$g_cmd_zfs" "$@"
 		"$g_cmd_zfs" "$@"
 		return
@@ -593,6 +602,63 @@ zxfer_run_source_zfs_cmd() {
 # Usage: zxfer_run_destination_zfs_cmd ARG...
 zxfer_run_destination_zfs_cmd() {
 	zxfer_run_zfs_cmd_for_role destination "$@"
+}
+
+# Purpose: Run zfs for one role while capturing command stderr without letting
+# -V "Running remote command [...]" traces contaminate the captured stream.
+# Usage: zxfer_run_zfs_cmd_capturing_stderr source|destination|local
+# merge|stderr-only|STDERR_FILE ARG...; "merge" routes command stderr to
+# stdout (2>&1), "stderr-only" discards stdout and sends stderr to stdout
+# (2>&1 >/dev/null), and any other non-empty target writes command stderr to
+# STDERR_FILE (2>|STDERR_FILE). Emits the -V remote command line to the
+# caller's unredirected stderr first, then delegates to the role runner so
+# unit-test stubs and exit statuses stay intact.
+zxfer_run_zfs_cmd_capturing_stderr() {
+	l_capture_role=${1:-}
+	l_capture_stderr=${2:-}
+	[ "$#" -ge 3 ] && [ -n "$l_capture_stderr" ] || return 1
+	shift 2
+
+	case $l_capture_role in
+	source)
+		l_capture_host=${g_option_O_origin_host:-}
+		l_capture_runner=zxfer_run_source_zfs_cmd
+		;;
+	destination)
+		l_capture_host=${g_option_T_target_host:-}
+		l_capture_runner=zxfer_run_destination_zfs_cmd
+		;;
+	local)
+		l_capture_host=""
+		l_capture_runner=zxfer_run_zfs_cmd_for_role
+		set -- local "$@"
+		;;
+	*)
+		printf 'zxfer: unknown zfs command role [%s].\n' "$l_capture_role" >&2
+		return 1
+		;;
+	esac
+
+	if [ "${g_option_V_very_verbose:-0}" -eq 1 ] && [ -n "$l_capture_host" ] &&
+		zxfer_prepare_ssh_transport &&
+		zxfer_resolve_ssh_host_spec "$l_capture_host" &&
+		[ -n "$g_zxfer_ssh_shell_host_result" ]; then
+		zxfer_zfs_command_for_role echoV "$l_capture_role" "$@"
+	fi
+
+	l_capture_prev_suppress=${g_zxfer_ssh_suppress_echoV_command:-0}
+	g_zxfer_ssh_suppress_echoV_command=1
+	l_capture_status=0
+	case $l_capture_stderr in
+	merge) "$l_capture_runner" "$@" 2>&1 || l_capture_status=$? ;;
+	stderr-only)
+		# shellcheck disable=SC2069 # Capture stderr on stdout and discard stdout.
+		"$l_capture_runner" "$@" 2>&1 >/dev/null || l_capture_status=$?
+		;;
+	*) "$l_capture_runner" "$@" 2>|"$l_capture_stderr" || l_capture_status=$? ;;
+	esac
+	g_zxfer_ssh_suppress_echoV_command=$l_capture_prev_suppress
+	return "$l_capture_status"
 }
 
 # Purpose: Trace a role's zfs command under -V or unsafe failure-report mode
@@ -659,9 +725,14 @@ zxfer_ensure_ssh_control_socket_dir() {
 	l_socket_short_dir=$(umask 077 && exec mktemp -d \
 		"$g_zxfer_temp_root_candidate_result/zxfer.ssh.XXXXXX" 2>/dev/null) ||
 		return 1
-	# Only a name from the template is ours; anything else is left alone.
+	# Only a direct child name from the template is ours; anything else is left alone.
 	case $l_socket_short_dir in
-	"$g_zxfer_temp_root_candidate_result"/zxfer.ssh.?*) ;;
+	"$g_zxfer_temp_root_candidate_result"/zxfer.ssh.?*)
+		l_socket_short_suffix=${l_socket_short_dir#"$g_zxfer_temp_root_candidate_result"/zxfer.ssh.}
+		case $l_socket_short_suffix in
+		*/* | *"$ZXFER_LF"*) return 1 ;;
+		esac
+		;;
 	*) return 1 ;;
 	esac
 	if ! zxfer_is_ssh_control_socket_path_short_enough \
@@ -741,10 +812,11 @@ zxfer_emit_ssh_control_socket_action_failure_message() {
 # Usage: zxfer_run_ssh_control_socket_action open|exit HOST_SPEC SOCKET.
 # open starts `ssh -M -fN` in the background and publishes its PID in
 # g_zxfer_ssh_control_socket_action_pid for the caller to wait on. exit
-# captures ssh stderr in g_zxfer_ssh_control_socket_action_stderr and sets
-# g_zxfer_ssh_control_socket_action_result to closed, stale (dead master) or
-# error. An invalid policy or host spec is an error with the diagnostic as
-# its stderr.
+# captures ssh stderr in g_zxfer_ssh_control_socket_action_stderr, publishes
+# the rendered command in g_zxfer_ssh_control_socket_action_command under -V,
+# and sets g_zxfer_ssh_control_socket_action_result to closed, stale (dead
+# master) or error. An invalid policy or host spec is an error with the
+# diagnostic as its stderr.
 zxfer_run_ssh_control_socket_action() {
 	l_socket_action=$1
 	l_socket_host_spec=$2
@@ -778,8 +850,6 @@ zxfer_run_ssh_control_socket_action() {
 			-O exit $g_zxfer_ssh_host_spec_tokens_result
 	fi
 	zxfer_split_end
-	zxfer_render_shell_command_from_argv "$@"
-	g_zxfer_ssh_control_socket_action_command=$g_zxfer_shell_command_result
 	zxfer_record_last_command_argv "$@"
 
 	if [ "$l_socket_action" = open ]; then
@@ -793,6 +863,10 @@ zxfer_run_ssh_control_socket_action() {
 		return 0
 	fi
 
+	if [ "${g_option_V_very_verbose:-0}" -eq 1 ]; then
+		zxfer_render_shell_command_from_argv "$@"
+		g_zxfer_ssh_control_socket_action_command=$g_zxfer_shell_command_result
+	fi
 	if g_zxfer_ssh_control_socket_action_stderr=$("$@" 2>&1 >/dev/null); then
 		g_zxfer_ssh_control_socket_action_result=closed
 		return 0
@@ -922,7 +996,8 @@ zxfer_close_ssh_control_socket_for_role() {
 	[ -n "$l_close_host_spec" ] && [ -n "$l_close_socket" ] || return 0
 
 	zxfer_run_ssh_control_socket_action exit "$l_close_host_spec" "$l_close_socket" || :
-	zxfer_echoV "Closing $1 ssh control socket: $g_zxfer_ssh_control_socket_action_command"
+	[ "${g_option_V_very_verbose:-0}" -ne 1 ] ||
+		zxfer_echoV "Closing $1 ssh control socket: $g_zxfer_ssh_control_socket_action_command"
 	case $g_zxfer_ssh_control_socket_action_result in
 	closed | stale) ;;
 	*)

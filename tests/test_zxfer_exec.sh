@@ -303,5 +303,79 @@ missing=1 pid=<>
 kill_missing=1" "$output"
 }
 
+test_signal_background_shell_uses_c_locale_and_trims_pgid_whitespace() {
+	l_ps_dir="$TEST_TMPDIR/pgid-locale-ps"
+	l_ps_log="$TEST_TMPDIR/pgid-locale-ps.log"
+	mkdir -p "$l_ps_dir"
+	: >"$l_ps_log"
+	cat >"$l_ps_dir/ps" <<EOF
+#!/bin/sh
+printf 'LC_ALL=%s args=%s\n' "\${LC_ALL:-unset}" "\$*" >>"$l_ps_log"
+printf '\t  777 \t \n'
+EOF
+	chmod +x "$l_ps_dir/ps"
+
+	l_out=$(
+		PATH="$l_ps_dir:$PATH"
+		LC_ALL=fr_FR
+		export LC_ALL
+		l_launcher_live=1
+		kill() {
+			if [ "$1" != -s ]; then
+				return 1
+			fi
+			[ "$2" != 0 ] || return "$((1 - l_launcher_live))"
+			printf 'launcher=%s\n' "$2"
+			l_launcher_live=0
+			return 0
+		}
+		zxfer_signal_background_shell 12345 pgid KILL
+		printf 'status=%s\n' "$?"
+	)
+
+	assertEquals "PGID comparison must trim leading/trailing spaces and tabs and signal the matching launcher." \
+		"launcher=KILL
+status=0" "$l_out"
+	assertEquals "Both ps -o pgid= probes must run under LC_ALL=C." \
+		2 "$(grep -c '^LC_ALL=C args=-o pgid= -p ' "$l_ps_log")"
+}
+
+test_spawn_background_shell_preserves_preexisting_monitor_mode() {
+	zxfer_test_send_job_fixture_setup
+	if ! (set -m 2>/dev/null); then
+		startSkipping
+		assertTrue "Shell does not allow set -m in a subshell; skipped." true
+		endSkipping
+		return 0
+	fi
+	l_out=$(
+		(
+			g_zxfer_background_shell_spawn_mode=monitor
+			set +m
+			zxfer_spawn_background_shell 'exit 0' /dev/null /dev/null
+			wait "$g_last_background_pid" 2>/dev/null || :
+			if [ "${-#*m}" != "$-" ]; then
+				l_after_off=on
+			else
+				l_after_off=off
+			fi
+
+			set -m
+			zxfer_spawn_background_shell 'exit 0' /dev/null /dev/null
+			wait "$g_last_background_pid" 2>/dev/null || :
+			if [ "${-#*m}" != "$-" ]; then
+				l_after_on=on
+			else
+				l_after_on=off
+			fi
+			set +m
+			printf 'from_off=%s from_on=%s\n' "$l_after_off" "$l_after_on"
+		) 2>/dev/null
+	)
+
+	assertEquals "Monitor-mode spawning must only turn -m off if it enabled -m itself." \
+		"from_off=off from_on=on" "$l_out"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"
