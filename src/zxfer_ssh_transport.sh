@@ -44,9 +44,9 @@
 #   creates and removes when the run root's socket path is too long), the
 #   control-socket action results, host-resolution results,
 #   g_zxfer_remote_command_context_label_result, and the internal
-#   g_zxfer_ssh_suppress_echoV_command flag used by
-#   zxfer_run_zfs_cmd_capturing_stderr. Rendered SSH argv uses
-#   quoting's g_zxfer_shell_command_result directly; the full remote
+#   g_zxfer_ssh_echoV_to_fd6 flag used by zxfer_run_zfs_cmd_capturing_stderr
+#   to route -V remote command traces to caller stderr on FD 6. Rendered SSH
+#   argv uses quoting's g_zxfer_shell_command_result directly; the full remote
 #   command stays in the dispatch's l_ssh_* scratch.
 # reads globals: g_option_O_origin_host, g_option_T_target_host, g_cmd_zfs,
 #   g_origin_cmd_zfs, g_target_cmd_zfs, ZXFER_SSH_*, and runtime state.
@@ -88,7 +88,7 @@ zxfer_reset_ssh_transport_state() {
 	g_zxfer_ssh_shell_host_result=""
 	g_zxfer_ssh_shell_context_error_result=""
 	g_zxfer_remote_command_context_label_result=""
-	g_zxfer_ssh_suppress_echoV_command=0
+	g_zxfer_ssh_echoV_to_fd6=0
 	zxfer_reset_ssh_control_socket_action_state
 
 	# -O/-T host specs parsed by zxfer_refresh_remote_zfs_commands.
@@ -314,7 +314,8 @@ zxfer_get_remote_command_context_label_into_result() {
 
 # Purpose: Print one remote command under -V.
 # Usage: zxfer_echoV_remote_command_for_host HOST_SPEC PROFILE_SIDE ARG...;
-# renders nothing unless -V is on.
+# renders nothing unless -V is on. Routes to caller stderr on FD 6 while
+# zxfer_run_zfs_cmd_capturing_stderr captures command stderr.
 zxfer_echoV_remote_command_for_host() {
 	[ "${g_option_V_very_verbose:-0}" -eq 1 ] || return 0
 	l_echo_remote_host_spec=$1
@@ -324,18 +325,23 @@ zxfer_echoV_remote_command_for_host() {
 	zxfer_get_remote_command_context_label_into_result \
 		"$l_echo_remote_host_spec" "$l_echo_remote_profile_side"
 	zxfer_render_command_for_report_into_result "" "$@" || :
-	zxfer_echoV "Running remote command [$g_zxfer_remote_command_context_label_result]: $g_zxfer_rendered_report_command_result"
+	l_echo_remote_line="Running remote command [$g_zxfer_remote_command_context_label_result]: $g_zxfer_rendered_report_command_result"
+	if [ "${g_zxfer_ssh_echoV_to_fd6:-0}" -eq 1 ]; then
+		zxfer_echoV "$l_echo_remote_line" 2>&6
+	else
+		zxfer_echoV "$l_echo_remote_line"
+	fi
 }
 
 # Purpose: Build the ssh argv for one host spec and remote shell command, then
-# run it, render it, record it, or emit its -V trace.
-# Usage: zxfer_ssh_shell_command_for_host run|run_quiet|render|record|echoV
+# run it, render it, or record it.
+# Usage: zxfer_ssh_shell_command_for_host run|run_quiet|render|record
 # HOST_SPEC REMOTE_CMD [PROFILE_SIDE]. render publishes
 # g_zxfer_shell_command_result; record only stores the argv as the report's
-# last command, for a caller that runs it in a subshell; echoV only prints
-# the -V trace to stderr; run_quiet executes ssh without printing the -V
-# trace (for callers that already logged it); run prints the -V trace unless
-# suppressed by zxfer_run_zfs_cmd_capturing_stderr and returns the ssh status.
+# last command, for a caller that runs it in a subshell; run_quiet executes
+# ssh without printing the -V trace (for callers that already logged it); run
+# prints the -V trace (via FD 6 inside zxfer_run_zfs_cmd_capturing_stderr,
+# closing FD 6 before execing ssh) and returns the ssh status.
 # Policy, ssh lookup and host-spec failures throw; an empty host or command
 # returns 1.
 zxfer_ssh_shell_command_for_host() {
@@ -382,20 +388,19 @@ zxfer_ssh_shell_command_for_host() {
 		zxfer_render_shell_command_from_argv "$@"
 		return 0
 	fi
-	if [ "$l_ssh_mode" = echoV ]; then
-		zxfer_echoV_remote_command_for_host "$l_ssh_host_spec" "$l_ssh_profile_side" "$@"
-		return 0
-	fi
 	zxfer_record_last_command_argv "$@"
 	case $l_ssh_mode in
 	run)
-		[ "${g_zxfer_ssh_suppress_echoV_command:-0}" -eq 1 ] ||
-			zxfer_echoV_remote_command_for_host "$l_ssh_host_spec" "$l_ssh_profile_side" "$@"
+		zxfer_echoV_remote_command_for_host "$l_ssh_host_spec" "$l_ssh_profile_side" "$@"
 		;;
 	run_quiet) ;;
 	*) return 0 ;;
 	esac
-	"$@"
+	if [ "${g_zxfer_ssh_echoV_to_fd6:-0}" -eq 1 ]; then
+		"$@" 6>&-
+	else
+		"$@"
+	fi
 }
 
 # Purpose: Run a shell-ready remote command over ssh.
@@ -518,18 +523,17 @@ zxfer_publish_prepared_ssh_shell_command_for_host_or_throw() {
 # ZFS COMMANDS BY ROLE
 ################################################################################
 
-# Purpose: Select one role's endpoint and run, render, or trace its zfs command.
-# Usage: zxfer_zfs_command_for_role run|render|echoV source|destination|local
+# Purpose: Select one role's endpoint and run or render its zfs command.
+# Usage: zxfer_zfs_command_for_role run|render source|destination|local
 # ARG...; run preserves direct local argv execution and returns the zfs/ssh
 # status; render publishes g_zxfer_shell_command_result without recording a
-# call; echoV emits only the -V remote command trace on stderr.
-# The endpoint and command live only in this dispatch; no prepared role
+# call. The endpoint and command live only in this dispatch; no prepared role
 # channel is published for another helper to consume.
 zxfer_zfs_command_for_role() {
 	l_zfs_dispatch_mode=$1
 	l_zfs_dispatch_side=$2
 	case $l_zfs_dispatch_mode in
-	run | render | echoV) ;;
+	run | render) ;;
 	*) return 1 ;;
 	esac
 	case $2 in
@@ -559,19 +563,51 @@ zxfer_zfs_command_for_role() {
 			zxfer_render_shell_command_from_argv "$g_cmd_zfs" "$@"
 			return 0
 		fi
-		[ "$l_zfs_dispatch_mode" = run ] || return 0
 		zxfer_record_last_command_argv "$g_cmd_zfs" "$@"
 		"$g_cmd_zfs" "$@"
 		return
 	fi
 
 	zxfer_render_shell_command_from_argv "$l_zfs_dispatch_zfs" "$@"
+	l_zfs_dispatch_use_sh_c=0
 	case $g_zxfer_shell_command_result in
 	*"$ZXFER_LF"*)
 		# csh/tcsh would end a command at a raw newline in an argument.
-		zxfer_build_remote_sh_c_command "$g_zxfer_shell_command_result"
+		l_zfs_dispatch_use_sh_c=1
+		;;
+	*)
+		# illumos csh rejects any single word past its 1020-byte lexical limit;
+		# only inspect individual arguments when the full command exceeds 768 bytes.
+		l_zfs_dispatch_lc_all_set=${LC_ALL+1}
+		l_zfs_dispatch_lc_all=${LC_ALL-}
+		LC_ALL=C
+		case $g_zxfer_shell_command_result in
+		$ZXFER_SSH_SH_C_PLAIN_PATTERN?*)
+			for l_zfs_dispatch_arg in "$l_zfs_dispatch_zfs" "$@"; do
+				case $l_zfs_dispatch_arg in
+				*\'*)
+					zxfer_escape_single_quotes_into_result "$l_zfs_dispatch_arg"
+					l_zfs_dispatch_arg=$g_zxfer_escaped_single_quotes_result
+					;;
+				esac
+				case $l_zfs_dispatch_arg in
+				$ZXFER_SSH_SH_C_PLAIN_PATTERN?*)
+					l_zfs_dispatch_use_sh_c=1
+					break
+					;;
+				esac
+			done
+			;;
+		esac
+		if [ -n "$l_zfs_dispatch_lc_all_set" ]; then
+			LC_ALL=$l_zfs_dispatch_lc_all
+		else
+			unset LC_ALL
+		fi
 		;;
 	esac
+	[ "$l_zfs_dispatch_use_sh_c" -eq 0 ] ||
+		zxfer_build_remote_sh_c_command "$g_zxfer_shell_command_result"
 	zxfer_ssh_shell_command_for_host "$l_zfs_dispatch_mode" "$l_zfs_dispatch_host" \
 		"$g_zxfer_shell_command_result" "$l_zfs_dispatch_side"
 }
@@ -610,9 +646,9 @@ zxfer_run_destination_zfs_cmd() {
 # merge|stderr-only|STDERR_FILE ARG...; "merge" routes command stderr to
 # stdout (2>&1), "stderr-only" discards stdout and sends stderr to stdout
 # (2>&1 >/dev/null), and any other non-empty target writes command stderr to
-# STDERR_FILE (2>|STDERR_FILE). Emits the -V remote command line to the
-# caller's unredirected stderr first, then delegates to the role runner so
-# unit-test stubs and exit statuses stay intact.
+# STDERR_FILE (2>|STDERR_FILE). For outermost remote -V captures, routes the
+# -V remote command trace to caller stderr on FD 6 while delegating to the
+# role runner so unit-test stubs and exit statuses stay intact.
 zxfer_run_zfs_cmd_capturing_stderr() {
 	l_capture_role=${1:-}
 	l_capture_stderr=${2:-}
@@ -639,26 +675,27 @@ zxfer_run_zfs_cmd_capturing_stderr() {
 		;;
 	esac
 
+	# Open FD 6 only for the outermost remote -V capture: FDs 3/7/8/9 are
+	# reserved by the test, coverage, and microbench harnesses, and local or
+	# non-verbose runs touch no extra FD. Nested captures reuse the outer FD 6.
 	if [ "${g_option_V_very_verbose:-0}" -eq 1 ] && [ -n "$l_capture_host" ] &&
-		zxfer_prepare_ssh_transport &&
-		zxfer_resolve_ssh_host_spec "$l_capture_host" &&
-		[ -n "$g_zxfer_ssh_shell_host_result" ]; then
-		zxfer_zfs_command_for_role echoV "$l_capture_role" "$@"
+		[ "${g_zxfer_ssh_echoV_to_fd6:-0}" -ne 1 ]; then
+		g_zxfer_ssh_echoV_to_fd6=1
+		l_capture_status=0
+		{ zxfer_run_zfs_cmd_capturing_stderr "$l_capture_role" "$l_capture_stderr" "$@"; } 6>&2 ||
+			l_capture_status=$?
+		g_zxfer_ssh_echoV_to_fd6=0
+		return "$l_capture_status"
 	fi
 
-	l_capture_prev_suppress=${g_zxfer_ssh_suppress_echoV_command:-0}
-	g_zxfer_ssh_suppress_echoV_command=1
-	l_capture_status=0
 	case $l_capture_stderr in
-	merge) "$l_capture_runner" "$@" 2>&1 || l_capture_status=$? ;;
+	merge) "$l_capture_runner" "$@" 2>&1 ;;
 	stderr-only)
 		# shellcheck disable=SC2069 # Capture stderr on stdout and discard stdout.
-		"$l_capture_runner" "$@" 2>&1 >/dev/null || l_capture_status=$?
+		"$l_capture_runner" "$@" 2>&1 >/dev/null
 		;;
-	*) "$l_capture_runner" "$@" 2>|"$l_capture_stderr" || l_capture_status=$? ;;
+	*) "$l_capture_runner" "$@" 2>|"$l_capture_stderr" ;;
 	esac
-	g_zxfer_ssh_suppress_echoV_command=$l_capture_prev_suppress
-	return "$l_capture_status"
 }
 
 # Purpose: Trace a role's zfs command under -V or unsafe failure-report mode
@@ -696,7 +733,19 @@ zxfer_trace_zfs_command_for_role() {
 # Usage: zxfer_is_ssh_control_socket_path_short_enough PATH.
 zxfer_is_ssh_control_socket_path_short_enough() {
 	l_socket_temp_listener_path="$1$ZXFER_SSH_CONTROL_SOCKET_TEMP_SUFFIX_SAMPLE"
-	[ "${#l_socket_temp_listener_path}" -lt "$ZXFER_SSH_CONTROL_SOCKET_PATH_MAX" ]
+	l_socket_path_lc_all_set=${LC_ALL+1}
+	l_socket_path_lc_all=${LC_ALL-}
+	# Measure bytes rather than locale characters against sun_path's 104-byte limit.
+	LC_ALL=C
+	l_socket_path_status=0
+	[ "${#l_socket_temp_listener_path}" -lt "$ZXFER_SSH_CONTROL_SOCKET_PATH_MAX" ] ||
+		l_socket_path_status=1
+	if [ -n "$l_socket_path_lc_all_set" ]; then
+		LC_ALL=$l_socket_path_lc_all
+	else
+		unset LC_ALL
+	fi
+	return "$l_socket_path_status"
 }
 
 # Purpose: Create the per-run control-socket directory: the private run root,

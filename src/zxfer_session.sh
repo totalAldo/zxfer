@@ -130,12 +130,15 @@ zxfer_trap_exit() {
 	# get the exit status of the last command
 	g_zxfer_trap_exit_status=$?
 	# A signal can land while zxfer_create_runtime_artifact_file holds umask
-	# 077 and noclobber, between zxfer_split_begin and zxfer_split_end, or
-	# while monitor-mode spawning holds set -m. Put the run's shell modes
-	# back before any cleanup or report write.
+	# 077 and noclobber, between zxfer_split_begin and zxfer_split_end, while
+	# monitor-mode spawning holds set -m, or while
+	# zxfer_run_zfs_cmd_capturing_stderr routes -V traces through FD 6. Put
+	# the run's shell modes and trace routing back before any cleanup or
+	# report write.
 	set +C +f
 	set +m 2>/dev/null || :
 	IFS=" $ZXFER_TAB$ZXFER_LF"
+	g_zxfer_ssh_echoV_to_fd6=0
 	case ${g_zxfer_run_umask:-} in
 	'' | *[!01234567]*) ;;
 	*) umask "$g_zxfer_run_umask" ;;

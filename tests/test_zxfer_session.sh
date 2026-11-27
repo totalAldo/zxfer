@@ -717,8 +717,9 @@ test_zxfer_trap_exit_restores_shell_modes_before_mirroring_the_report() {
 			case $- in *C*) l_noclobber=on ;; *) l_noclobber=off ;; esac
 			case $- in *f*) l_noglob=on ;; *) l_noglob=off ;; esac
 			case $- in *m*) l_monitor=on ;; *) l_monitor=off ;; esac
-			printf 'noclobber=%s noglob=%s monitor=%s umask=%s ifs=%s\n' "$l_noclobber" \
+			printf 'noclobber=%s noglob=%s monitor=%s umask=%s ifs=%s fd6=%s\n' "$l_noclobber" \
 				"$l_noglob" "$l_monitor" "$(umask)" "$(printf '%s' "$IFS" | od -An -tx1 | tr -d ' \n')" \
+				"${g_zxfer_ssh_echoV_to_fd6:-unset}" \
 				>"$modes_file"
 		}
 		g_zxfer_failure_class="runtime"
@@ -726,6 +727,7 @@ test_zxfer_trap_exit_restores_shell_modes_before_mirroring_the_report() {
 		g_zxfer_failure_message="interrupted mid-allocation"
 		g_zxfer_services_to_restart=""
 		g_zxfer_run_umask=0027
+		g_zxfer_ssh_echoV_to_fd6=1
 		umask 077
 		set -C -f
 		set -m 2>/dev/null || :
@@ -736,8 +738,8 @@ test_zxfer_trap_exit_restores_shell_modes_before_mirroring_the_report() {
 	chmod 700 "$log_dir"
 
 	assertEquals "zxfer_trap_exit should keep the failing status." 1 "$status"
-	assertEquals "zxfer_trap_exit should restore noclobber, noglob, monitor mode, the run umask and default IFS before reporting." \
-		"noclobber=off noglob=off monitor=off umask=0027 ifs=20090a" "$(cat "$modes_file")"
+	assertEquals "zxfer_trap_exit should restore noclobber, noglob, monitor mode, the run umask, default IFS, and FD 6 routing before reporting." \
+		"noclobber=off noglob=off monitor=off umask=0027 ifs=20090a fd6=0" "$(cat "$modes_file")"
 	assertContains "The failure report should reach ZXFER_ERROR_LOG after an interrupted allocation." \
 		"$(cat "$log_path")" "interrupted mid-allocation"
 	assertContains "Mirroring should keep the earlier log contents." \

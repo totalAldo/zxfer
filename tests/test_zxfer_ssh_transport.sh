@@ -148,6 +148,86 @@ sharenfs=rw]
 [backup/dst]" "$(cat "$ZXFER_TEST_ZFS_ARGV_LOG")"
 }
 
+test_zfs_command_for_role_chunks_long_single_args_but_keeps_multi_arg_commands_plain() {
+	zxfer_test_exec_fixture_setup
+	l_x32='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+	l_x256=$l_x32$l_x32$l_x32$l_x32$l_x32$l_x32$l_x32$l_x32
+	l_x800=$l_x256$l_x256$l_x256$l_x32
+	l_mb_char=$(printf '\342\202\254')
+	l_mb8=$l_mb_char$l_mb_char$l_mb_char$l_mb_char$l_mb_char$l_mb_char$l_mb_char$l_mb_char
+	l_mb64=$l_mb8$l_mb8$l_mb8$l_mb8$l_mb8$l_mb8$l_mb8$l_mb8
+	# 264 UTF-8 3-byte chars = 792 bytes (>768) while character length is <768.
+	l_mb264=$l_mb64$l_mb64$l_mb64$l_mb64$l_mb8
+	l_q8="''''''''"
+	l_q64=$l_q8$l_q8$l_q8$l_q8$l_q8$l_q8$l_q8$l_q8
+	# 256 single quotes = 1024 escaped bytes (>768) while raw length is 256.
+	l_q256=$l_q64$l_q64$l_q64$l_q64
+
+	l_out_file="$TEST_TMPDIR/long_single_arg.out"
+	(
+		g_cmd_ssh=/usr/bin/ssh
+		g_target_cmd_zfs=/target/sbin/zfs
+		g_option_T_target_host=target.example
+		zxfer_refresh_remote_zfs_commands
+
+		# 15 short properties push the total command past 768 bytes, but every
+		# individual word stays well below 768 bytes and must remain plain.
+		LC_ALL=en_US.UTF-8
+		zxfer_render_zfs_command_for_role destination set \
+			"user:p01=$l_x32$l_x32" "user:p02=$l_x32$l_x32" "user:p03=$l_x32$l_x32" \
+			"user:p04=$l_x32$l_x32" "user:p05=$l_x32$l_x32" "user:p06=$l_x32$l_x32" \
+			"user:p07=$l_x32$l_x32" "user:p08=$l_x32$l_x32" "user:p09=$l_x32$l_x32" \
+			"user:p10=$l_x32$l_x32" "user:p11=$l_x32$l_x32" "user:p12=$l_x32$l_x32" \
+			"user:p13=$l_x32$l_x32" "user:p14=$l_x32$l_x32" "user:p15=$l_x32$l_x32" \
+			backup/dst
+		case $g_zxfer_shell_command_result in
+		*"'sh' '-c'"*) l_multi_form=chunked ;;
+		*) l_multi_form=plain ;;
+		esac
+		printf 'multi=%s|lc=%s\n' "$l_multi_form" "${LC_ALL-unset}"
+
+		# A >768-byte ASCII arg, a >768-byte multibyte arg, and a quote-heavy
+		# arg whose escaped word exceeds 768 bytes must all route via sh -c.
+		unset LC_ALL
+		LANG=en_US.UTF-8
+		for l_case_tag in ascii multibyte quotes; do
+			case $l_case_tag in
+			ascii) l_val=$l_x800 ;;
+			multibyte) l_val=$l_mb264 ;;
+			quotes) l_val=$l_q256 ;;
+			esac
+			zxfer_render_zfs_command_for_role destination set "user:big=$l_val" backup/dst
+			l_remote_cmd=$(/bin/sh -c "set -- $g_zxfer_shell_command_result; shift \$(( \$# - 1 )); printf '%s' \"\$1\"")
+			l_max_word=$(printf '%s\n' "$l_remote_cmd" | zxfer_test_max_rendered_shell_word_bytes)
+			case $l_remote_cmd in
+			"'sh' '-c' "*) l_form=chunked ;;
+			*) l_form=plain ;;
+			esac
+			printf '%s=%s|under1020=%s|lc=%s\n' "$l_case_tag" "$l_form" \
+				"$([ "$l_max_word" -lt 1020 ] && printf yes || printf no)" "${LC_ALL-unset}"
+		done
+	) >"$l_out_file"
+	l_out=$(cat "$l_out_file")
+
+	assertEquals "Normal multi-property commands stay plain; long single arguments route via chunked sh -c while restoring LC_ALL." \
+		"multi=plain|lc=en_US.UTF-8
+ascii=chunked|under1020=yes|lc=unset
+multibyte=chunked|under1020=yes|lc=unset
+quotes=chunked|under1020=yes|lc=unset" "$l_out"
+
+	# Verify end-to-end execution delivers a 1100-byte single argument intact
+	# (through csh when available, else /bin/sh).
+	l_long_shell=$(find_csh_shell_for_tests)
+	zxfer_test_use_remote_argv_zfs long_arg "$l_long_shell"
+	l_x1100=$l_x800$l_x256$l_x32"123456789012"
+	zxfer_run_destination_zfs_cmd set "user:long=$l_x1100" backup/dst
+	assertEquals "A >1020-byte single argument must reach remote zfs byte-for-byte intact." \
+		"argc=3
+[set]
+[user:long=$l_x1100]
+[backup/dst]" "$(cat "$ZXFER_TEST_ZFS_ARGV_LOG")"
+}
+
 test_build_remote_sh_c_command_pins_the_plain_and_chunked_renderings() {
 	l_x32='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
 	l_x128=$l_x32$l_x32$l_x32$l_x32
@@ -907,6 +987,37 @@ still_too_long=1 handle=<> dir=<>" "$l_output"
 		"" "$(ls -A "$l_root/default")"
 }
 
+test_ssh_control_socket_path_length_check_counts_utf8_bytes_and_restores_lc_all() {
+	l_mb_char=$(printf '\342\202\254')
+	l_mb5=$l_mb_char$l_mb_char$l_mb_char$l_mb_char$l_mb_char
+	# 30 UTF-8 3-byte chars = 90 bytes; with /tmp/ (5) + /s (2) + 17-byte suffix
+	# = 114 bytes (>= 104) while character length is only 54 (< 104).
+	l_mb_long="/tmp/$l_mb5$l_mb5$l_mb5$l_mb5$l_mb5$l_mb5/s"
+	# 20 UTF-8 3-byte chars = 60 bytes; total = 84 bytes (< 104).
+	l_mb_short="/tmp/$l_mb5$l_mb5$l_mb5$l_mb5/s"
+
+	l_out=$(
+		LC_ALL=en_US.UTF-8
+		zxfer_is_ssh_control_socket_path_short_enough "$l_mb_long"
+		l_long_set=$?
+		l_lc_after_set=${LC_ALL-unset}
+
+		unset LC_ALL
+		LANG=en_US.UTF-8
+		zxfer_is_ssh_control_socket_path_short_enough "$l_mb_long"
+		l_long_unset=$?
+		zxfer_is_ssh_control_socket_path_short_enough "$l_mb_short"
+		l_short_unset=$?
+		l_lc_after_unset=${LC_ALL-unset}
+
+		printf 'long_set=%s|lc_set=%s|long_unset=%s|short_unset=%s|lc_unset=%s\n' \
+			"$l_long_set" "$l_lc_after_set" "$l_long_unset" "$l_short_unset" "$l_lc_after_unset"
+	)
+
+	assertEquals "sun_path validation must bound multibyte paths by UTF-8 byte length and restore LC_ALL." \
+		"long_set=1|lc_set=en_US.UTF-8|long_unset=1|short_unset=0|lc_unset=unset" "$l_out"
+}
+
 test_zxfer_remove_ssh_control_socket_dir_removes_only_ssh_names_and_fails_closed() {
 	zxfer_test_remote_host_fixture_setup || return
 	branch_root="$TEST_TMPDIR/ssh_socket_dir_removal"
@@ -1112,6 +1223,13 @@ test_run_zfs_cmd_capturing_stderr_routes_very_verbose_trace_to_caller_stderr() {
 #!/bin/sh
 [ -z "${FAKE_CAP_STDOUT:-}" ] || printf '%s\n' "$FAKE_CAP_STDOUT"
 [ -z "${FAKE_CAP_STDERR:-}" ] || printf '%s\n' "$FAKE_CAP_STDERR" >&2
+if [ "${FAKE_CAP_CHECK_FD6:-0}" -eq 1 ]; then
+	if { printf 'fd6-leaked\n' >&6; } 2>/dev/null; then
+		printf 'fd6=leaked\n'
+	else
+		printf 'fd6=closed\n'
+	fi
+fi
 exit "${FAKE_CAP_STATUS:-0}"
 EOF
 	chmod +x "$l_fake_ssh"
@@ -1122,6 +1240,8 @@ EOF
 	l_file_out="$TEST_TMPDIR/capture_file.out"
 	l_file_err="$TEST_TMPDIR/capture_file.err"
 	l_quiet_err="$TEST_TMPDIR/capture_quiet.err"
+	l_nested_trace="$TEST_TMPDIR/capture_nested.trace"
+	l_badpath_trace="$TEST_TMPDIR/capture_badpath.trace"
 	l_out=$(
 		g_cmd_ssh=$l_fake_ssh
 		g_target_cmd_zfs=/target/sbin/zfs
@@ -1132,23 +1252,98 @@ EOF
 		FAKE_CAP_STDOUT="remote-stdout"
 		FAKE_CAP_STDERR="remote-stderr"
 		FAKE_CAP_STATUS=37
-		export FAKE_CAP_STDOUT FAKE_CAP_STDERR FAKE_CAP_STATUS
+		FAKE_CAP_CHECK_FD6=1
+		export FAKE_CAP_STDOUT FAKE_CAP_STDERR FAKE_CAP_STATUS FAKE_CAP_CHECK_FD6
+		g_zxfer_profile_command_render_calls=0
 		l_merge_status=0
 		l_merge_val=$(zxfer_run_zfs_cmd_capturing_stderr destination merge list -H backup/dst 2>"$l_merge_trace") ||
 			l_merge_status=$?
-		printf 'merge=%s|<%s>|suppress=%s\n' "$l_merge_status" "$l_merge_val" "${g_zxfer_ssh_suppress_echoV_command:-0}"
+		printf 'merge=%s|<%s>|fd6_flag=%s\n' "$l_merge_status" "$l_merge_val" "${g_zxfer_ssh_echoV_to_fd6:-0}"
 
+		# Run in the current shell to verify single-pass command rendering (no double render).
+		FAKE_CAP_STDOUT="clean-stdout"
+		FAKE_CAP_STDERR=""
+		FAKE_CAP_STATUS=0
+		FAKE_CAP_CHECK_FD6=0
+		g_zxfer_profile_command_render_calls=0
+		zxfer_run_zfs_cmd_capturing_stderr destination "$l_file_err" list -H backup/dst >"$l_file_out" 2>"$l_file_trace"
+		printf 'file_clean=%s|out=<%s>|err_bytes=%s|renders=%s|fd6_flag=%s\n' "$?" \
+			"$(cat "$l_file_out")" "$(wc -c <"$l_file_err" | tr -d ' ')" \
+			"$g_zxfer_profile_command_render_calls" "${g_zxfer_ssh_echoV_to_fd6:-0}"
+
+		FAKE_CAP_STDOUT="remote-stdout"
+		FAKE_CAP_STDERR="remote-stderr"
+		FAKE_CAP_STATUS=37
 		l_only_status=0
 		l_only_val=$(zxfer_run_zfs_cmd_capturing_stderr destination stderr-only list -H backup/dst 2>"$l_stderr_only_trace") ||
 			l_only_status=$?
 		printf 'only=%s|<%s>\n' "$l_only_status" "$l_only_val"
 
-		FAKE_CAP_STDOUT="clean-stdout"
+		# Bad-path redirection failure must still restore g_zxfer_ssh_echoV_to_fd6 to 0.
+		l_badpath_status=0
+		zxfer_run_zfs_cmd_capturing_stderr destination "$TEST_TMPDIR/no-such-dir/err" list -H backup/dst 2>"$l_badpath_trace" ||
+			l_badpath_status=$?
+		printf 'badpath_nonzero=%s|fd6_flag=%s\n' \
+			"$([ "$l_badpath_status" -ne 0 ] && printf yes || printf no)" "${g_zxfer_ssh_echoV_to_fd6:-0}"
+
+		# Nested captures keep the outermost caller stderr on FD 6 and do not
+		# leak traces or clobber outer return status.
+		l_nested_out=$(
+			(
+				zxfer_run_destination_zfs_cmd() {
+					if [ "$1" = outer ]; then
+						l_inner_st=0
+						l_inner_out=$(zxfer_run_zfs_cmd_capturing_stderr destination merge list -H backup/inner) ||
+							l_inner_st=$?
+						printf 'inner(%s:%s)\n' "$l_inner_st" "$l_inner_out"
+						zxfer_run_zfs_cmd_for_role destination list -H backup/outer
+						return 0
+					fi
+					zxfer_run_zfs_cmd_for_role destination "$@"
+				}
+				FAKE_CAP_STDOUT="ok"
+				FAKE_CAP_STDERR="err"
+				FAKE_CAP_STATUS=19
+				zxfer_run_zfs_cmd_capturing_stderr destination merge outer
+				printf 'outer_st=%s|outer_fd6=%s\n' "$?" "${g_zxfer_ssh_echoV_to_fd6:-0}"
+			) 2>"$l_nested_trace"
+		)
+		printf 'nested=<%s>|nested_traces=%s\n' "$l_nested_out" \
+			"$(grep -c -F "Running remote command [target: target.example]: '$l_fake_ssh'" "$l_nested_trace")"
+
+		# Local and non-verbose captures must not touch FD 6 or set g_zxfer_ssh_echoV_to_fd6.
+		l_fd6_caller_file="$TEST_TMPDIR/capture_caller_fd6.out"
+		: >"$l_fd6_caller_file"
+		{
+			l_local_zfs="$TEST_TMPDIR/capture_local_zfs"
+			printf '#!/bin/sh\nprintf "local-out\\n"\nprintf "caller-fd6-ok\\n" >&6\n' >"$l_local_zfs"
+			chmod +x "$l_local_zfs"
+			g_cmd_zfs=$l_local_zfs
+			l_local_val=$(zxfer_run_zfs_cmd_capturing_stderr local merge list -H tank/local)
+			g_option_V_very_verbose=0
+			FAKE_CAP_STDOUT="quiet-out"
+			FAKE_CAP_STDERR=""
+			FAKE_CAP_STATUS=0
+			FAKE_CAP_CHECK_FD6=0
+			l_nonv_val=$(zxfer_run_zfs_cmd_capturing_stderr destination merge list -H backup/dst)
+			g_option_V_very_verbose=1
+		} 6>"$l_fd6_caller_file"
+		printf 'local_fd6=%s|nonv=%s|caller_fd6=<%s>\n' \
+			"$l_local_val" "$l_nonv_val" "$(cat "$l_fd6_caller_file")"
+
+		# Retired echoV mode must fail closed; reset clears g_zxfer_ssh_echoV_to_fd6.
+		zxfer_zfs_command_for_role echoV destination list -H backup/dst 2>/dev/null
+		l_retired_status=$?
+		g_zxfer_ssh_echoV_to_fd6=1
+		zxfer_reset_ssh_transport_state
+		printf 'retired=%s|after_reset=%s\n' "$l_retired_status" "$g_zxfer_ssh_echoV_to_fd6"
+
+		g_cmd_ssh=$l_fake_ssh
+		g_option_T_target_host=target.example
+		zxfer_refresh_remote_zfs_commands
+		FAKE_CAP_STDOUT=""
 		FAKE_CAP_STDERR=""
 		FAKE_CAP_STATUS=0
-		zxfer_run_zfs_cmd_capturing_stderr destination "$l_file_err" list -H backup/dst >"$l_file_out" 2>"$l_file_trace"
-		printf 'file_clean=%s|out=<%s>|err_bytes=%s\n' "$?" "$(cat "$l_file_out")" "$(wc -c <"$l_file_err" | tr -d ' ')"
-
 		zxfer_invoke_ssh_shell_command_for_host target.example "'true'" destination quiet >/dev/null 2>"$l_quiet_err"
 		printf 'quiet_status=%s|quiet_bytes=%s\n' "$?" "$(wc -c <"$l_quiet_err" | tr -d ' ')"
 
@@ -1158,17 +1353,28 @@ EOF
 		printf 'empty=%s|bad=%s:%s\n' "$l_empty_status" "$?" "$l_bad_role"
 	)
 
-	assertEquals "Captured stderr modes must return pure command output, preserve status, and keep run_quiet silent under -V." \
+	assertEquals "Captured stderr modes must route -V traces via FD 6 without double rendering, close FD 6 for ssh, handle nesting and bad paths cleanly, and keep run_quiet silent." \
 		"merge=37|<remote-stdout
-remote-stderr>|suppress=0
+remote-stderr
+fd6=closed>|fd6_flag=0
+file_clean=0|out=<clean-stdout>|err_bytes=0|renders=1|fd6_flag=0
 only=37|<remote-stderr>
-file_clean=0|out=<clean-stdout>|err_bytes=0
+badpath_nonzero=yes|fd6_flag=0
+nested=<inner(19:ok
+err)
+ok
+err
+outer_st=0|outer_fd6=0>|nested_traces=2
+local_fd6=local-out|nonv=quiet-out|caller_fd6=<caller-fd6-ok>
+retired=1|after_reset=0
 quiet_status=0|quiet_bytes=0
 empty=1|bad=1:zxfer: unknown zfs command role [unknown]." "$l_out"
 	for l_trace_file in "$l_merge_trace" "$l_stderr_only_trace" "$l_file_trace"; do
 		assertEquals "Each captured mode must emit exactly one -V remote command line on caller stderr ($l_trace_file)." \
 			1 "$(grep -c -F "Running remote command [target: target.example]: '$l_fake_ssh'" "$l_trace_file")"
 	done
+	assertNotContains "FD 6 must be closed before executing ssh so ssh cannot write to caller stderr through it." \
+		"$(cat "$l_merge_trace")" "fd6-leaked"
 }
 
 test_ssh_control_socket_action_command_renders_only_for_very_verbose_exit() {

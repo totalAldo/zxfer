@@ -801,18 +801,16 @@ zxfer_create_runtime_artifact_workspace() {
 
 # Purpose: Reuse a run-root scratch file or allocate a fresh one.
 # Usage: zxfer_ensure_runtime_artifact_file CURRENT_PATH NAME_PREFIX; publishes
-# g_zxfer_runtime_artifact_path_result. Reuse only a path under this run's
-# root, so callers never write through an inherited or stale outside path.
+# g_zxfer_runtime_artifact_path_result. Reuse only an existing, non-symlink
+# direct child file of this run's root, so callers never write through an
+# inherited, escaped, deleted, or symlinked path.
 # Returns: Zero with the reusable path, otherwise the allocation status.
 zxfer_ensure_runtime_artifact_file() {
 	g_zxfer_runtime_artifact_path_result=""
-	if [ -n "${g_zxfer_run_tmp_root:-}" ]; then
-		case ${1:-} in
-		"$g_zxfer_run_tmp_root"/?*)
-			g_zxfer_runtime_artifact_path_result=$1
-			return 0
-			;;
-		esac
+	if zxfer_runtime_artifact_path_is_run_root_child "${1:-}" &&
+		[ -f "$1" ] && [ ! -L "$1" ]; then
+		g_zxfer_runtime_artifact_path_result=$1
+		return 0
 	fi
 	zxfer_create_runtime_artifact_file "$2"
 }

@@ -1536,6 +1536,36 @@ test_runtime_artifact_reuse_keeps_owned_files_and_replaces_outside_paths() {
 	assertEquals "Replacement files remain owner-only." \
 		600 "$(zxfer_get_path_mode_octal "$g_zxfer_runtime_artifact_path_result")"
 	assertEquals "The outside file is untouched." "operator bytes" "$(cat "$outside_file")"
+
+	# Strict containment: .. escapes, nested paths, deleted children, symlinks,
+	# and directories under the run root must never be reused.
+	escape_target="$TEST_TMPDIR/reusable-dotdot-escape"
+	printf 'escape bytes\n' >"$escape_target"
+	nested_dir="$g_zxfer_run_tmp_root/nested-dir"
+	mkdir -m 700 "$nested_dir"
+	nested_file="$nested_dir/child"
+	printf 'nested bytes\n' >"$nested_file"
+	child_link="$g_zxfer_run_tmp_root/reusable-child-link"
+	ln -s "$outside_file" "$child_link"
+	rm -f "$reusable_file"
+
+	for bad_candidate in \
+		"$g_zxfer_run_tmp_root/../reusable-dotdot-escape" \
+		"$nested_file" \
+		"$reusable_file" \
+		"$child_link" \
+		"$nested_dir"; do
+		zxfer_ensure_runtime_artifact_file "$bad_candidate" reusable || return
+		replacement=$g_zxfer_runtime_artifact_path_result
+		assertNotEquals "Unsafe candidate [$bad_candidate] must never be reused." \
+			"$bad_candidate" "$replacement"
+		assertTrue "Replacement for [$bad_candidate] must be a fresh regular non-symlink direct child." \
+			"zxfer_runtime_artifact_path_is_run_root_child '$replacement' && [ -f '$replacement' ] && [ ! -L '$replacement' ]"
+		assertEquals "Replacement for [$bad_candidate] must remain 0600." \
+			600 "$(zxfer_get_path_mode_octal "$replacement")"
+	done
+	assertEquals "Escaped target must stay untouched." "escape bytes" "$(cat "$escape_target")"
+	assertEquals "Symlink target must stay untouched." "operator bytes" "$(cat "$outside_file")"
 }
 
 test_runtime_artifact_reuse_preserves_allocation_failure_status_and_clears_result() {
