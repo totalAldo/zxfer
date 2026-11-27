@@ -313,6 +313,53 @@ test_zxfer_profile_emit_summary_never_prints_a_negative_elapsed_time() {
 		"$output" "=-"
 }
 
+test_zxfer_profile_emit_summary_reuses_valid_end_ms_and_reads_clock_otherwise() {
+	clock_log="$TEST_TMPDIR/profile-emit-end-ms.log"
+	: >"$clock_log"
+	output=$(
+		(
+			zxfer_profile_read_clock_ms() {
+				printf '%s\n' read >>"$clock_log"
+				g_zxfer_profile_clock_ms=17500
+			}
+			g_option_V_very_verbose=1
+			g_zxfer_profile_has_data=1
+			g_zxfer_profile_start_ms=10200
+
+			g_zxfer_profile_summary_emitted=0
+			zxfer_profile_emit_summary 15900
+			printf 'after_valid_reads=%s\n' "$(wc -l <"$clock_log" 2>/dev/null | tr -d ' ')"
+
+			g_zxfer_profile_summary_emitted=0
+			zxfer_profile_emit_summary 9000
+			printf 'after_backwards_reads=%s\n' "$(wc -l <"$clock_log" 2>/dev/null | tr -d ' ')"
+
+			g_zxfer_profile_summary_emitted=0
+			zxfer_profile_emit_summary
+			printf 'after_omitted_reads=%s\n' "$(wc -l <"$clock_log" 2>/dev/null | tr -d ' ')"
+
+			g_zxfer_profile_summary_emitted=0
+			zxfer_profile_emit_summary bogus
+			printf 'after_invalid_reads=%s\n' "$(wc -l <"$clock_log" 2>/dev/null | tr -d ' ')"
+		) 2>&1
+	)
+
+	assertContains "A valid numeric END_MS should compute elapsed_seconds without reading the clock." \
+		"$output" "zxfer profile: elapsed_seconds=5"
+	assertContains "A valid numeric END_MS should not invoke zxfer_profile_read_clock_ms." \
+		"$output" "after_valid_reads=0"
+	assertContains "A backwards END_MS should clamp elapsed_seconds to 0 without reading the clock." \
+		"$output" "zxfer profile: elapsed_seconds=0"
+	assertContains "A backwards valid END_MS should still skip zxfer_profile_read_clock_ms." \
+		"$output" "after_backwards_reads=0"
+	assertContains "An omitted END_MS should read the clock once." \
+		"$output" "after_omitted_reads=1"
+	assertContains "An invalid END_MS should fall back to reading the clock." \
+		"$output" "after_invalid_reads=2"
+	assertEquals "Omitted and invalid END_MS calls should both compute elapsed_seconds from the clock reading." \
+		2 "$(printf '%s\n' "$output" | grep -c '^zxfer profile: elapsed_seconds=7$')"
+}
+
 test_zxfer_profile_emit_summary_prints_every_counter_from_its_own_global() {
 	output=$(
 		(

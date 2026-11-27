@@ -225,11 +225,13 @@ zxfer_profile_record_ssh_invocation() {
 }
 
 # Purpose: Print the -V profile summary to stderr once per run.
-# Usage: Called by the EXIT trap; silent without -V, and when -V neither
-# timed a stage nor counted anything.
+# Usage: zxfer_profile_emit_summary [END_MS]; called by the EXIT trap. Silent
+# without -V, and when -V neither timed a stage nor counted anything. A valid
+# numeric END_MS reuses a shutdown clock reading instead of running date again.
 zxfer_profile_emit_summary() {
 	[ "${g_option_V_very_verbose:-0}" -eq 1 ] || return 0
 	[ "${g_zxfer_profile_summary_emitted:-0}" -eq 0 ] || return 0
+	l_profile_end_ms=${1:-}
 
 	set -- \
 		"startup_latency_ms=${g_zxfer_profile_startup_latency_ms:-0}" \
@@ -288,10 +290,19 @@ zxfer_profile_emit_summary() {
 
 	# Whole seconds between the two clock readings, as with date +%s.
 	l_profile_elapsed=unknown
-	if zxfer_is_uint "${g_zxfer_profile_start_ms:-}" && zxfer_profile_read_clock_ms; then
-		l_profile_elapsed=$((g_zxfer_profile_clock_ms / 1000 - g_zxfer_profile_start_ms / 1000))
-		# A clock that went backwards reports 0, never a negative count.
-		[ "$l_profile_elapsed" -ge 0 ] || l_profile_elapsed=0
+	if zxfer_is_uint "${g_zxfer_profile_start_ms:-}"; then
+		if ! zxfer_is_uint "$l_profile_end_ms"; then
+			if zxfer_profile_read_clock_ms; then
+				l_profile_end_ms=$g_zxfer_profile_clock_ms
+			else
+				l_profile_end_ms=""
+			fi
+		fi
+		if [ -n "$l_profile_end_ms" ]; then
+			l_profile_elapsed=$((l_profile_end_ms / 1000 - g_zxfer_profile_start_ms / 1000))
+			# A clock that went backwards reports 0, never a negative count.
+			[ "$l_profile_elapsed" -ge 0 ] || l_profile_elapsed=0
+		fi
 	fi
 	printf 'zxfer profile: %s\n' "elapsed_seconds=$l_profile_elapsed" "$@" >&2
 }

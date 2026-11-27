@@ -851,5 +851,38 @@ TERM zxfer_trap_exit 143" ;;
 		"$(printf '%s\n' "$expected" | sort)" "$output"
 }
 
+test_zxfer_trap_exit_passes_stop_timer_clock_to_profile_summary() {
+	zxfer_test_runtime_fixture_setup
+	output=$(
+		(
+			trap - EXIT INT TERM HUP QUIT
+			g_option_V_very_verbose=1
+			g_zxfer_profile_has_data=1
+			g_zxfer_profile_start_ms=10000
+			g_zxfer_profile_summary_emitted=0
+			clock_readings="11000 14000"
+			zxfer_profile_read_clock_ms() {
+				g_zxfer_profile_clock_ms=${clock_readings%% *}
+				clock_readings=${clock_readings#* }
+			}
+			zxfer_abort_all_send_jobs() { return 0; }
+			zxfer_kill_registered_cleanup_pids() { return 0; }
+			zxfer_close_all_ssh_control_sockets() { return 0; }
+			zxfer_remove_ssh_control_socket_dir() { return 0; }
+			zxfer_remove_run_tmp_root() { return 0; }
+			zxfer_restore_migration_services_on_exit() { return 0; }
+			zxfer_emit_failure_report() { :; }
+			zxfer_profile_emit_summary() {
+				printf 'end_ms=<%s>\n' "${1:-}"
+			}
+			true
+			zxfer_trap_exit
+		) 2>/dev/null
+	)
+
+	assertEquals "zxfer_trap_exit should pass the cleanup stop-timer reading to zxfer_profile_emit_summary." \
+		"end_ms=<14000>" "$output"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

@@ -68,16 +68,16 @@ zxfer_reset_background_shell_spawn_mode() {
 # Usage: zxfer_execute_rendered_shell_command CMD; honors -n, records CMD for
 # failure reports, echoes it under -v, and throws when it fails.
 zxfer_execute_rendered_shell_command() {
-	l_cmd=$1
-	zxfer_record_last_command_string "$l_cmd"
+	l_exec_rendered_cmd=$1
+	zxfer_record_last_command_string "$l_exec_rendered_cmd"
 
 	if [ "$g_option_n_dryrun" -eq 1 ]; then
-		zxfer_echov "Dry run: $l_cmd"
+		zxfer_echov "Dry run: $l_exec_rendered_cmd"
 		return 0
 	fi
 
-	zxfer_echov "$l_cmd"
-	eval "$l_cmd" || zxfer_throw_error "Error when executing command."
+	zxfer_echov "$l_exec_rendered_cmd"
+	eval "$l_exec_rendered_cmd" || zxfer_throw_error "Error when executing command."
 }
 
 # Purpose: Decide once per process how background shells are isolated.

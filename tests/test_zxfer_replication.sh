@@ -356,11 +356,12 @@ test_iteration_list_awk_failure_clears_previous_result() {
 }
 
 test_iteration_list_split_failure_clears_previous_result() {
-	g_recursive_source_list="tank/src"
+	g_recursive_source_list="tank/src
+tank/src/child"
 	g_zxfer_replication_iteration_list_result="stale"
 	g_zxfer_source_snapshot_record_cache_file="$TEST_TMPDIR/split_failure_source.records"
 	g_zxfer_destination_snapshot_record_cache_file="$TEST_TMPDIR/split_failure_destination.records"
-	printf '%s\n' "tank/src@snap1	111" >"$g_zxfer_source_snapshot_record_cache_file"
+	printf '%s\n' "tank/src@snap1	111" "tank/src/child@snap1	222" >"$g_zxfer_source_snapshot_record_cache_file"
 	: >"$g_zxfer_destination_snapshot_record_cache_file"
 
 	output=$(
@@ -373,6 +374,51 @@ test_iteration_list_split_failure_clears_previous_result() {
 
 	assertEquals "A failed record split must propagate its status and publish neither the list nor slices." \
 		"status=7 published=<> slices=<>" "$output"
+}
+
+test_iteration_list_skips_grouped_split_for_single_dataset_without_grandfather() {
+	output=$(
+		(
+			g_option_g_grandfather_protection=""
+			g_recursive_source_list="tank/src"
+			g_zxfer_snapshot_slice_records="stale-records"
+			g_zxfer_snapshot_slice_key="1"
+			g_zxfer_snapshot_slice_source="tank/old"
+			g_zxfer_snapshot_slice_destination="backup/old"
+			zxfer_prepare_snapshot_plans() {
+				printf 'prepare:%s\n' "$(printf '%s' "$1" | tr '\n' '|')"
+				g_zxfer_snapshot_slice_records="prepared"
+			}
+
+			zxfer_build_replication_iteration_list 0
+			printf 'single_no_g=%s|list=<%s>|slices=<%s:%s:%s:%s>\n' "$?" \
+				"$g_zxfer_replication_iteration_list_result" \
+				"$g_zxfer_snapshot_slice_records" "$g_zxfer_snapshot_slice_key" \
+				"$g_zxfer_snapshot_slice_source" "$g_zxfer_snapshot_slice_destination"
+
+			g_option_g_grandfather_protection=30
+			zxfer_build_replication_iteration_list 0
+			printf 'single_with_g=%s|slices=<%s>\n' "$?" "$g_zxfer_snapshot_slice_records"
+
+			g_option_g_grandfather_protection=""
+			g_recursive_source_list="tank/src
+tank/src/child"
+			zxfer_build_replication_iteration_list 0
+			printf 'multi_no_g=%s|slices=<%s>\n' "$?" "$g_zxfer_snapshot_slice_records"
+		)
+	)
+
+	assertContains "A single-dataset non--g queue should publish its row and clear stale snapshot slices." \
+		"$output" "single_no_g=0|list=<1${ZXFER_TAB}tank/src>|slices=<:::>"
+	assertNotContains "A single-dataset non--g queue should skip zxfer_prepare_snapshot_plans." \
+		"$output" "prepare:1${ZXFER_TAB}tank/src
+single_no_g="
+	assertContains "A single-dataset -g queue should still prepare grouped snapshot plans." \
+		"$output" "prepare:1${ZXFER_TAB}tank/src
+single_with_g=0|slices=<prepared>"
+	assertContains "A multi-dataset non--g queue should still prepare grouped snapshot plans." \
+		"$output" "prepare:1${ZXFER_TAB}tank/src|2${ZXFER_TAB}tank/src/child
+multi_no_g=0|slices=<prepared>"
 }
 
 test_full_send_queue_waits_before_rescanning_deferred_rows() {

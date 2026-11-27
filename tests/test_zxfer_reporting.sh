@@ -162,12 +162,13 @@ unsafe_last=<'zfs' 'get'>" "$output"
 }
 
 test_report_escape_preserves_each_newline_and_returns_awk_status() {
+	l_ctrl=$(printf '\001')
 	assertEquals 'one\ntwo\n\n\n' \
 		"$(zxfer_escape_report_value "one${ZXFER_LF}two${ZXFER_LF}${ZXFER_LF}${ZXFER_LF}")"
 	assertEquals '\n\n' "$(zxfer_escape_report_value "$ZXFER_LF$ZXFER_LF")"
 	(
 		g_cmd_awk=false
-		zxfer_escape_report_value "$ZXFER_LF"
+		zxfer_escape_report_value "$l_ctrl"
 	)
 	assertEquals "A failed escape must return the awk status." 1 "$?"
 }
@@ -336,6 +337,7 @@ test_zxfer_report_quoting_skips_awk_and_sed_for_plain_tokens() {
 	helper_log="$TEST_TMPDIR/report-quoting-helpers.log"
 	rm -f "$helper_log"
 	quote_input="it's"
+	ctrl_input=$(printf 'ctrl\001byte')
 	output=$(
 		(
 			g_cmd_awk=zxfer_test_logging_awk
@@ -350,21 +352,137 @@ test_zxfer_report_quoting_skips_awk_and_sed_for_plain_tokens() {
 			printf 'escape=<%s>\n' "$(zxfer_escape_report_value 'tank/src@snap 1')"
 			printf 'quote=<%s>\n' "$(zxfer_quote_token_for_report 'tank/src@snap')"
 			printf 'argv=<%s>\n' "$(zxfer_quote_command_argv zfs list 'a b')"
+			printf 'fast_bs=<%s>\n' "$(zxfer_escape_report_value 'back\slash')"
 			printf 'plain_helpers=<%s>\n' "$(cat "$helper_log" 2>/dev/null)"
 			printf 'slow_quote=<%s>\n' "$(zxfer_quote_token_for_report "$quote_input")"
-			printf 'slow_escape=<%s>\n' "$(zxfer_escape_report_value 'back\slash')"
+			printf 'slow_escape=<%s>\n' "$(zxfer_escape_report_value "$ctrl_input")"
 		)
 	)
 
 	assertContains "Plain values should be returned unchanged." "$output" "escape=<tank/src@snap 1>"
 	assertContains "Plain tokens should be single-quoted as-is." "$output" "quote=<'tank/src@snap'>"
 	assertContains "Plain argv should be quoted word by word." "$output" "argv=<'zfs' 'list' 'a b'>"
-	assertContains "Plain values should not run awk or sed." "$output" "plain_helpers=<>"
+	assertEquals "Short backslash values should escape in-shell without awk." \
+		'fast_bs=<back\\slash>' "$(printf '%s\n' "$output" | sed -n '/^fast_bs=/p')"
+	assertContains "Plain and short backslash values should not run awk or sed." "$output" "plain_helpers=<>"
 	assertContains "Single quotes should be escaped in shell without sed." "$output" "slow_quote=<'it'\"'\"'s'>"
-	assertEquals "Backslashes should still take the awk path." \
-		'slow_escape=<back\\slash>' "$(printf '%s\n' "$output" | sed -n '/^slow_escape=/p')"
-	assertEquals "Only backslash/control values should run awk, and sed is never needed." \
+	assertEquals "Control bytes should still take the awk slow path." \
+		'slow_escape=<ctrl\x01byte>' "$(printf '%s\n' "$output" | sed -n '/^slow_escape=/p')"
+	assertEquals "Only control/non-fast values should run awk, and sed is never needed." \
 		"awk" "$(cat "$helper_log")"
+}
+
+test_zxfer_escape_report_value_in_shell_fast_path_fallbacks_and_lc_all() {
+	helper_log="$TEST_TMPDIR/report-escape-fast-path.log"
+	rm -f "$helper_log"
+	l_mixed="a\\b${ZXFER_TAB}c${ZXFER_CR}d${ZXFER_LF}\\t*?[x]"
+	l_c0=$(printf 'a\\b\t\r\n\001z')
+	l_del=$(printf 'a\\b\177z')
+	# Build a >4096-byte value containing a backslash so the length cap triggers awk.
+	l_long='0123456789abcdef'
+	while [ "${#l_long}" -le 4096 ]; do
+		l_long=$l_long$l_long
+	done
+	l_long_bs="${l_long}\\tail"
+
+	output=$(
+		(
+			g_cmd_awk=zxfer_test_logging_awk
+			zxfer_test_logging_awk() {
+				printf '%s\n' awk >>"$helper_log"
+				command awk "$@"
+			}
+
+			LC_ALL=POSIX
+			zxfer_escape_report_value_into_result "$l_mixed"
+			printf 'mixed_status=%s lc=%s val=<%s>\n' "$?" "${LC_ALL-unset}" \
+				"$g_zxfer_escaped_report_value_result"
+			printf 'fast_helpers=<%s>\n' "$(cat "$helper_log" 2>/dev/null)"
+
+			unset LC_ALL
+			zxfer_escape_report_value_into_result "$l_c0"
+			printf 'c0_status=%s lc=%s val=<%s>\n' "$?" "${LC_ALL-unset}" \
+				"$g_zxfer_escaped_report_value_result"
+
+			LC_ALL=""
+			zxfer_escape_report_value_into_result "$l_del"
+			printf 'del_status=%s lc=<%s> set=%s val=<%s>\n' "$?" "${LC_ALL-unset}" \
+				"${LC_ALL+set}" "$g_zxfer_escaped_report_value_result"
+
+			LC_ALL=POSIX
+			zxfer_escape_report_value_into_result "$l_long_bs"
+			l_long_status=$?
+			l_long_len=${#g_zxfer_escaped_report_value_result}
+			l_long_tail=${g_zxfer_escaped_report_value_result#"$l_long"}
+			printf 'long_status=%s lc=%s len=%s tail=<%s>\n' "$l_long_status" \
+				"${LC_ALL-unset}" "$l_long_len" "$l_long_tail"
+		)
+	)
+
+	assertContains "Backslash, TAB, CR, and LF should escape in-shell with backslash escaped first and LC_ALL preserved." \
+		"$output" 'mixed_status=0 lc=POSIX val=<a\\b\tc\rd\n\\t*?[x]>'
+	assertContains "Bounded \\, TAB, CR, LF escaping must not invoke awk." \
+		"$output" "fast_helpers=<>"
+	assertContains "C0 bytes must fall back to awk on the original value without double-escaping and keep LC_ALL unset." \
+		"$output" 'c0_status=0 lc=unset val=<a\\b\t\r\n\x01z>'
+	assertContains "DEL bytes must fall back to awk on the original value and preserve an empty LC_ALL." \
+		"$output" 'del_status=0 lc=<> set=set val=<a\\b\x7Fz>'
+	assertContains "Values longer than 4096 bytes with escapes must fall back to awk and preserve LC_ALL." \
+		"$output" "long_status=0 lc=POSIX len=$((${#l_long} + 6)) tail=<\\\\tail>"
+	assertEquals "Exactly C0, DEL, and >4096B values should take the awk fallback." \
+		"awk
+awk
+awk" "$(cat "$helper_log")"
+}
+
+test_zxfer_report_command_into_result_helpers_publish_and_reset_cleanly() {
+	l_ctrl=$(printf 'bad\001arg')
+	output=$(
+		(
+			zxfer_quote_command_argv_into_result "zfs" "it's" "a${ZXFER_TAB}b"
+			printf 'argv_status=%s val=<%s>\n' "$?" "$g_zxfer_quoted_command_argv_result"
+
+			zxfer_quote_command_argv_into_result
+			printf 'empty_argv_status=%s val=<%s>\n' "$?" "$g_zxfer_quoted_command_argv_result"
+
+			zxfer_render_command_for_report_into_result "/usr/bin/ssh 'host' /sbin/zfs" "create" "-o" "a=b"
+			printf 'prefixed_status=%s val=<%s>\n' "$?" "$g_zxfer_rendered_report_command_result"
+
+			zxfer_render_command_for_report_into_result "/usr/bin/ssh 'host' /sbin/zfs"
+			printf 'prefix_only_status=%s val=<%s>\n' "$?" "$g_zxfer_rendered_report_command_result"
+
+			zxfer_render_command_for_report_into_result "" "zfs" "list" "tank/src"
+			printf 'empty_prefix_status=%s val=<%s>\n' "$?" "$g_zxfer_rendered_report_command_result"
+
+			g_zxfer_quoted_command_argv_result="stale-argv"
+			g_zxfer_rendered_report_command_result="stale-cmd"
+			zxfer_reset_failure_context "unit"
+			printf 'reset=<%s><%s>\n' "$g_zxfer_quoted_command_argv_result" \
+				"$g_zxfer_rendered_report_command_result"
+
+			g_zxfer_quoted_command_argv_result="stale-argv"
+			g_zxfer_rendered_report_command_result="stale-cmd"
+			g_cmd_awk=false
+			zxfer_render_command_for_report_into_result "prefix" "$l_ctrl"
+			printf 'fail_status=%s argv=<%s> cmd=<%s>\n' "$?" \
+				"$g_zxfer_quoted_command_argv_result" "$g_zxfer_rendered_report_command_result"
+		)
+	)
+
+	assertContains "zxfer_quote_command_argv_into_result should publish quoted report argv in-shell." \
+		"$output" "argv_status=0 val=<'zfs' 'it'\"'\"'s' 'a\\tb'>"
+	assertContains "zxfer_quote_command_argv_into_result should publish empty string for empty argv." \
+		"$output" "empty_argv_status=0 val=<>"
+	assertContains "zxfer_render_command_for_report_into_result should join prefix and quoted argv." \
+		"$output" "prefixed_status=0 val=</usr/bin/ssh 'host' /sbin/zfs 'create' '-o' 'a=b'>"
+	assertContains "zxfer_render_command_for_report_into_result should publish prefix alone when argv is empty." \
+		"$output" "prefix_only_status=0 val=</usr/bin/ssh 'host' /sbin/zfs>"
+	assertContains "zxfer_render_command_for_report_into_result should publish quoted argv when prefix is empty." \
+		"$output" "empty_prefix_status=0 val=<'zfs' 'list' 'tank/src'>"
+	assertContains "zxfer_reset_failure_context should clear both new report command result globals." \
+		"$output" "reset=<><>"
+	assertContains "A failed render should preserve status and clear both result globals." \
+		"$output" "fail_status=1 argv=<> cmd=<>"
 }
 
 test_zxfer_report_quoting_takes_the_slow_path_without_print_class_support() {

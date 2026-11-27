@@ -98,7 +98,7 @@ zxfer_rollback_destination_to_last_common_snapshot() {
 	zxfer_destination_exists "$g_actual_dest" live || return 0
 
 	# The snapshot name is everything after the first "@" of the record path.
-	l_rollback_path=${g_last_common_snap%%	*}
+	l_rollback_path=${g_last_common_snap%%"$ZXFER_TAB"*}
 	case $l_rollback_path in
 	*@?*) ;;
 	*) return 0 ;;
@@ -166,11 +166,11 @@ zxfer_copy_snapshots() {
 	zxfer_reconcile_live_destination_snapshot_state "$1"
 
 	# Record paths are everything before the first tab (guid column).
-	l_copy_first_path=${g_src_snapshot_transfer_first%%	*}
-	l_copy_final_path=${g_src_snapshot_transfer_final%%	*}
+	l_copy_first_path=${g_src_snapshot_transfer_first%%"$ZXFER_TAB"*}
+	l_copy_final_path=${g_src_snapshot_transfer_final%%"$ZXFER_TAB"*}
 
 	# Nothing new to send: no rollback after deleting extra snapshots either.
-	if [ -z "$g_src_snapshot_transfer_first" ] || [ "${g_last_common_snap%%	*}" = "$l_copy_final_path" ]; then
+	if [ -z "$g_src_snapshot_transfer_first" ] || [ "${g_last_common_snap%%"$ZXFER_TAB"*}" = "$l_copy_final_path" ]; then
 		if [ -z "$g_src_snapshot_transfer_first" ]; then
 			zxfer_echoV "No snapshots to copy, skipping destination dataset: $g_actual_dest."
 		else
@@ -189,14 +189,14 @@ zxfer_copy_snapshots() {
 
 	# Seeding the only pending snapshot completes the transfer; never send a
 	# snapshot incrementally to itself.
-	if [ "${g_last_common_snap%%	*}" = "$l_copy_final_path" ]; then
+	if [ "${g_last_common_snap%%"$ZXFER_TAB"*}" = "$l_copy_final_path" ]; then
 		zxfer_echoV "Seed snapshot already matches final snapshot for $g_actual_dest."
 		return
 	fi
 
 	zxfer_echoV "Final snapshot: $l_copy_final_path"
 	# The rollback and seed steps can move g_last_common_snap, so read it here.
-	zxfer_zfs_send_receive "${g_last_common_snap%%	*}" "$l_copy_final_path" "$g_actual_dest" "1"
+	zxfer_zfs_send_receive "${g_last_common_snap%%"$ZXFER_TAB"*}" "$l_copy_final_path" "$g_actual_dest" "1"
 }
 
 # Purpose: Name the run's -s/-m snapshot zxfer_<pid>_<YYYYmmddHHMMSS> once.
@@ -287,7 +287,8 @@ END {
 # Usage: zxfer_build_replication_iteration_list PROPERTY_PASS_REQUIRED;
 # publishes $g_zxfer_replication_iteration_list_result, one
 # "POSITION<TAB>SOURCE" row per dataset, only after its snapshot plans and
-# source slices are prepared by position.
+# source slices are prepared by position (or cleared for a single-dataset
+# queue without -g, which plans directly).
 zxfer_build_replication_iteration_list() {
 	l_iteration_sources=${g_recursive_source_list:-}
 	if [ "$g_option_R_recursive" != "" ] && [ "$1" -eq 1 ]; then
@@ -305,7 +306,20 @@ ${g_recursive_destination_extra_dataset_list:-}"
 $l_iteration_sources
 EOF
 	) || return "$?"
-	zxfer_prepare_snapshot_plans "$l_iteration_result" || return "$?"
+	case $l_iteration_result in
+	*"$ZXFER_LF"*)
+		zxfer_prepare_snapshot_plans "$l_iteration_result" || return "$?"
+		;;
+	*)
+		if [ -n "${g_option_g_grandfather_protection:-}" ]; then
+			zxfer_prepare_snapshot_plans "$l_iteration_result" || return "$?"
+		else
+			# Single-dataset queues without -g inspect the dataset once,
+			# so direct planning avoids the 3-process grouped split pass.
+			zxfer_forget_snapshot_slices
+		fi
+		;;
+	esac
 	g_zxfer_replication_iteration_list_result=$l_iteration_result
 }
 

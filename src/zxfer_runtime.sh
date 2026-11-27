@@ -611,45 +611,53 @@ zxfer_cleanup_runtime_artifact_path() {
 }
 
 # Purpose: Remove a newline-separated list of runtime artifacts.
-# Usage: zxfer_cleanup_runtime_artifact_path_list LIST [RETAIN]; run-root files and
-# FIFOs share one non-recursive rm, and every other path goes through
-# zxfer_cleanup_runtime_artifact_path. RETAIN is a published artifact whose
-# lifetime continues after this operation. Returns 1 when any other path stays.
+# Usage: zxfer_cleanup_runtime_artifact_path_list LIST [RETAIN...]; run-root
+# files and FIFOs share one non-recursive rm, and every other path goes through
+# zxfer_cleanup_runtime_artifact_path. Each non-empty RETAIN is a published
+# artifact whose lifetime continues after this operation. Returns 1 when any
+# other path stays or a retained path is outside the run root.
 zxfer_cleanup_runtime_artifact_path_list() {
-	l_artifact_path_list=$1
-	l_cleanup_runtime_artifact_retained=${2:-}
-	l_cleanup_status=0
+	l_cleanup_list_paths=${1:-}
+	[ "$#" -eq 0 ] || shift
+	l_cleanup_list_retained=""
+	for l_cleanup_list_retain_arg in "$@"; do
+		[ -n "$l_cleanup_list_retain_arg" ] || continue
+		l_cleanup_list_retained=${l_cleanup_list_retained:+$l_cleanup_list_retained$ZXFER_LF}$l_cleanup_list_retain_arg
+	done
+	l_cleanup_list_status=0
 	set --
 
-	while IFS= read -r l_cleanup_runtime_artifact_path_list_artifact_path || [ -n "$l_cleanup_runtime_artifact_path_list_artifact_path" ]; do
-		[ -n "$l_cleanup_runtime_artifact_path_list_artifact_path" ] || continue
-		if [ "$l_cleanup_runtime_artifact_path_list_artifact_path" = "$l_cleanup_runtime_artifact_retained" ]; then
-			zxfer_runtime_artifact_path_is_run_root_child "$l_cleanup_runtime_artifact_path_list_artifact_path" || l_cleanup_status=1
+	while IFS= read -r l_cleanup_list_path || [ -n "$l_cleanup_list_path" ]; do
+		[ -n "$l_cleanup_list_path" ] || continue
+		case $ZXFER_LF$l_cleanup_list_retained$ZXFER_LF in
+		*"$ZXFER_LF$l_cleanup_list_path$ZXFER_LF"*)
+			zxfer_runtime_artifact_path_is_run_root_child "$l_cleanup_list_path" || l_cleanup_list_status=1
 			continue
-		fi
-		if zxfer_runtime_artifact_path_is_run_root_child "$l_cleanup_runtime_artifact_path_list_artifact_path" &&
-			{ [ -f "$l_cleanup_runtime_artifact_path_list_artifact_path" ] || [ -p "$l_cleanup_runtime_artifact_path_list_artifact_path" ]; }; then
-			set -- "$@" "$l_cleanup_runtime_artifact_path_list_artifact_path"
-		elif ! zxfer_cleanup_runtime_artifact_path "$l_cleanup_runtime_artifact_path_list_artifact_path"; then
-			l_cleanup_status=1
+			;;
+		esac
+		if zxfer_runtime_artifact_path_is_run_root_child "$l_cleanup_list_path" &&
+			{ [ -f "$l_cleanup_list_path" ] || [ -p "$l_cleanup_list_path" ]; }; then
+			set -- "$@" "$l_cleanup_list_path"
+		elif ! zxfer_cleanup_runtime_artifact_path "$l_cleanup_list_path"; then
+			l_cleanup_list_status=1
 		fi
 	done <<-EOF
-		$l_artifact_path_list
+		$l_cleanup_list_paths
 	EOF
 	if [ "$#" -gt 0 ]; then
 		zxfer_run_tmp_root_is_usable_dir || return 1
-		rm -f "$@" 2>/dev/null || l_cleanup_status=1
-		for l_cleanup_runtime_artifact_path_list_artifact_path; do
-			if [ -e "$l_cleanup_runtime_artifact_path_list_artifact_path" ] ||
-				[ -L "$l_cleanup_runtime_artifact_path_list_artifact_path" ]; then
-				l_cleanup_status=1
+		rm -f "$@" 2>/dev/null || l_cleanup_list_status=1
+		for l_cleanup_list_path; do
+			if [ -e "$l_cleanup_list_path" ] ||
+				[ -L "$l_cleanup_list_path" ]; then
+				l_cleanup_list_status=1
 			else
 				g_zxfer_profile_runtime_artifact_paths_cleaned=$((g_zxfer_profile_runtime_artifact_paths_cleaned + 1))
 			fi
 		done
 	fi
 
-	return "$l_cleanup_status"
+	return "$l_cleanup_list_status"
 }
 
 ################################################################################

@@ -180,7 +180,7 @@ zxfer_trap_exit() {
 	zxfer_profile_stop_timer "$l_cleanup_start_ms"
 	g_zxfer_profile_cleanup_ms=$((g_zxfer_profile_cleanup_ms + g_zxfer_profile_elapsed_ms))
 	zxfer_echoV "zxfer exiting with status $g_zxfer_trap_exit_status"
-	zxfer_profile_emit_summary
+	zxfer_profile_emit_summary "${g_zxfer_profile_clock_ms:-}"
 	zxfer_emit_failure_report "$g_zxfer_trap_exit_status"
 
 	# Failure reporting may lazily recreate the run temp root; sweep again so

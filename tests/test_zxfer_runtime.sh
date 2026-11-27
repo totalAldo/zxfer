@@ -1247,6 +1247,46 @@ $second_path" "$outside_path"
 	assertEquals "Unowned data stays untouched." sentinel "$(cat "$outside_path")"
 }
 
+test_runtime_file_list_cleanup_retains_multiple_exact_paths_and_removes_other_siblings() {
+	zxfer_create_runtime_artifact_workspace multi-retain sorted raw raw2 destination ||
+		fail "Unable to allocate the multi-retain workspace."
+	workspace=$g_zxfer_runtime_artifact_path_result
+	group_paths=$g_zxfer_temp_file_group_result
+	rm_log="$TEST_TMPDIR/multi-retain-rm.log"
+	: >"$rm_log"
+	(
+		rm() {
+			printf 'rm\n' >>"$rm_log"
+			command rm "$@"
+		}
+		zxfer_cleanup_runtime_artifact_path_list "$group_paths" "" "$workspace.raw" "$workspace.destination"
+	)
+	cleanup_status=$?
+
+	assertEquals "Multi-retain cleanup should succeed when every retained path belongs to the run root." \
+		0 "$cleanup_status"
+	assertEquals "Non-retained siblings should share one batched rm invocation." \
+		"rm" "$(cat "$rm_log")"
+	assertFalse "The primary workspace file should be removed." "[ -e '$workspace' ]"
+	assertFalse "Non-retained siblings should be removed." "[ -e '$workspace.sorted' ]"
+	assertFalse "Whole-line matching must not retain a sibling that only shares a prefix." \
+		"[ -e '$workspace.raw2' ]"
+	assertTrue "The first retained sibling should survive." "[ -f '$workspace.raw' ]"
+	assertTrue "The second retained sibling should survive." "[ -f '$workspace.destination' ]"
+
+	outside_path="$TEST_TMPDIR/multi-retain-unowned"
+	printf 'keep' >"$outside_path"
+	zxfer_cleanup_runtime_artifact_path_list "$workspace.raw
+$outside_path
+$workspace.destination" "$workspace.raw" "$outside_path"
+	outside_status=$?
+	assertEquals "Retaining an outside path alongside an owned path must still fail closed." \
+		1 "$outside_status"
+	assertTrue "The owned retained path should stay untouched." "[ -f '$workspace.raw' ]"
+	assertFalse "Unretained owned paths should still be removed." "[ -e '$workspace.destination' ]"
+	assertEquals "The outside path must stay untouched." "keep" "$(cat "$outside_path")"
+}
+
 test_runtime_file_list_cleanup_preserves_partial_rm_failure() {
 	zxfer_create_runtime_artifact_file "partial-one" >/dev/null
 	first_path=$g_zxfer_runtime_artifact_path_result
