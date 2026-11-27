@@ -392,5 +392,28 @@ test_zxfer_find_required_tool_ignores_shell_functions() {
 		"$result"
 }
 
+test_zxfer_find_required_tool_reports_default_secure_path_when_state_is_empty() {
+	empty_path="$TEST_TMPDIR/default_fallback_path"
+	mkdir -p "$empty_path"
+
+	set +e
+	result=$(
+		(
+			g_zxfer_secure_path=""
+			ZXFER_DEFAULT_SECURE_PATH=$empty_path
+			zxfer_find_required_tool missingtool "missingtool"
+			l_status=$?
+			printf '%s\n' "$g_zxfer_required_tool_result"
+			exit "$l_status"
+		)
+	)
+	status=$?
+
+	assertEquals "A missing tool with empty g_zxfer_secure_path should fail." 1 "$status"
+	assertEquals "A missing tool error should report ZXFER_DEFAULT_SECURE_PATH when g_zxfer_secure_path is empty." \
+		"Required dependency \"missingtool\" not found in secure PATH ($empty_path). Set ZXFER_SECURE_PATH or install the binary." \
+		"$result"
+}
+
 # shellcheck source=tests/shunit2/shunit2
 . "$SHUNIT2_BIN"

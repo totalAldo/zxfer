@@ -106,20 +106,23 @@ b' in
 	;;
 esac
 
-# Purpose: Escape a report value in the current shell: backslash, tab, CR, and
-# newline become \\ \t \r \n; other C0 bytes and DEL become \xHH.
-# Usage: zxfer_escape_report_value_into_result VALUE; publishes
-# g_zxfer_escaped_report_value_result.
-zxfer_escape_report_value_into_result() {
+# Purpose: Escape VALUE for a report, and optionally single-quote it, in one
+# LC_ALL=C scope on the in-shell fast path; restores LC_ALL before any awk
+# fallback so no external command runs with unexported LC_ALL=C.
+# Usage: zxfer_escape_or_quote_report_value VALUE QUOTE(0|1); publishes
+# g_zxfer_escaped_report_value_result (and g_zxfer_quoted_report_token_result
+# when QUOTE is 1).
+zxfer_escape_or_quote_report_value() {
 	g_zxfer_escaped_report_value_result=""
+	[ "$2" -eq 0 ] || g_zxfer_quoted_report_token_result=""
+	l_report_escape_had_lc_all=0
+	if [ "${LC_ALL+set}" = set ]; then
+		l_report_escape_had_lc_all=1
+		l_report_escape_saved_lc_all=$LC_ALL
+	fi
+	l_report_escape_fast_ok=0
 	if [ "$g_zxfer_report_fast_path" = 1 ]; then
-		l_report_escape_had_lc_all=0
-		if [ "${LC_ALL+set}" = set ]; then
-			l_report_escape_had_lc_all=1
-			l_report_escape_saved_lc_all=$LC_ALL
-		fi
 		LC_ALL=C
-		l_report_escape_fast_ok=0
 		# Printable ASCII without backslashes needs no escaping; bounded
 		# values containing only printable ASCII plus \, TAB, CR, or LF are
 		# escaped in-shell. Checking under LC_ALL=C keeps multibyte locales
@@ -128,47 +131,18 @@ zxfer_escape_report_value_into_result() {
 		case $1 in
 		*[![:print:]]* | *\\*)
 			if [ "${#1}" -le 4096 ]; then
-				l_report_escape_val=$1
 				# Escape backslashes first so \t, \r and \n markers inserted
 				# below are never escaped a second time.
-				for l_report_escape_kind in bs tab cr lf; do
-					case $l_report_escape_kind in
-					bs)
-						l_report_escape_needle="\\"
-						l_report_escape_repl="\\\\"
-						;;
-					tab)
-						l_report_escape_needle=$ZXFER_TAB
-						l_report_escape_repl='\t'
-						;;
-					cr)
-						l_report_escape_needle=$ZXFER_CR
-						l_report_escape_repl='\r'
-						;;
-					lf)
-						l_report_escape_needle=$ZXFER_LF
-						l_report_escape_repl='\n'
-						;;
-					esac
-					case $l_report_escape_val in
-					*"$l_report_escape_needle"*)
-						l_report_escape_rest=$l_report_escape_val
-						l_report_escape_out=""
-						while :; do
-							case $l_report_escape_rest in
-							*"$l_report_escape_needle"*) ;;
-							*) break ;;
-							esac
-							l_report_escape_out=$l_report_escape_out${l_report_escape_rest%%"$l_report_escape_needle"*}$l_report_escape_repl
-							l_report_escape_rest=${l_report_escape_rest#*"$l_report_escape_needle"}
-						done
-						l_report_escape_val=$l_report_escape_out$l_report_escape_rest
-						;;
-					esac
-				done
-				case $l_report_escape_val in
+				zxfer_replace_all_into_result "$1" "\\" "\\\\"
+				zxfer_replace_all_into_result "$g_zxfer_replace_all_result" "$ZXFER_TAB" '\t'
+				zxfer_replace_all_into_result "$g_zxfer_replace_all_result" "$ZXFER_CR" '\r'
+				zxfer_replace_all_into_result "$g_zxfer_replace_all_result" "$ZXFER_LF" '\n'
+				case $g_zxfer_replace_all_result in
 				*[![:print:]]*) ;;
-				*) l_report_escape_fast_ok=1 ;;
+				*)
+					l_report_escape_val=$g_zxfer_replace_all_result
+					l_report_escape_fast_ok=1
+					;;
 				esac
 			fi
 			;;
@@ -177,6 +151,9 @@ zxfer_escape_report_value_into_result() {
 			l_report_escape_fast_ok=1
 			;;
 		esac
+		if [ "$l_report_escape_fast_ok" -eq 1 ] && [ "$2" -eq 1 ]; then
+			zxfer_replace_all_into_result "$l_report_escape_val" "'" "'\"'\"'"
+		fi
 		if [ "$l_report_escape_had_lc_all" -eq 1 ]; then
 			LC_ALL=$l_report_escape_saved_lc_all
 		else
@@ -184,6 +161,7 @@ zxfer_escape_report_value_into_result() {
 		fi
 		if [ "$l_report_escape_fast_ok" -eq 1 ]; then
 			g_zxfer_escaped_report_value_result=$l_report_escape_val
+			[ "$2" -eq 0 ] || g_zxfer_quoted_report_token_result="'$g_zxfer_replace_all_result'"
 			return 0
 		fi
 	fi
@@ -220,6 +198,24 @@ BEGIN {
 }
 ') || return "$?"
 	g_zxfer_escaped_report_value_result=$l_report_escape_val
+	if [ "$2" -eq 1 ]; then
+		LC_ALL=C
+		zxfer_replace_all_into_result "$l_report_escape_val" "'" "'\"'\"'"
+		if [ "$l_report_escape_had_lc_all" -eq 1 ]; then
+			LC_ALL=$l_report_escape_saved_lc_all
+		else
+			unset LC_ALL
+		fi
+		g_zxfer_quoted_report_token_result="'$g_zxfer_replace_all_result'"
+	fi
+}
+
+# Purpose: Escape a report value in the current shell: backslash, tab, CR, and
+# newline become \\ \t \r \n; other C0 bytes and DEL become \xHH.
+# Usage: zxfer_escape_report_value_into_result VALUE; publishes
+# g_zxfer_escaped_report_value_result.
+zxfer_escape_report_value_into_result() {
+	zxfer_escape_or_quote_report_value "$1" 0
 }
 
 # Purpose: Print an escaped report value to stdout.
@@ -234,30 +230,7 @@ zxfer_escape_report_value() {
 # Usage: zxfer_quote_report_token_into_result TOKEN; publishes
 # g_zxfer_quoted_report_token_result.
 zxfer_quote_report_token_into_result() {
-	g_zxfer_quoted_report_token_result=""
-	zxfer_escape_report_value_into_result "$1" || return
-	l_report_quote_had_lc_all=0
-	if [ "${LC_ALL+set}" = set ]; then
-		l_report_quote_had_lc_all=1
-		l_report_quote_saved_lc_all=$LC_ALL
-	fi
-	LC_ALL=C
-	l_report_quote_rest=$g_zxfer_escaped_report_value_result
-	l_report_quote_safe=""
-	while :; do
-		case $l_report_quote_rest in
-		*\'*) ;;
-		*) break ;;
-		esac
-		l_report_quote_safe="$l_report_quote_safe${l_report_quote_rest%%\'*}'\"'\"'"
-		l_report_quote_rest=${l_report_quote_rest#*\'}
-	done
-	if [ "$l_report_quote_had_lc_all" -eq 1 ]; then
-		LC_ALL=$l_report_quote_saved_lc_all
-	else
-		unset LC_ALL
-	fi
-	g_zxfer_quoted_report_token_result="'$l_report_quote_safe$l_report_quote_rest'"
+	zxfer_escape_or_quote_report_value "$1" 1
 }
 
 # Purpose: Render one token as an escaped, single-quoted report word.
@@ -278,13 +251,6 @@ zxfer_quote_command_argv_into_result() {
 		l_quote_argv_output=${l_quote_argv_output:+$l_quote_argv_output }$g_zxfer_quoted_report_token_result
 	done
 	g_zxfer_quoted_command_argv_result=$l_quote_argv_output
-}
-
-# Purpose: Render argv as space-separated report words, one per argument.
-# Usage: l_cmd=$(zxfer_quote_command_argv "$@")
-zxfer_quote_command_argv() {
-	zxfer_quote_command_argv_into_result "$@" || return
-	printf '%s\n' "$g_zxfer_quoted_command_argv_result"
 }
 
 # Purpose: Report whether failure reports may show verbatim command strings.
@@ -539,7 +505,10 @@ zxfer_validate_error_log_parent() {
 		return 1
 	fi
 
-	l_errlog_parent=$(zxfer_get_path_parent_dir "$l_errlog_target")
+	case $l_errlog_target in
+	?*/*) l_errlog_parent=${l_errlog_target%/*} ;;
+	*) l_errlog_parent=/ ;;
+	esac
 	if [ ! -d "$l_errlog_parent" ]; then
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG path \"$l_errlog_target\" because parent directory \"$l_errlog_parent\" does not exist."
 		return 1
@@ -603,7 +572,11 @@ zxfer_validate_existing_error_log_file() {
 		chmod 600 "$l_validate_path" 2>/dev/null || :
 		# A default ACL can widen creation permissions; verify the chmod's
 		# result with a fresh read rather than the pre-chmod record.
-		l_validate_mode=$(zxfer_get_path_mode_octal "$l_validate_path") || l_validate_mode=""
+		if [ -e "$l_validate_path" ] && zxfer_read_path_metadata "$l_validate_path"; then
+			l_validate_mode=$g_zxfer_path_mode_result
+		else
+			l_validate_mode=""
+		fi
 	fi
 	if [ -z "$l_validate_mode" ]; then
 		zxfer_warn_stderr "zxfer: warning: refusing ZXFER_ERROR_LOG file \"$l_validate_path\" because its permissions could not be determined."

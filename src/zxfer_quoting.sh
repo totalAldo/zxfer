@@ -40,8 +40,8 @@
 # owns globals: the load-time constants ZXFER_TAB, ZXFER_LF and ZXFER_CR;
 #   the zxfer_split_begin saves g_zxfer_split_saved_*; and the result globals
 #   g_zxfer_split_tokens_result, g_zxfer_escaped_single_quotes_result,
-#   g_zxfer_literal_token_error_result, g_zxfer_shell_command_result and
-#   g_zxfer_stripped_path_result.
+#   g_zxfer_replace_all_result, g_zxfer_literal_token_error_result,
+#   g_zxfer_shell_command_result and g_zxfer_stripped_path_result.
 # reads globals: none. Each render bumps the -V counter
 #   g_zxfer_profile_command_render_calls, which zxfer_profile.sh owns.
 # mutates caches: none. zxfer_split_begin changes IFS and noglob until
@@ -122,6 +122,30 @@ zxfer_escape_single_quotes_into_result() {
 		l_escape_rest=${l_escape_rest#*\'}
 	done
 	g_zxfer_escaped_single_quotes_result=$g_zxfer_escaped_single_quotes_result$l_escape_rest
+}
+
+# Purpose: Replace every literal NEEDLE in TEXT with REPLACEMENT, left to right,
+# without forking.
+# Usage: zxfer_replace_all_into_result TEXT NEEDLE REPLACEMENT; publishes
+# g_zxfer_replace_all_result. An empty NEEDLE leaves TEXT unchanged.
+zxfer_replace_all_into_result() {
+	g_zxfer_replace_all_result=$1
+	[ -n "$2" ] || return 0
+	case $1 in
+	*"$2"*) ;;
+	*) return 0 ;;
+	esac
+	l_replace_all_rest=$1
+	l_replace_all_out=""
+	while :; do
+		case $l_replace_all_rest in
+		*"$2"*) ;;
+		*) break ;;
+		esac
+		l_replace_all_out=$l_replace_all_out${l_replace_all_rest%%"$2"*}$3
+		l_replace_all_rest=${l_replace_all_rest#*"$2"}
+	done
+	g_zxfer_replace_all_result=$l_replace_all_out$l_replace_all_rest
 }
 
 # Purpose: Split a literal string on whitespace into newline-joined tokens.

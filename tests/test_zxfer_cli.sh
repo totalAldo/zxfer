@@ -123,6 +123,27 @@ test_read_command_line_switches_sets_each_flag_on_its_own() {
 EOF
 }
 
+test_read_command_line_switches_resets_stale_optind() {
+	output=$(
+		(
+			zxfer_init_cli_option_defaults
+			OPTIND=5
+			zxfer_read_command_line_switches -v -R tank/src backup/dst
+			printf 'first:v=%s:R=%s:optind=%s\n' \
+				"$g_option_v_verbose" "$g_option_R_recursive" "$OPTIND"
+
+			zxfer_init_cli_option_defaults
+			zxfer_read_command_line_switches -n -N tank/other backup/other
+			printf 'second:n=%s:N=%s:optind=%s\n' \
+				"$g_option_n_dryrun" "$g_option_N_nonrecursive" "$OPTIND"
+		)
+	)
+
+	assertEquals "zxfer_read_command_line_switches should reset OPTIND on entry for every call." \
+		"first:v=1:R=tank/src:optind=4
+second:n=1:N=tank/other:optind=4" "$output"
+}
+
 test_refresh_compression_commands_clears_stale_safe_commands_without_z() {
 	g_option_z_compress=0
 	g_cmd_compress_safe="evil"

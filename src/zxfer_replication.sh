@@ -300,12 +300,38 @@ $l_iteration_sources"
 ${g_recursive_destination_extra_dataset_list:-}"
 	fi
 	g_zxfer_replication_iteration_list_result=""
-	# One pass deduplicates into depth buckets, followed by grouped planning.
-	l_iteration_result=$(
-		"${g_cmd_awk:-awk}" "$ZXFER_REPLICATION_ITERATION_AWK" <<EOF
+	# Fast path for empty or single-dataset queues: strip blank/whitespace-only
+	# lines (matching awk NF) and dedupe identical copies of one dataset without
+	# forking awk; fall back to awk as soon as a second distinct dataset appears.
+	l_iteration_rest=$l_iteration_sources$ZXFER_LF
+	l_iteration_single=""
+	l_iteration_multi=0
+	while [ -n "$l_iteration_rest" ]; do
+		l_iteration_line=${l_iteration_rest%%"$ZXFER_LF"*}
+		l_iteration_rest=${l_iteration_rest#*"$ZXFER_LF"}
+		case $l_iteration_line in
+		*[!" $ZXFER_TAB"]*) ;;
+		*) continue ;;
+		esac
+		if [ -z "$l_iteration_single" ]; then
+			l_iteration_single=$l_iteration_line
+		elif [ "$l_iteration_line" != "$l_iteration_single" ]; then
+			l_iteration_multi=1
+			break
+		fi
+	done
+	if [ "$l_iteration_multi" -eq 1 ]; then
+		# One pass deduplicates into depth buckets, followed by grouped planning.
+		l_iteration_result=$(
+			"${g_cmd_awk:-awk}" "$ZXFER_REPLICATION_ITERATION_AWK" <<EOF
 $l_iteration_sources
 EOF
-	) || return "$?"
+		) || return "$?"
+	elif [ -n "$l_iteration_single" ]; then
+		l_iteration_result="1$ZXFER_TAB$l_iteration_single"
+	else
+		l_iteration_result=""
+	fi
 	case $l_iteration_result in
 	*"$ZXFER_LF"*)
 		zxfer_prepare_snapshot_plans "$l_iteration_result" || return "$?"
@@ -462,7 +488,7 @@ zxfer_copy_filesystems() {
 
 	if [ -n "$g_zxfer_post_seed_property_sources" ]; then
 		l_copy_post_seed_sources=$(
-			sort -u <<EOF
+			LC_ALL=C sort -u <<EOF
 $g_zxfer_post_seed_property_sources
 EOF
 		) || zxfer_throw_error "Failed to prepare post-seed property reconcile source queue." "$?"
@@ -572,7 +598,7 @@ zxfer_refresh_dataset_iteration_state() {
 # Usage: zxfer_prepare_migration_services, after the first pass's discovery;
 # under -n only previews the commands.
 zxfer_prepare_migration_services() {
-	[ "$g_option_m_migrate" -eq 1 ] || return
+	[ "$g_option_m_migrate" -eq 1 ] || return 0
 	zxfer_set_failure_stage "migration service handling"
 
 	[ -z "$g_option_c_services" ] || zxfer_stopsvcs "$g_option_c_services"
@@ -683,7 +709,7 @@ ${g_recursive_destination_extra_dataset_list:-}"
 	# The preflight visits only snapshot work, in its original order. It reads
 	# the full queue's plans without rebuilding slices or planning again.
 	l_grandfather_rows=$(
-		"${g_cmd_awk:-awk}" "$ZXFER_REPLICATION_ITERATION_AWK" preflight=1 <<EOF
+		"${g_cmd_awk:-awk}" -v preflight=1 "$ZXFER_REPLICATION_ITERATION_AWK" <<EOF
 $g_zxfer_replication_iteration_list_result
 
 $l_grandfather_sources

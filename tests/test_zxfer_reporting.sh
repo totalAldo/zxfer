@@ -208,7 +208,8 @@ test_zxfer_render_failure_report_escapes_raw_control_bytes_in_unsafe_mode() {
 	bell=$(printf '\007')
 	ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
 
-	g_zxfer_original_invocation=$(zxfer_quote_command_argv "./zxfer" "-D" "$(printf 'token%swarn' "$esc")")
+	zxfer_quote_command_argv_into_result "./zxfer" "-D" "$(printf 'token%swarn' "$esc")"
+	g_zxfer_original_invocation=$g_zxfer_quoted_command_argv_result
 	zxfer_record_last_command_argv "/usr/bin/printf" "$(printf 'line%sbell' "$bell")"
 	g_zxfer_failure_message="boom"
 
@@ -351,7 +352,8 @@ test_zxfer_report_quoting_skips_awk_and_sed_for_plain_tokens() {
 			}
 			printf 'escape=<%s>\n' "$(zxfer_escape_report_value 'tank/src@snap 1')"
 			printf 'quote=<%s>\n' "$(zxfer_quote_token_for_report 'tank/src@snap')"
-			printf 'argv=<%s>\n' "$(zxfer_quote_command_argv zfs list 'a b')"
+			zxfer_quote_command_argv_into_result zfs list 'a b'
+			printf 'argv=<%s>\n' "$g_zxfer_quoted_command_argv_result"
 			printf 'fast_bs=<%s>\n' "$(zxfer_escape_report_value 'back\slash')"
 			printf 'plain_helpers=<%s>\n' "$(cat "$helper_log" 2>/dev/null)"
 			printf 'slow_quote=<%s>\n' "$(zxfer_quote_token_for_report "$quote_input")"
@@ -485,6 +487,47 @@ test_zxfer_report_command_into_result_helpers_publish_and_reset_cleanly() {
 		"$output" "fail_status=1 argv=<> cmd=<>"
 }
 
+test_quote_report_token_into_result_restores_lc_all_across_fast_slow_and_error_paths() {
+	l_ctrl=$(printf 'bad\001'\''arg')
+	output=$(
+		(
+			unset LC_ALL
+			zxfer_quote_report_token_into_result "it's\\ok"
+			printf 'fast_unset=%s lc=%s val=<%s>\n' "$?" "${LC_ALL-unset}" \
+				"$g_zxfer_quoted_report_token_result"
+
+			LC_ALL=""
+			zxfer_quote_report_token_into_result "$l_ctrl"
+			printf 'slow_empty=%s lc=<%s> set=%s val=<%s>\n' "$?" "${LC_ALL-unset}" \
+				"${LC_ALL+set}" "$g_zxfer_quoted_report_token_result"
+
+			unset LC_ALL
+			g_zxfer_escaped_report_value_result="stale-esc"
+			g_zxfer_quoted_report_token_result="stale-tok"
+			g_cmd_awk=false
+			zxfer_quote_report_token_into_result "$l_ctrl"
+			printf 'fail_unset=%s lc=%s esc=<%s> tok=<%s>\n' "$?" "${LC_ALL-unset}" \
+				"$g_zxfer_escaped_report_value_result" "$g_zxfer_quoted_report_token_result"
+
+			LC_ALL=POSIX
+			g_zxfer_report_fast_path=0
+			g_cmd_awk="awk"
+			zxfer_quote_report_token_into_result "no-fast'quote"
+			printf 'nofast_posix=%s lc=%s val=<%s>\n' "$?" "${LC_ALL-unset}" \
+				"$g_zxfer_quoted_report_token_result"
+		)
+	)
+
+	assertContains "Fast-path quoting should preserve unset LC_ALL." \
+		"$output" "fast_unset=0 lc=unset val=<'it'\"'\"'s\\\\ok'>"
+	assertContains "Slow-path quoting should preserve empty LC_ALL." \
+		"$output" "slow_empty=0 lc=<> set=set val=<'bad\\x01'\"'\"'arg'>"
+	assertContains "Failed slow-path quoting should restore LC_ALL and clear both results." \
+		"$output" "fail_unset=1 lc=unset esc=<> tok=<>"
+	assertContains "Slow-path quoting with fast path disabled should restore LC_ALL." \
+		"$output" "nofast_posix=0 lc=POSIX val=<'no-fast'\"'\"'quote'>"
+}
+
 test_zxfer_report_quoting_takes_the_slow_path_without_print_class_support() {
 	helper_log="$TEST_TMPDIR/report-quoting-no-class.log"
 	rm -f "$helper_log"
@@ -502,7 +545,8 @@ test_zxfer_report_quoting_takes_the_slow_path_without_print_class_support() {
 			}
 			printf 'escape=<%s>\n' "$(zxfer_escape_report_value 'tank/src')"
 			printf 'quote=<%s>\n' "$(zxfer_quote_token_for_report 'tank/src')"
-			printf 'argv=<%s>\n' "$(zxfer_quote_command_argv zfs 'a b')"
+			zxfer_quote_command_argv_into_result zfs 'a b'
+			printf 'argv=<%s>\n' "$g_zxfer_quoted_command_argv_result"
 		)
 	)
 
@@ -539,7 +583,8 @@ test_zxfer_report_quoting_renders_invalid_multibyte_bytes_under_utf8() {
 	argv_output=$(
 		LC_ALL=$utf8_locale
 		export LC_ALL
-		zxfer_quote_command_argv "$slow_token" "$fast_token" 2>"$stderr_log"
+		zxfer_quote_command_argv_into_result "$slow_token" "$fast_token" 2>"$stderr_log"
+		printf '%s\n' "$g_zxfer_quoted_command_argv_result"
 	)
 	argv_stderr=$(cat "$stderr_log")
 	fast_output=$(
@@ -646,7 +691,8 @@ Beep requested but /dev/speaker missing; skipping." "$output"
 test_zxfer_report_command_rendering_quotes_each_argument_on_one_line() {
 	g_zxfer_original_invocation=""
 	l_newline_arg=$(printf 'line1\nline2')
-	result=$(zxfer_quote_command_argv "./zxfer" "value with space" "$l_newline_arg" "apost'rophe")
+	zxfer_quote_command_argv_into_result "./zxfer" "value with space" "$l_newline_arg" "apost'rophe"
+	result=$g_zxfer_quoted_command_argv_result
 
 	assertEquals "Quoted argv should remain one-line and shell-safe for reports." \
 		"'./zxfer' 'value with space' 'line1\\nline2' 'apost'\"'\"'rophe'" "$result"
@@ -967,6 +1013,61 @@ test_zxfer_validate_existing_error_log_file_never_changes_a_planted_entry() {
 	assertContains "The hard-link refusal should give the link count." \
 		"$(cat "$TEST_TMPDIR/planted_hard_link.stderr")" "because it has 2 hard links"
 	assertEquals "The planted entries' target must keep its mode." "644" "$perms"
+}
+
+test_error_log_parent_and_created_mode_checks_work_in_shell() {
+	physical_tmpdir=$(cd -P "$TEST_TMPDIR" && pwd)
+	created_log="$physical_tmpdir/created_meta_fail.log"
+	: >"$created_log"
+	chmod 600 "$created_log"
+
+	parent_output=$(
+		(
+			zxfer_find_symlink_path_component() { return 1; }
+			zxfer_get_path_parent_dir() {
+				printf 'unexpected-parent-helper\n'
+				return 99
+			}
+			zxfer_validate_temp_root_candidate() {
+				printf 'parent=%s\n' "$1" >&2
+				return 0
+			}
+			zxfer_validate_error_log_parent "/top.log"
+			zxfer_validate_error_log_parent "/"
+			zxfer_validate_error_log_parent "$physical_tmpdir/sub.log"
+		) 2>&1
+	)
+	assertEquals "Error-log parent validation should derive / and directory parents in-shell." \
+		"parent=/
+parent=/
+parent=$physical_tmpdir" "$parent_output"
+
+	mode_output=$(
+		(
+			l_meta_calls=0
+			zxfer_get_path_mode_octal() {
+				printf 'unexpected-mode-helper\n' >&2
+				return 99
+			}
+			zxfer_read_path_metadata() {
+				l_meta_calls=$((l_meta_calls + 1))
+				if [ "$l_meta_calls" -eq 1 ]; then
+					zxfer_parse_path_metadata_line "$(command ls -ldin "$1")"
+					return
+				fi
+				g_zxfer_path_mode_result=""
+				return 1
+			}
+			zxfer_validate_existing_error_log_file "$created_log" 1
+			printf 'status=%s\n' "$?"
+		) 2>&1
+	)
+	assertContains "Created-log post-chmod verification should refuse when metadata read fails." \
+		"$mode_output" "because its permissions could not be determined."
+	assertContains "Created-log post-chmod metadata failure should return 1." \
+		"$mode_output" "status=1"
+	assertNotContains "Created-log post-chmod verification should not call zxfer_get_path_mode_octal." \
+		"$mode_output" "unexpected-mode-helper"
 }
 
 # Opening a FIFO for writing blocks until someone reads it, which would hang

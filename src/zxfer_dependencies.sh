@@ -180,7 +180,7 @@ zxfer_find_required_tool() {
 		zxfer_validate_resolved_tool_path "$g_zxfer_tool_path_result" "${2:-$1}"
 		return
 	fi
-	g_zxfer_required_tool_result="Required dependency \"${2:-$1}\" not found in secure PATH ($g_zxfer_secure_path). Set ZXFER_SECURE_PATH or install the binary."
+	g_zxfer_required_tool_result="Required dependency \"${2:-$1}\" not found in secure PATH (${g_zxfer_secure_path:-$ZXFER_DEFAULT_SECURE_PATH}). Set ZXFER_SECURE_PATH or install the binary."
 	return 1
 }
 

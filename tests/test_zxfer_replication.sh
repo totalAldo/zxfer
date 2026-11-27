@@ -342,7 +342,8 @@ tank/src/child"
 }
 
 test_iteration_list_awk_failure_clears_previous_result() {
-	g_recursive_source_list="tank/src"
+	g_recursive_source_list="tank/src
+tank/src/child"
 	g_zxfer_replication_iteration_list_result="stale"
 	saved_awk=${g_cmd_awk:-awk}
 	g_cmd_awk=false
@@ -353,6 +354,43 @@ test_iteration_list_awk_failure_clears_previous_result() {
 
 	assertEquals "A failed merge must propagate failure." 1 "$status"
 	assertEquals "A failed merge must not publish stale work." "" "$g_zxfer_replication_iteration_list_result"
+}
+
+test_iteration_list_fast_path_handles_empty_and_single_dataset_without_awk() {
+	output=$(
+		(
+			g_cmd_awk=false
+			g_option_R_recursive="tank/src"
+			g_option_d_delete_destination_snapshots=1
+
+			g_recursive_source_list="tank/src"
+			g_recursive_source_dataset_list="   ${ZXFER_LF}tank/src${ZXFER_LF}${ZXFER_TAB}  "
+			g_recursive_destination_extra_dataset_list="${ZXFER_LF}tank/src${ZXFER_LF}"
+			zxfer_build_replication_iteration_list 1
+			printf 'dedup=%s|<%s>\n' "$?" "$g_zxfer_replication_iteration_list_result"
+
+			g_option_R_recursive=""
+			g_option_d_delete_destination_snapshots=0
+			g_recursive_source_list="  ${ZXFER_LF}tank/my data${ZXFER_LF}${ZXFER_TAB}"
+			zxfer_build_replication_iteration_list 0
+			printf 'space=%s|<%s>\n' "$?" "$g_zxfer_replication_iteration_list_result"
+
+			g_recursive_source_list="   ${ZXFER_LF}${ZXFER_TAB}  ${ZXFER_LF}"
+			zxfer_build_replication_iteration_list 0
+			printf 'empty=%s|<%s>\n' "$?" "$g_zxfer_replication_iteration_list_result"
+		)
+	)
+
+	assertEquals "Empty and single-dataset queues should resolve in-shell without awk, stripping blank/whitespace lines and deduping identical entries." \
+		"dedup=0|<1${ZXFER_TAB}tank/src>
+space=0|<1${ZXFER_TAB}tank/my data>
+empty=0|<>" "$output"
+}
+
+test_prepare_migration_services_returns_zero_when_migrate_disabled() {
+	g_option_m_migrate=0
+	zxfer_prepare_migration_services
+	assertEquals "Migration preparation must return 0 when -m is disabled." 0 "$?"
 }
 
 test_iteration_list_split_failure_clears_previous_result() {
@@ -533,6 +571,42 @@ props tank/src/b
 reset
 props tank/src/b
 props tank/src/my a" "$(cat "$log")"
+}
+
+test_copy_filesystems_sorts_post_seed_queue_under_c_locale() {
+	g_option_P_transfer_property=1
+	g_initial_source="tank/src"
+	g_recursive_source_list="tank/src"
+	log="$TEST_TMPDIR/post_seed_lc_all.log"
+	: >"$log"
+
+	(
+		QUEUE_LOG="$log"
+		zxfer_build_replication_iteration_list() {
+			g_zxfer_replication_iteration_list_result="tank/src/a
+tank/src/B"
+		}
+		zxfer_set_actual_dest() { g_actual_dest="backup/$1"; }
+		zxfer_inspect_delete_snap() { :; }
+		zxfer_transfer_properties() { printf 'props %s\n' "$1" >>"$QUEUE_LOG"; }
+		zxfer_copy_snapshots() { g_dest_seed_requires_property_reconcile=1; }
+		zxfer_note_destination_dataset_exists() { :; }
+		zxfer_reset_destination_property_iteration_cache() { :; }
+		sort() {
+			printf 'sort_lc=%s\n' "${LC_ALL-unset}" >>"$QUEUE_LOG"
+			LC_ALL=C command sort "$@"
+		}
+		LC_ALL=en_US.UTF-8
+		export LC_ALL
+		zxfer_copy_filesystems
+	)
+
+	assertEquals "Post-seed queue sorting must run under LC_ALL=C for deterministic byte order." \
+		"props tank/src/a
+props tank/src/B
+sort_lc=C
+props tank/src/B
+props tank/src/a" "$(cat "$log")"
 }
 
 test_copy_filesystems_rethrows_post_seed_queue_dedupe_failures() {

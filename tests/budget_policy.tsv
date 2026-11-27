@@ -25,6 +25,6 @@
 # timers now read it in the current shell (zxfer_profile_start_timer), so the
 # row stays at 0 to keep a forking clock helper of that name from returning.
 callers	zxfer_profile_now_ms	0
-callers	eval 	1
+callers	eval 	1	src/zxfer_exec.sh
 callers	$(date	8
-callers	mktemp	6
+callers	mktemp	6	src/zxfer_backup_metadata.sh,src/zxfer_runtime.sh,src/zxfer_ssh_transport.sh

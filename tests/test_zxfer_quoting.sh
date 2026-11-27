@@ -287,6 +287,62 @@ test_quote_cli_tokens_quotes_each_literal_token_and_rejects_shell_quoting() {
 		"compression command $QUOTING_TEST_REJECTION_SUFFIX" "$g_zxfer_literal_token_error_result"
 }
 
+test_replace_all_into_result_handles_literals_empty_needle_and_control_bytes() {
+	g_zxfer_replace_all_result="stale"
+	zxfer_replace_all_into_result "a/b/c" "/" ":" >"$TEST_TMPDIR/replace.out"
+	assertEquals "Multiple occurrences should be replaced left to right." \
+		"0:a:b:c" "$?:$g_zxfer_replace_all_result"
+	assertFalse "replace_all_into_result should print nothing." \
+		"[ -s '$TEST_TMPDIR/replace.out' ]"
+
+	zxfer_replace_all_into_result 'a\b\c' "\\" "\\\\"
+	assertEquals "Replacement containing needle should not loop or double-replace." \
+		'0:a\\b\\c' "$?:$g_zxfer_replace_all_result"
+
+	zxfer_replace_all_into_result "100% ok%" "%" "%25"
+	assertEquals "Percent-encoding should expand each percent once." \
+		"0:100%25 ok%25" "$?:$g_zxfer_replace_all_result"
+
+	zxfer_replace_all_into_result "it's a 'test'" "'" "'\"'\"'"
+	assertEquals "Single quotes should be replaced literally." \
+		"0:it'\"'\"'s a '\"'\"'test'\"'\"'" "$?:$g_zxfer_replace_all_result"
+
+	zxfer_replace_all_into_result "a${ZXFER_TAB}b${ZXFER_CR}c${ZXFER_LF}d" "$ZXFER_TAB" '\t'
+	zxfer_replace_all_into_result "$g_zxfer_replace_all_result" "$ZXFER_CR" '\r'
+	zxfer_replace_all_into_result "$g_zxfer_replace_all_result" "$ZXFER_LF" '\n'
+	assertEquals "Control-byte needles should be replaced cleanly." \
+		'a\tb\rc\nd' "$g_zxfer_replace_all_result"
+
+	zxfer_replace_all_into_result "a*b?c[a]d" "*" "STAR"
+	assertEquals "Asterisk needle must match literally, not as a glob." \
+		"aSTARb?c[a]d" "$g_zxfer_replace_all_result"
+	zxfer_replace_all_into_result "a*b?c[a]d" "?" "Q"
+	assertEquals "Question-mark needle must match literally, not as a glob." \
+		"a*bQc[a]d" "$g_zxfer_replace_all_result"
+	zxfer_replace_all_into_result "a*b?c[a]d" "[a]" "BRK"
+	assertEquals "Bracket needle must match literally, not as a character class." \
+		"a*b?cBRKd" "$g_zxfer_replace_all_result"
+
+	zxfer_replace_all_into_result "drop--me--" "--" ""
+	assertEquals "Empty replacement should remove every needle." \
+		"dropme" "$g_zxfer_replace_all_result"
+
+	g_zxfer_replace_all_result="stale"
+	zxfer_replace_all_into_result "keep-me" "" "X"
+	assertEquals "Empty needle must return 0 without looping and leave TEXT unchanged." \
+		"0:keep-me" "$?:$g_zxfer_replace_all_result"
+
+	g_zxfer_replace_all_result="stale"
+	zxfer_replace_all_into_result "unchanged" "missing" "X"
+	assertEquals "Absent needle must publish TEXT unchanged and overwrite stale results." \
+		"0:unchanged" "$?:$g_zxfer_replace_all_result"
+
+	g_zxfer_replace_all_result="stale"
+	zxfer_replace_all_into_result "" "x" "y"
+	assertEquals "Empty TEXT should publish empty string." \
+		"0:" "$?:$g_zxfer_replace_all_result"
+}
+
 test_strip_trailing_slashes_publishes_the_result() {
 	for l_case in "pool/dst///:pool/dst" "a//b/:a//b" "pool:pool" "///:///" "/:/" ":"; do
 		l_input=${l_case%%:*}
