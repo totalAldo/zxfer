@@ -227,6 +227,42 @@ tank/fs@snap3	300"
 		"$output"
 }
 
+test_prepare_snapshot_delete_creation_state_preserves_backslashes_and_handles_reset_failure() {
+	# ENVIRON keeps literal backslash sequences in common snapshot paths intact
+	# (awk -v would expand \t into a tab and miss the creation-time lookup).
+	g_actual_dest='backup/a\tb'
+	g_last_common_snap="tank/src@common${ZXFER_TAB}111"
+	stub_creation_rows 'backup/a\tb@common	200
+backup/a\tb@old	100'
+	delete_plan_file=$TEST_TMPDIR/creation_backslash.plan
+	printf 'delete\tbackup/a\\tb@old\n' >"$delete_plan_file"
+	set -C
+	zxfer_prepare_snapshot_delete_creation_state "$delete_plan_file"
+	backslash_status=$?
+	set +C
+	assertEquals "Creation-time evaluation should succeed under noclobber with literal backslashes." \
+		0 "$backslash_status"
+	assertEquals "Literal backslash sequences in the common snapshot path must match creation rows." \
+		0 "$g_deleted_dest_newer_snapshots"
+
+	reset_status=0
+	reset_output=$(
+		(
+			stub_creation_rows "backup/dst@common	200"
+			zxfer_write_runtime_artifact_file() { return 47; }
+			zxfer_throw_error() {
+				printf '%s\n' "$1"
+				exit "${2:-1}"
+			}
+			prepare_test_delete_creation_state "backup/dst@old"
+		)
+	) || reset_status=$?
+	assertEquals "A failed creation-file reset should preserve the write helper status." \
+		47 "$reset_status"
+	assertEquals "A failed creation-file reset should report the reset failure." \
+		"Failed to reset the snapshot creation-time file." "$reset_output"
+}
+
 test_grandfather_policy_allows_young_snapshots_and_blocks_the_first_old_or_unknown_one_in_the_calling_shell() {
 	g_option_g_grandfather_protection=5
 	current_epoch=$(date +%s)
@@ -406,6 +442,19 @@ backup/a/nested	tank/a/nested"
 		"tank/a/nested" "$g_zxfer_diverged_converged_marker_source"
 	assertFalse "Marker lookup must not prefix-match destination datasets." \
 		"zxfer_find_diverged_converged_marker backup/a/nest"
+	marker_first_status=0
+	zxfer_find_diverged_converged_marker backup/a || marker_first_status=$?
+	assertEquals "Marker lookup should match the first destination dataset." \
+		0 "$marker_first_status"
+	assertEquals "Marker lookup should publish the first marker's source dataset." \
+		"tank/a" "$g_zxfer_diverged_converged_marker_source"
+	for bad_marker in "" "backup/a${ZXFER_TAB}tank/a" "backup/a${ZXFER_LF}backup/a/nested"; do
+		bad_status=0
+		zxfer_find_diverged_converged_marker "$bad_marker" || bad_status=$?
+		assertEquals "Marker lookup must reject empty, tab, or newline keys." 1 "$bad_status"
+		assertEquals "Rejected marker lookup must clear the published source." "" \
+			"$g_zxfer_diverged_converged_marker_source"
+	done
 
 	zxfer_unmark_diverged_converged_dataset "backup/a"
 	assertEquals "Unmarking should drop only the named destination dataset." \

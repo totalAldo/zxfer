@@ -60,6 +60,17 @@ tank/src@source-only	222" "$(cat "$missing_file")"
 	assertEquals "Single-pass recursive diff should strip only the comm prefix from destination-only records." \
 		"tank/src@dest-only	333
 tank/src@same	999" "$(cat "$extra_file")"
+	assertEquals "Single-pass recursive diff should publish split counts and file-pair provenance." \
+		"2|2|$missing_file|$extra_file" \
+		"$g_zxfer_delta_missing_count|$g_zxfer_delta_extra_count|$g_zxfer_delta_count_missing_file|$g_zxfer_delta_count_extra_file"
+
+	# Both outputs are truncated even when one side has zero records.
+	printf '%s\n' "tank/src@only-source	111" >"$source_file"
+	: >"$dest_file"
+	zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+	assertEquals "Missing-only diff should truncate stale extra records." "" "$(cat "$extra_file")"
+	assertEquals "Missing-only diff should publish 1/0 counts." \
+		"1|0" "$g_zxfer_delta_missing_count|$g_zxfer_delta_extra_count"
 }
 
 test_write_snapshot_delta_files_preserves_comm_and_splitter_failures() {
@@ -530,6 +541,52 @@ EOF
 		"$output" "Failed to count the recursive snapshot delta."
 	assertNotContains "A failed delta count should not print a zeroed summary." \
 		"$output" "Recursive snapshot delta summary"
+}
+
+test_report_recursive_snapshot_delta_reuses_split_counts_and_fast_paths_empty_files() {
+	source_file="$TEST_TMPDIR/p2_source.txt"
+	dest_file="$TEST_TMPDIR/p2_dest.txt"
+	missing_file="$TEST_TMPDIR/p2_missing.txt"
+	extra_file="$TEST_TMPDIR/p2_extra.txt"
+	scratch_file="$TEST_TMPDIR/p2_scratch.txt"
+	printf 'tank/src@s1\t1\ntank/src/a@s2\t2\n' | LC_ALL=C sort >"$source_file"
+	printf 'tank/src@extra\t9\n' >"$dest_file"
+
+	# Provenanced split counts let delta reporting skip awk while counting the
+	# final post-filter/-prune dataset lists in-shell (matching awk NF).
+	output=$(
+		zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+		g_cmd_awk=false
+		g_option_v_verbose=1
+		g_option_V_very_verbose=0
+		g_recursive_source_list="tank/src${ZXFER_LF}   ${ZXFER_LF}${ZXFER_TAB}${ZXFER_LF}tank/src/a"
+		g_recursive_destination_extra_dataset_list="tank/src"
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+		printf 'provenance=<%s|%s>\n' \
+			"$g_zxfer_delta_count_missing_file" "$g_zxfer_delta_count_extra_file"
+	)
+	assertEquals "Provenanced delta report should succeed without spawning awk." 0 "$?"
+	assertContains "Provenanced delta report should emit split snapshot counts and final in-shell dataset counts." \
+		"$output" "Recursive snapshot delta summary: snapshots_missing_on_destination=2 snapshots_missing_on_source=1 source_datasets=2 destination_extra_datasets=1"
+	assertContains "Consuming provenanced counts should clear provenance." \
+		"$output" "provenance=<|>"
+
+	# Empty readable delta files fast-path to 0/0 without awk and still emit -V.
+	: >"$missing_file"
+	: >"$extra_file"
+	empty_output=$(
+		g_cmd_awk=false
+		g_option_v_verbose=0
+		g_option_V_very_verbose=1
+		g_recursive_source_list=""
+		g_recursive_destination_extra_dataset_list=""
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+	)
+	assertEquals "Empty readable delta files should fast-path without awk." 0 "$?"
+	assertContains "Empty fast-path must still emit the -V source dataset count." \
+		"$empty_output" "Source dataset count: 0"
+	assertContains "Empty fast-path must still emit the -V extra section." \
+		"$empty_output" "====== Extra Destination snapshots not in source ======"
 }
 
 test_set_g_recursive_source_list_reports_recursive_snapshot_diff_failures() {
@@ -1326,6 +1383,7 @@ test_fast_recursive_noop_owner_keeps_paths_pids_and_timers_across_helper_scratch
 				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA'"
 			}
 			zxfer_start_fast_noop_destination_producer() {
+				owner_sorted_path=$1
 				owner_raw_path=$4
 				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapB"
 				ZXFER_TEST_FAST_NOOP_DESTINATION_RAW="tank/dst@snapB"
@@ -1340,6 +1398,7 @@ test_fast_recursive_noop_owner_keeps_paths_pids_and_timers_across_helper_scratch
 			printf 'status=%s timers=%s\n' "$status" "$owner_timers"
 			while IFS= read -r owner_proof_path; do
 				[ "$owner_proof_path" != "$owner_raw_path" ] || continue
+				[ "$owner_proof_path" != "$owner_sorted_path" ] || continue
 				[ ! -e "$owner_proof_path" ] || printf 'unreleased=%s\n' "$owner_proof_path"
 			done <<EOF
 $owner_proof_paths
@@ -1348,13 +1407,145 @@ EOF
 				[ "$(cat "$owner_raw_path")" = "tank/dst@snapB" ]; then
 				printf 'raw retained\n'
 			fi
+			if [ "$g_zxfer_snapshot_discovery_destination_sorted_file" = "$owner_sorted_path" ] &&
+				[ "$(cat "$owner_sorted_path")" = "tank/src@snapB" ]; then
+				printf 'sorted retained\n'
+			fi
 			printf 'producer records=<%s>\n' "$g_zxfer_cleanup_pid_records"
 		)
 	)
-	assertEquals "Fallback retains its raw listing and releases reaped proof resources despite helper scratch changes." \
+	assertEquals "Fallback retains its raw and pre-sorted listings and releases reaped proof resources despite helper scratch changes." \
 		"status=1 timers=1,2,3
 raw retained
+sorted retained
 producer records=<>" "$output"
+}
+
+test_fast_noop_fallback_reuses_sorted_destination_only_when_unfiltered_and_clean() {
+	# Unfiltered clean fallback reuses .destination without re-normalizing,
+	# sets the destination existence cache, retains .raw as record cache when
+	# work is found, and releases .destination on both success and failure.
+	reuse_output=$(
+		(
+			g_option_R_recursive="-R"
+			g_option_x_exclude_datasets=""
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA${ZXFER_TAB}101' 'tank/src@snapB${ZXFER_TAB}102'"
+			}
+			zxfer_start_fast_noop_destination_producer() {
+				reused_sorted_path=$1
+				reused_raw_path=$4
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapA${ZXFER_TAB}101"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_RAW="backup/dst/src@snapA${ZXFER_TAB}101"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			proof_status=0
+			zxfer_try_fast_recursive_noop_discovery || proof_status=$?
+			zxfer_write_source_snapshot_list_to_file() {
+				printf 'tank/src@snapA\t101\ntank/src@snapB\t102\n' >"$1"
+				: >"$2"
+				printf 'tank/src@snapA\t101\ntank/src@snapB\t102\n' >"$3"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_normalize_destination_snapshot_list() {
+				printf 'unexpected normalize\n'
+				return 99
+			}
+			zxfer_write_destination_snapshot_list_to_files() {
+				printf 'unexpected dest list\n'
+				return 98
+			}
+			zxfer_run_destination_zfs_cmd() {
+				printf '%s\n' "backup/dst" "backup/dst/src"
+			}
+			full_status=0
+			zxfer_run_full_snapshot_discovery || full_status=$?
+			sorted_exists=0
+			[ ! -e "$reused_sorted_path" ] || sorted_exists=1
+			raw_retained=0
+			[ "$g_zxfer_destination_snapshot_record_cache_file" != "$reused_raw_path" ] ||
+				[ ! -f "$reused_raw_path" ] || raw_retained=1
+			cache_exists=0
+			zxfer_destination_exists backup/dst/src cache && cache_exists=1 || :
+			printf 'proof=%s full=%s list=<%s> cache=%s sorted_exists=%s raw_retained=%s handoff=<%s|%s>\n' \
+				"$proof_status" "$full_status" "$g_recursive_source_list" "$cache_exists" \
+				"$sorted_exists" "$raw_retained" \
+				"$g_zxfer_snapshot_discovery_destination_listing_file" \
+				"$g_zxfer_snapshot_discovery_destination_sorted_file"
+		)
+	)
+	assertEquals "Unfiltered clean fallback should skip destination re-normalization and release the reused sorted file." \
+		"proof=1 full=0 list=<tank/src> cache=1 sorted_exists=0 raw_retained=1 handoff=<|>" "$reuse_output"
+
+	# On full-discovery failure, both handed-off .raw and .destination are removed.
+	failure_output=$(
+		(
+			g_option_R_recursive="-R"
+			zxfer_build_source_snapshot_name_list_cmd() {
+				g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA${ZXFER_TAB}101'"
+			}
+			zxfer_start_fast_noop_destination_producer() {
+				fail_sorted_path=$1
+				fail_raw_path=$4
+				ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapB${ZXFER_TAB}102"
+				ZXFER_TEST_FAST_NOOP_DESTINATION_RAW="backup/dst/src@snapB${ZXFER_TAB}102"
+				zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+			}
+			zxfer_try_fast_recursive_noop_discovery || :
+			zxfer_write_source_snapshot_list_to_file() { return 53; }
+			fail_status=0
+			zxfer_run_full_snapshot_discovery || fail_status=$?
+			leftover=0
+			[ ! -e "$fail_sorted_path" ] && [ ! -e "$fail_raw_path" ] || leftover=1
+			printf 'status=%s leftover=%s\n' "$fail_status" "$leftover"
+		)
+	)
+	assertEquals "Full-discovery failure must release both handed-off proof files." \
+		"status=53 leftover=0" "$failure_output"
+
+	# When -x is set or destination normalization failed, .destination must NOT
+	# be handed off (only .raw may survive).
+	for skip_case in exclude dest_error; do
+		skip_output=$(
+			(
+				g_option_R_recursive="-R"
+				[ "$skip_case" != exclude ] || g_option_x_exclude_datasets="/skip$"
+				zxfer_build_source_snapshot_name_list_cmd() {
+					g_zxfer_shell_command_result="printf '%s\n' 'tank/src@snapA${ZXFER_TAB}101'"
+				}
+				zxfer_start_fast_noop_destination_producer() {
+					skip_sorted_path=$1
+					skip_raw_path=$4
+					ZXFER_TEST_FAST_NOOP_DESTINATION_SORTED="tank/src@snapB${ZXFER_TAB}102"
+					ZXFER_TEST_FAST_NOOP_DESTINATION_RAW="backup/dst/src@snapB${ZXFER_TAB}102"
+					[ "$skip_case" != dest_error ] || ZXFER_TEST_FAST_NOOP_DESTINATION_STREAM_STATUS=19
+					zxfer_test_start_fast_noop_destination_fifo_producer "$@"
+				}
+				proof_status=0
+				zxfer_try_fast_recursive_noop_discovery || proof_status=$?
+				sorted_exists=0
+				[ ! -e "$skip_sorted_path" ] || sorted_exists=1
+				raw_match=0
+				[ "$g_zxfer_snapshot_discovery_destination_listing_file" != "$skip_raw_path" ] || raw_match=1
+				printf 'proof=%s raw=%s sorted_global=<%s> sorted_exists=%s\n' \
+					"$proof_status" "$raw_match" \
+					"$g_zxfer_snapshot_discovery_destination_sorted_file" "$sorted_exists"
+			)
+		)
+		assertEquals "Fast proof [$skip_case] must not hand off .destination." \
+			"proof=1 raw=1 sorted_global=<> sorted_exists=0" "$skip_output"
+	done
+
+	# Reset clears the pre-sorted handoff and delta provenance globals.
+	g_zxfer_snapshot_discovery_destination_sorted_file="/tmp/stale.sorted"
+	g_zxfer_delta_missing_count=3
+	g_zxfer_delta_extra_count=4
+	g_zxfer_delta_count_missing_file="/tmp/stale.missing"
+	g_zxfer_delta_count_extra_file="/tmp/stale.extra"
+	zxfer_reset_snapshot_discovery_state
+	assertEquals "Discovery reset should clear pre-sorted handoff and delta count provenance." \
+		"||||" \
+		"$g_zxfer_snapshot_discovery_destination_sorted_file|$g_zxfer_delta_missing_count|$g_zxfer_delta_extra_count|$g_zxfer_delta_count_missing_file|$g_zxfer_delta_count_extra_file"
 }
 
 # A destination/setup failure can reach release before source wait. Keep the

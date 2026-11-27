@@ -76,9 +76,16 @@ zxfer_forget_snapshot_slices() {
 	g_zxfer_snapshot_slice_destination=""
 }
 
-# Purpose: Reset the per-dataset plan, delete, and divergence state.
-# Usage: Called by session initialization and test resets.
-zxfer_reset_snapshot_plan_state() {
+# Purpose: Reset all snapshot plan, slice, delete, divergence, and scratch
+# state for a new session.
+# Usage: zxfer_reset_snapshot_plan_session_state, from session initialization
+# and test resets.
+zxfer_reset_snapshot_plan_session_state() {
+	g_zxfer_snapshot_plan_file=""
+	g_zxfer_snapshot_recheck_file=""
+	g_zxfer_snapshot_creation_file=""
+	g_zxfer_snapshot_slice_base=""
+	zxfer_forget_snapshot_slices
 	zxfer_publish_snapshot_transfer_plan "" "" "" 0 ""
 	g_did_delete_dest_snapshots=0
 	g_deleted_dest_newer_snapshots=0
@@ -95,17 +102,6 @@ zxfer_reset_snapshot_plan_state() {
 	g_zxfer_diverged_snapshot_examples=""
 	g_zxfer_diverged_converged_datasets=""
 	g_zxfer_diverged_converged_marker_source=""
-}
-
-# Purpose: Reset all snapshot plan, slice, and scratch state for a new session.
-# Usage: zxfer_reset_snapshot_plan_session_state, from session initialization.
-zxfer_reset_snapshot_plan_session_state() {
-	g_zxfer_snapshot_plan_file=""
-	g_zxfer_snapshot_recheck_file=""
-	g_zxfer_snapshot_creation_file=""
-	g_zxfer_snapshot_slice_base=""
-	zxfer_forget_snapshot_slices
-	zxfer_reset_snapshot_plan_state
 }
 
 # Purpose: Publish the current dataset's transfer range and exact eligibility.
@@ -403,12 +399,12 @@ zxfer_load_snapshot_plan_summary() {
 	[ -r "$1" ] || return 1
 	while IFS= read -r l_plan_summary_row; do
 		case $l_plan_summary_row in
-		"common	"*) g_zxfer_plan_common_snapshot=${l_plan_summary_row#common	} ;;
-		"diverged	"*)
-			g_zxfer_diverged_snapshot_examples=${g_zxfer_diverged_snapshot_examples:+$g_zxfer_diverged_snapshot_examples$ZXFER_LF}${l_plan_summary_row#diverged	}
+		"common$ZXFER_TAB"*) g_zxfer_plan_common_snapshot=${l_plan_summary_row#"common$ZXFER_TAB"} ;;
+		"diverged$ZXFER_TAB"*)
+			g_zxfer_diverged_snapshot_examples=${g_zxfer_diverged_snapshot_examples:+$g_zxfer_diverged_snapshot_examples$ZXFER_LF}${l_plan_summary_row#"diverged$ZXFER_TAB"}
 			;;
-		"error	3") return 3 ;;
-		"error	"*) return 1 ;;
+		"error${ZXFER_TAB}3") return 3 ;;
+		"error$ZXFER_TAB"*) return 1 ;;
 		__ZXFER_SNAPSHOT_SUMMARY__)
 			IFS= read -r g_zxfer_plan_transfer_first &&
 				IFS= read -r g_zxfer_plan_transfer_final &&
@@ -466,17 +462,21 @@ zxfer_plan_dataset_snapshots() {
 	if [ -z "$l_plan_file" ]; then
 		# Live rechecks and direct callers use the same algorithm. Their result
 		# stays separate from the immutable pass plans and active transfer state.
-		if [ -n "${g_zxfer_snapshot_plan_file:-}" ] &&
-			[ "$g_zxfer_snapshot_plan_file" = "${g_zxfer_transfer_plan_file:-}" ]; then
-			zxfer_ensure_runtime_artifact_file "${g_zxfer_snapshot_recheck_file:-}" zxfer-snapshot-plan ||
-				zxfer_throw_error "Failed to allocate the snapshot plan file." "$?"
-			g_zxfer_snapshot_recheck_file=$g_zxfer_runtime_artifact_path_result
-		else
-			zxfer_ensure_runtime_artifact_file "${g_zxfer_snapshot_plan_file:-}" zxfer-snapshot-plan ||
-				zxfer_throw_error "Failed to allocate the snapshot plan file." "$?"
-			g_zxfer_snapshot_plan_file=$g_zxfer_runtime_artifact_path_result
+		l_plan_use_recheck=0
+		l_plan_candidate=${g_zxfer_snapshot_plan_file:-}
+		if [ -n "$l_plan_candidate" ] &&
+			[ "$l_plan_candidate" = "${g_zxfer_transfer_plan_file:-}" ]; then
+			l_plan_use_recheck=1
+			l_plan_candidate=${g_zxfer_snapshot_recheck_file:-}
 		fi
+		zxfer_ensure_runtime_artifact_file "$l_plan_candidate" zxfer-snapshot-plan ||
+			zxfer_throw_error "Failed to allocate the snapshot plan file." "$?"
 		l_plan_file=$g_zxfer_runtime_artifact_path_result
+		if [ "$l_plan_use_recheck" -eq 1 ]; then
+			g_zxfer_snapshot_recheck_file=$l_plan_file
+		else
+			g_zxfer_snapshot_plan_file=$l_plan_file
+		fi
 		ZXFER_AWK_PLAN_FILE=$l_plan_file \
 			ZXFER_AWK_PLAN_VERBOSE=${g_option_v_verbose:-0} \
 			ZXFER_AWK_SOURCE_DATASET=$l_plan_source \
@@ -516,12 +516,12 @@ zxfer_report_snapshot_transfer_skips() {
 	l_report_skips_header=0
 	while IFS= read -r l_report_skips_row; do
 		case $l_report_skips_row in
-		"skip	before_common	"*)
+		"skip${ZXFER_TAB}before_common$ZXFER_TAB"*)
 			if [ "$l_report_skips_header" -eq 0 ]; then
 				zxfer_echov "Source snapshots not scheduled for transfer to [$2]:"
 				l_report_skips_header=1
 			fi
-			l_report_skips_record=${l_report_skips_row#"skip	before_common	"}
+			l_report_skips_record=${l_report_skips_row#"skip${ZXFER_TAB}before_common$ZXFER_TAB"}
 			zxfer_echov "  ${l_report_skips_record%%"$ZXFER_TAB"*} (GUID: ${l_report_skips_record#*"$ZXFER_TAB"}): before newest common snapshot $l_report_skips_common_path (GUID: $l_report_skips_common_guid) in source creation order; older gaps are not backfilled."
 			;;
 		__ZXFER_SNAPSHOT_SUMMARY__) break ;;
@@ -611,16 +611,18 @@ zxfer_throw_grandfather_protection_error() {
 # One awk pass answers a delete plan's creation-time questions. Operands are
 # "side=creation FILE side=delete PLAN_FILE": FILE holds the creation rows
 # from `zfs get -H -o name,value -p creation`; PLAN_FILE holds tagged deletes.
-# Variables: common (the last common
-# snapshot's destination path, or empty), now, and days (-g, or empty). A
-# missing or non-numeric epoch is unknown. Prints:
+# Inputs: ENVIRON["ZXFER_AWK_CREATION_COMMON"] (the last common snapshot's
+# destination path, or empty, via ENVIRON so backslashes stay literal), now,
+# and days (-g, or empty). Run under LC_ALL=C so /^[0-9]+$/ matches ASCII
+# digits only. A missing or non-numeric epoch is unknown. Prints:
 #   1 or 0      1 keeps rollback eligible: with a common snapshot, a deleted
 #               snapshot is newer than it or a needed epoch is unknown
 #   PROTECTED   with days only, when found: the first deleted snapshot in list
 #               order that is days old or older ("path<TAB>epoch<TAB>age_days")
 #               or whose epoch is unknown ("path")
-# shellcheck disable=SC2016  # awk program should see literal $0.
+# shellcheck disable=SC2016  # awk program should see literal $0 and ENVIRON.
 ZXFER_SNAPSHOT_DELETE_CREATION_AWK='
+BEGIN { common = ENVIRON["ZXFER_AWK_CREATION_COMMON"] }
 side == "creation" {
 	tab = index($0, "\t")
 	if (tab > 1)
@@ -691,8 +693,8 @@ zxfer_prepare_snapshot_delete_creation_state() {
 		zxfer-snapshot-creation ||
 		zxfer_throw_error "Failed to allocate the snapshot creation-time file." "$?"
 	g_zxfer_snapshot_creation_file=$g_zxfer_runtime_artifact_path_result
-	: >"$g_zxfer_snapshot_creation_file" ||
-		zxfer_throw_error "Failed to reset the snapshot creation-time file."
+	zxfer_write_runtime_artifact_file "$g_zxfer_snapshot_creation_file" "" ||
+		zxfer_throw_error "Failed to reset the snapshot creation-time file." "$?"
 
 	# One zfs get per 128 paths: the common snapshot first, then each delete.
 	# ssh must not read the delete list, so zfs gets /dev/null as stdin.
@@ -702,7 +704,7 @@ zxfer_prepare_snapshot_delete_creation_state() {
 	[ -r "$l_creation_plan" ] || zxfer_throw_error "Failed to read the snapshot delete plan."
 	while IFS= read -r l_creation_record; do
 		case $l_creation_record in
-		"delete	"*) set -- "$@" "${l_creation_record#delete	}" ;;
+		"delete$ZXFER_TAB"*) set -- "$@" "${l_creation_record#"delete$ZXFER_TAB"}" ;;
 		*) continue ;;
 		esac
 		[ "$#" -ge 128 ] || continue
@@ -723,7 +725,10 @@ zxfer_prepare_snapshot_delete_creation_state() {
 	fi
 
 	l_creation_verdict=$(
-		"${g_cmd_awk:-awk}" -v common="$l_creation_common" \
+		LC_ALL=C
+		ZXFER_AWK_CREATION_COMMON=$l_creation_common
+		export LC_ALL ZXFER_AWK_CREATION_COMMON
+		"${g_cmd_awk:-awk}" \
 			-v now="$l_creation_now" -v days="$l_creation_days" \
 			"$ZXFER_SNAPSHOT_DELETE_CREATION_AWK" \
 			side=creation "$g_zxfer_snapshot_creation_file" side=delete "$l_creation_plan"
@@ -797,22 +802,17 @@ zxfer_find_diverged_converged_marker() {
 	l_marker_dest=$1
 
 	g_zxfer_diverged_converged_marker_source=""
-	case $ZXFER_LF${g_zxfer_diverged_converged_datasets:-} in
+	case $l_marker_dest in
+	'' | *"$ZXFER_TAB"* | *"$ZXFER_LF"*) return 1 ;;
+	esac
+	l_marker_table=$ZXFER_LF${g_zxfer_diverged_converged_datasets:-}$ZXFER_LF
+	case $l_marker_table in
 	*"$ZXFER_LF$l_marker_dest$ZXFER_TAB"*) ;;
 	*) return 1 ;;
 	esac
-
-	while IFS='	' read -r l_marker_record_dest l_marker_record_source; do
-		[ -n "$l_marker_record_dest" ] || continue
-		if [ "$l_marker_record_dest" = "$l_marker_dest" ]; then
-			g_zxfer_diverged_converged_marker_source=$l_marker_record_source
-			return 0
-		fi
-	done <<-EOF
-		$g_zxfer_diverged_converged_datasets
-	EOF
-
-	return 1
+	l_marker_tail=${l_marker_table#*"$ZXFER_LF$l_marker_dest$ZXFER_TAB"}
+	g_zxfer_diverged_converged_marker_source=${l_marker_tail%%"$ZXFER_LF"*}
+	return 0
 }
 
 # Purpose: Drop one destination dataset from the "diverged and converged this
@@ -823,7 +823,7 @@ zxfer_unmark_diverged_converged_dataset() {
 	l_unmark_dest=$1
 	l_remaining_markers=""
 
-	while IFS='	' read -r l_marker_record_dest l_marker_record_source; do
+	while IFS="$ZXFER_TAB" read -r l_marker_record_dest l_marker_record_source; do
 		[ -n "$l_marker_record_dest" ] || continue
 		[ "$l_marker_record_dest" = "$l_unmark_dest" ] && continue
 		l_remaining_markers=${l_remaining_markers:+$l_remaining_markers$ZXFER_LF}$l_marker_record_dest$ZXFER_TAB$l_marker_record_source
@@ -843,7 +843,7 @@ zxfer_render_diverged_snapshot_example_lines() {
 	l_example_dest_dataset=$1
 	l_example_lines=""
 
-	while IFS='	' read -r l_example_name l_example_src_guid l_example_dst_guid; do
+	while IFS="$ZXFER_TAB" read -r l_example_name l_example_src_guid l_example_dst_guid; do
 		[ -n "$l_example_name" ] || continue
 		l_example_line="  $l_example_dest_dataset@$l_example_name: source guid $l_example_src_guid vs destination guid $l_example_dst_guid"
 		l_example_lines=${l_example_lines:+$l_example_lines$ZXFER_LF}$l_example_line
@@ -991,7 +991,7 @@ zxfer_reconcile_live_destination_snapshot_state() {
 	if [ -n "$g_zxfer_plan_common_snapshot" ]; then
 		while IFS= read -r l_recheck_row; do
 			case $l_recheck_row in
-			"common	"* | "send	"*) ;;
+			"common$ZXFER_TAB"* | "send$ZXFER_TAB"*) ;;
 			*) continue ;;
 			esac
 			[ "${l_recheck_row#*"$ZXFER_TAB"}" = "$g_zxfer_plan_common_snapshot" ] || continue
