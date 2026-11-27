@@ -35,54 +35,83 @@ tearDown() {
 	relax_test_tmpdir_permissions
 }
 
-test_write_snapshot_delta_files_splits_both_diff_directions() {
+test_collect_snapshot_delta_lists_splits_diff_and_extracts_all_roles() {
 	source_file="$TEST_TMPDIR/source_delta_split.txt"
 	dest_file="$TEST_TMPDIR/dest_delta_split.txt"
+	diff_file="$TEST_TMPDIR/delta_split.diff"
 	missing_file="$TEST_TMPDIR/source_delta_missing.txt"
 	extra_file="$TEST_TMPDIR/destination_delta_extra.txt"
-	scratch_file="$TEST_TMPDIR/delta_split.scratch"
+	rows_file="$TEST_TMPDIR/delta_split.rows"
 	cat <<'EOF' >"$source_file"
+tank/src/child@s1	100
+tank/src/space name@s2	101
 tank/src@same	111
 tank/src@source-only	222
 EOF
 	cat <<'EOF' >"$dest_file"
+tank/src/child@s1	100
 tank/src@dest-only	333
 tank/src@same	999
 EOF
-	sort "$source_file" -o "$source_file"
-	sort "$dest_file" -o "$dest_file"
+	LC_ALL=C sort "$source_file" -o "$source_file"
+	LC_ALL=C sort "$dest_file" -o "$dest_file"
+	LC_ALL=C comm -3 "$source_file" "$dest_file" >"$diff_file"
 
-	zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+	zxfer_collect_snapshot_delta_lists "$diff_file" "$missing_file" "$extra_file" \
+		"$rows_file" always "$source_file"
 
-	assertEquals "Single-pass recursive diff should preserve source-only and GUID-divergent source records." \
-		"tank/src@same	111
+	assertEquals "Unified delta pass should preserve source-only and GUID-divergent source records." \
+		"tank/src/space name@s2	101
+tank/src@same	111
 tank/src@source-only	222" "$(cat "$missing_file")"
-	assertEquals "Single-pass recursive diff should strip only the comm prefix from destination-only records." \
+	assertEquals "Unified delta pass should strip only the comm prefix from destination-only records." \
 		"tank/src@dest-only	333
 tank/src@same	999" "$(cat "$extra_file")"
-	assertEquals "Single-pass recursive diff should publish split counts and file-pair provenance." \
-		"2|2|$missing_file|$extra_file" \
-		"$g_zxfer_delta_missing_count|$g_zxfer_delta_extra_count|$g_zxfer_delta_count_missing_file|$g_zxfer_delta_count_extra_file"
+	assertEquals "Unified delta pass should publish exact missing/extra counts." \
+		"3 2" "$g_zxfer_snapshot_delta_counts_result"
+	assertEquals "Unified delta pass should derive sorted unique transfer datasets." \
+		"tank/src
+tank/src/space name" "$g_recursive_source_list"
+	assertEquals "Unified delta pass should derive sorted unique destination-extra datasets." \
+		"tank/src" "$g_recursive_destination_extra_dataset_list"
+	assertEquals "Unified delta pass should derive sorted unique source inventory datasets." \
+		"tank/src
+tank/src/child
+tank/src/space name" "$g_recursive_source_dataset_list"
 
-	# Both outputs are truncated even when one side has zero records.
+	# Both outputs are truncated even when one side has zero records, and
+	# if-missing skips source inventory when missing count is zero.
+	printf '%s\n' "tank/src@only-dest	444" >"$dest_file"
+	: >"$source_file"
+	LC_ALL=C comm -3 "$source_file" "$dest_file" >"$diff_file"
+	printf 'tank/src@present\t555\n' >"$source_file"
+	zxfer_collect_snapshot_delta_lists "$diff_file" "$missing_file" "$extra_file" \
+		"$rows_file" if-missing "$source_file"
+	assertEquals "Extra-only diff should truncate stale missing records." "" "$(cat "$missing_file")"
+	assertEquals "Extra-only diff should publish 0/1 counts." "0 1" "$g_zxfer_snapshot_delta_counts_result"
+	assertEquals "if-missing must omit source inventory when no source records are missing." \
+		"" "$g_recursive_source_dataset_list"
+
+	# Missing-only diff truncates stale extra records and populates if-missing inventory.
 	printf '%s\n' "tank/src@only-source	111" >"$source_file"
 	: >"$dest_file"
-	zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+	LC_ALL=C comm -3 "$source_file" "$dest_file" >"$diff_file"
+	zxfer_collect_snapshot_delta_lists "$diff_file" "$missing_file" "$extra_file" \
+		"$rows_file" if-missing "$source_file"
 	assertEquals "Missing-only diff should truncate stale extra records." "" "$(cat "$extra_file")"
-	assertEquals "Missing-only diff should publish 1/0 counts." \
-		"1|0" "$g_zxfer_delta_missing_count|$g_zxfer_delta_extra_count"
+	assertEquals "Missing-only diff should publish 1/0 counts." "1 0" "$g_zxfer_snapshot_delta_counts_result"
+	assertEquals "if-missing must populate source inventory when missing records exist." \
+		"tank/src" "$g_recursive_source_dataset_list"
 }
 
-test_write_snapshot_delta_files_preserves_comm_and_splitter_failures() {
+test_collect_snapshot_delta_lists_preserves_awk_and_sort_failures() {
 	set +e
-	source_file="$TEST_TMPDIR/source_delta_splitter_fail.txt"
-	dest_file="$TEST_TMPDIR/dest_delta_splitter_fail.txt"
+	diff_file="$TEST_TMPDIR/delta_splitter_fail.diff"
 	missing_file="$TEST_TMPDIR/source_delta_splitter_fail_missing.txt"
 	extra_file="$TEST_TMPDIR/destination_delta_splitter_fail_extra.txt"
-	scratch_file="$TEST_TMPDIR/delta_splitter_fail.scratch"
+	rows_file="$TEST_TMPDIR/delta_splitter_fail.rows"
 	fake_awk="$TEST_TMPDIR/delta_splitter_awk_fail.sh"
-	printf '%s\n' "tank/src@source-only" >"$source_file"
-	: >"$dest_file"
+	printf '%s\n' "tank/src@source-only" >"$diff_file"
 	cat >"$fake_awk" <<'EOF'
 #!/bin/sh
 printf '%s\n' "awk failed" >&2
@@ -92,23 +121,38 @@ EOF
 
 	output=$(
 		(
+			g_recursive_source_list=stale
+			g_recursive_destination_extra_dataset_list=stale
+			g_recursive_source_dataset_list=stale
+			g_zxfer_snapshot_delta_counts_result="9 9"
 			g_cmd_awk="$fake_awk"
-			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
-			printf 'splitter=%s\n' "$?"
-			comm() {
+			zxfer_collect_snapshot_delta_lists "$diff_file" "$missing_file" "$extra_file" "$rows_file"
+			printf 'awk=%s lists=<%s|%s|%s|%s>\n' "$?" \
+				"$g_recursive_source_list" "$g_recursive_destination_extra_dataset_list" \
+				"$g_recursive_source_dataset_list" "$g_zxfer_snapshot_delta_counts_result"
+		) 2>&1
+		(
+			g_recursive_source_list=stale
+			g_recursive_destination_extra_dataset_list=stale
+			g_recursive_source_dataset_list=stale
+			g_zxfer_snapshot_delta_counts_result="9 9"
+			sort() {
+				printf '%s\n' "partial"
 				return 16
 			}
-			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
-			printf 'comm=%s\n' "$?"
+			zxfer_collect_snapshot_delta_lists "$diff_file" "$missing_file" "$extra_file" "$rows_file"
+			printf 'sort=%s lists=<%s|%s|%s|%s>\n' "$?" \
+				"$g_recursive_source_list" "$g_recursive_destination_extra_dataset_list" \
+				"$g_recursive_source_dataset_list" "$g_zxfer_snapshot_delta_counts_result"
 		) 2>&1
 	)
 
-	assertContains "Single-pass recursive diff should preserve splitter failures." \
-		"$output" "splitter=15"
-	assertContains "Splitter failures should preserve awk diagnostics." \
+	assertContains "Unified delta pass should preserve awk failures and clear stale outputs." \
+		"$output" "awk=15 lists=<|||>"
+	assertContains "Unified delta pass should preserve awk diagnostics." \
 		"$output" "awk failed"
-	assertContains "Single-pass recursive diff should preserve comm failures." \
-		"$output" "comm=16"
+	assertContains "Unified delta pass should preserve sort failures and clear stale outputs." \
+		"$output" "sort=16 lists=<|||>"
 }
 
 test_reverse_file_lines_reverses_small_and_large_inputs() {
@@ -546,30 +590,31 @@ EOF
 test_report_recursive_snapshot_delta_reuses_split_counts_and_fast_paths_empty_files() {
 	source_file="$TEST_TMPDIR/p2_source.txt"
 	dest_file="$TEST_TMPDIR/p2_dest.txt"
+	diff_file="$TEST_TMPDIR/p2_diff.txt"
 	missing_file="$TEST_TMPDIR/p2_missing.txt"
 	extra_file="$TEST_TMPDIR/p2_extra.txt"
-	scratch_file="$TEST_TMPDIR/p2_scratch.txt"
+	rows_file="$TEST_TMPDIR/p2_rows.txt"
 	printf 'tank/src@s1\t1\ntank/src/a@s2\t2\n' | LC_ALL=C sort >"$source_file"
 	printf 'tank/src@extra\t9\n' >"$dest_file"
+	LC_ALL=C comm -3 "$source_file" "$dest_file" >"$diff_file"
 
-	# Provenanced split counts let delta reporting skip awk while counting the
-	# final post-filter/-prune dataset lists in-shell (matching awk NF).
+	# Supplied counts from unified delta collection let delta reporting skip
+	# awk while counting the final post-filter/-prune dataset lists in-shell.
 	output=$(
-		zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+		zxfer_collect_snapshot_delta_lists "$diff_file" "$missing_file" "$extra_file" "$rows_file"
+		l_missing_count=${g_zxfer_snapshot_delta_counts_result%% *}
+		l_extra_count=${g_zxfer_snapshot_delta_counts_result#* }
 		g_cmd_awk=false
 		g_option_v_verbose=1
 		g_option_V_very_verbose=0
 		g_recursive_source_list="tank/src${ZXFER_LF}   ${ZXFER_LF}${ZXFER_TAB}${ZXFER_LF}tank/src/a"
 		g_recursive_destination_extra_dataset_list="tank/src"
-		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
-		printf 'provenance=<%s|%s>\n' \
-			"$g_zxfer_delta_count_missing_file" "$g_zxfer_delta_count_extra_file"
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file" \
+			"$l_missing_count" "$l_extra_count"
 	)
-	assertEquals "Provenanced delta report should succeed without spawning awk." 0 "$?"
-	assertContains "Provenanced delta report should emit split snapshot counts and final in-shell dataset counts." \
+	assertEquals "Precomputed delta report should succeed without spawning awk." 0 "$?"
+	assertContains "Precomputed delta report should emit split snapshot counts and final in-shell dataset counts." \
 		"$output" "Recursive snapshot delta summary: snapshots_missing_on_destination=2 snapshots_missing_on_source=1 source_datasets=2 destination_extra_datasets=1"
-	assertContains "Consuming provenanced counts should clear provenance." \
-		"$output" "provenance=<|>"
 
 	# Empty readable delta files fast-path to 0/0 without awk and still emit -V.
 	: >"$missing_file"
@@ -589,97 +634,67 @@ test_report_recursive_snapshot_delta_reuses_split_counts_and_fast_paths_empty_fi
 		"$empty_output" "====== Extra Destination snapshots not in source ======"
 }
 
-test_report_recursive_snapshot_delta_clears_provenance_and_checks_readability() {
-	source_file="$TEST_TMPDIR/p2_prov_source.txt"
-	dest_file="$TEST_TMPDIR/p2_prov_dest.txt"
+test_report_recursive_snapshot_delta_recounts_standalone_and_checks_readability() {
 	missing_file="$TEST_TMPDIR/p2_prov_missing.txt"
 	extra_file="$TEST_TMPDIR/p2_prov_extra.txt"
-	scratch_file="$TEST_TMPDIR/p2_prov_scratch.txt"
 	stdout_file="$TEST_TMPDIR/p2_prov_stdout.txt"
 	stderr_file="$TEST_TMPDIR/p2_prov_stderr.txt"
-	printf 'tank/src@s1\t1\n' >"$source_file"
-	printf 'tank/src@s1\t1\n' >"$dest_file"
+	: >"$missing_file"
+	: >"$extra_file"
 
-	# (a1) Empty-file fast path clears 0/0 provenance so a later non-empty write
-	# to the same paths is recounted instead of reusing stale 0/0 counts.
-	empty_recount_output=$(
-		zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
-		g_option_v_verbose=1
-		g_option_V_very_verbose=0
-		g_recursive_source_list=""
-		g_recursive_destination_extra_dataset_list=""
-		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
-		printf 'after_empty=<%s|%s|%s|%s>\n' \
-			"$g_zxfer_delta_missing_count" "$g_zxfer_delta_extra_count" \
-			"$g_zxfer_delta_count_missing_file" "$g_zxfer_delta_count_extra_file"
-		printf 'tank/src@s2\t2\n' >"$missing_file"
-		g_recursive_source_list="tank/src"
-		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
-	)
-	l_empty_recount_status=$?
-	assertEquals "Recount after empty-file delta report should succeed." 0 "$l_empty_recount_status"
-	assertContains "Empty-file delta report must clear all four provenance globals." \
-		"$empty_recount_output" "after_empty=<|||>"
-	assertContains "Subsequent non-empty write to same paths must be recounted accurately." \
-		"$empty_recount_output" "Recursive snapshot delta summary: snapshots_missing_on_destination=1 snapshots_missing_on_source=0 source_datasets=1 destination_extra_datasets=0"
-	assertContains "Recounted delta must list the newly written snapshot identity." \
-		"$empty_recount_output" "tank/src@s2 (GUID: 2)"
-
-	# (a2) Quiet early return (-v=0 -V=0) also clears provenance so a later verbose
-	# call on overwritten files recounts accurately.
-	quiet_recount_output=$(
-		zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+	# Standalone 2-arg call after quiet or empty calls always recounts non-empty
+	# files directly without any stale global count state.
+	recount_output=$(
 		g_option_v_verbose=0
 		g_option_V_very_verbose=0
-		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
-		printf 'after_quiet=<%s|%s|%s|%s>\n' \
-			"$g_zxfer_delta_missing_count" "$g_zxfer_delta_extra_count" \
-			"$g_zxfer_delta_count_missing_file" "$g_zxfer_delta_count_extra_file"
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file" 0 0
 		printf 'tank/src@s2\t2\ntank/src@s3\t3\n' >"$missing_file"
 		g_option_v_verbose=1
 		g_recursive_source_list="tank/src"
 		g_recursive_destination_extra_dataset_list=""
 		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
 	)
-	l_quiet_recount_status=$?
-	assertEquals "Recount after quiet delta report should succeed." 0 "$l_quiet_recount_status"
-	assertContains "Quiet delta report must clear all four provenance globals." \
-		"$quiet_recount_output" "after_quiet=<|||>"
-	assertContains "Verbose delta report after quiet call must recount updated files." \
-		"$quiet_recount_output" "Recursive snapshot delta summary: snapshots_missing_on_destination=2 snapshots_missing_on_source=0 source_datasets=1 destination_extra_datasets=0"
+	l_recount_status=$?
+	assertEquals "Standalone recount after quiet call should succeed." 0 "$l_recount_status"
+	assertContains "Standalone verbose delta report must recount updated files." \
+		"$recount_output" "Recursive snapshot delta summary: snapshots_missing_on_destination=2 snapshots_missing_on_source=0 source_datasets=1 destination_extra_datasets=0"
+	assertContains "Recounted delta must list the newly written snapshot identity." \
+		"$recount_output" "tank/src@s2 (GUID: 2)"
 
-	# (b) A vanished or unreadable file under matching 0/0 provenance must fail
-	# closed through the awk branch instead of trusting cached 0/0 counts.
-	capture_removed_provenanced_case() {
-		zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+	# A vanished or unreadable file must fail closed through the awk branch
+	# even when precomputed 0/0 counts are passed.
+	capture_removed_case() {
+		: >"$missing_file"
+		: >"$extra_file"
 		rm -f "$missing_file"
 		g_option_v_verbose=1
 		g_option_V_very_verbose=0
 		g_recursive_source_list=""
 		g_recursive_destination_extra_dataset_list=""
-		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+		zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file" 0 0
 	}
-	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_removed_provenanced_case
-	assertNotEquals "A removed delta file under matching 0/0 provenance must fail closed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
-	assertContains "A removed provenanced delta file must report the counting failure." \
+	zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_removed_case
+	assertNotEquals "A removed delta file with supplied 0/0 counts must fail closed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
+	assertContains "A removed delta file must report the counting failure." \
 		"$(cat "$stderr_file")" "Failed to count the recursive snapshot delta."
-	assertNotContains "A removed provenanced delta file must not emit a summary." \
+	assertNotContains "A removed delta file must not emit a summary." \
 		"$(cat "$stdout_file")" "Recursive snapshot delta summary"
 
 	if [ "$(id -u)" -ne 0 ]; then
-		capture_unreadable_provenanced_case() {
-			zxfer_write_snapshot_delta_files "$source_file" "$dest_file" "$missing_file" "$extra_file" "$scratch_file"
+		capture_unreadable_case() {
+			: >"$missing_file"
+			: >"$extra_file"
 			chmod 000 "$extra_file"
 			g_option_v_verbose=1
 			g_option_V_very_verbose=0
 			g_recursive_source_list=""
 			g_recursive_destination_extra_dataset_list=""
-			zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file"
+			zxfer_report_recursive_snapshot_delta "$missing_file" "$extra_file" 0 0
 		}
-		zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_unreadable_provenanced_case
+		zxfer_test_capture_subshell_split "$stdout_file" "$stderr_file" capture_unreadable_case
 		chmod 600 "$extra_file" 2>/dev/null || :
-		assertNotEquals "An unreadable delta file under matching 0/0 provenance must fail closed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
-		assertContains "An unreadable provenanced delta file must report the counting failure." \
+		assertNotEquals "An unreadable delta file with supplied 0/0 counts must fail closed." 0 "$ZXFER_TEST_CAPTURE_STATUS"
+		assertContains "An unreadable delta file must report the counting failure." \
 			"$(cat "$stderr_file")" "Failed to count the recursive snapshot delta."
 	fi
 }
@@ -758,8 +773,8 @@ test_set_g_recursive_source_list_fails_closed_when_a_dataset_list_cannot_be_deri
 				"$output" "awk failed"
 		fi
 	done <<'EOF'
-awk|8|tank/src@snap1,tank/src@snap2|tank/src@snap1||Failed to derive recursive source dataset transfer list.
-awk|9|tank/src@snap1|tank/src/child@extra,tank/src@snap1||Failed to derive recursive destination dataset delete list.
+awk|8|tank/src@snap1,tank/src@snap2|tank/src@snap1||Failed to diff source and destination snapshots for recursive delta planning.
+awk|9|tank/src@snap1|tank/src/child@extra,tank/src@snap1||Failed to diff source and destination snapshots for recursive delta planning.
 awk|10|tank/src@snap1|tank/src@snap1||Failed to derive recursive source dataset inventory.
 sort|7|tank/src@snap1|tank/src@snap1||Failed to derive recursive source dataset inventory.
 filter|2|tank/src@snap1|tank/src/child@extra,tank/src@snap1|tank/src/child|Failed to filter recursive destination dataset delete list against exclude patterns.
@@ -770,7 +785,7 @@ EOF
 test_collect_destination_dataset_inventory_preserves_setup_and_publish_failures() {
 	temp_status=$(
 		(
-			zxfer_create_runtime_artifact_workspace() {
+			zxfer_ensure_runtime_artifact_file() {
 				return 66
 			}
 			set +e
@@ -780,19 +795,11 @@ test_collect_destination_dataset_inventory_preserves_setup_and_publish_failures(
 	)
 	publish_status=$(
 		(
-			l_one="$TEST_TMPDIR/dest_inventory_publish.one"
-			l_two="$TEST_TMPDIR/dest_inventory_publish.two"
 			g_option_V_very_verbose=1
-			zxfer_create_runtime_artifact_workspace() {
-				: >"$l_one"
-				: >"$l_one.error"
-				g_zxfer_runtime_artifact_path_result=$l_one
-				g_zxfer_temp_file_group_result=$(printf '%s\n%s' "$l_one" "$l_one.error")
-			}
 			zxfer_run_destination_zfs_cmd() {
 				return 1
 			}
-			zxfer_publish_destination_dataset_inventory_from_stage() {
+			zxfer_publish_destination_dataset_inventory() {
 				return 67
 			}
 			set +e
@@ -801,53 +808,64 @@ test_collect_destination_dataset_inventory_preserves_setup_and_publish_failures(
 		)
 	)
 
-	assertEquals "Destination inventory should preserve temp-file group allocation failures." \
+	assertEquals "Destination inventory should preserve stderr-file allocation failures." \
 		66 "$temp_status"
-	assertEquals "Destination inventory should preserve publish failures after cleanup." \
+	assertEquals "Destination inventory should preserve publish failures." \
 		67 "$publish_status"
 }
 
-test_get_zfs_list_reports_destination_inventory_readback_failures() {
-	set +e
+test_collect_destination_dataset_inventory_streams_profiles_and_reuses_error_file() {
+	stderr_file="$TEST_TMPDIR/dest_inventory_stream.stderr"
 	output=$(
 		(
-			zxfer_write_source_snapshot_list_to_file() {
-				printf '%s\n' "tank/src@snapA" >"$1"
-			}
-			zxfer_write_destination_snapshot_list_to_files() {
-				: >"$1"
-				: >"$2"
-			}
-			zxfer_set_g_recursive_source_list() {
-				g_recursive_source_list="tank/src"
-				g_recursive_source_dataset_list="tank/src"
-			}
+			ZXFER_UNSAFE_FAILURE_REPORT_COMMANDS=1
+			g_option_V_very_verbose=1
+			g_option_T_target_host="target.example"
+			g_target_cmd_zfs="/remote/zfs"
+			zxfer_ensure_runtime_artifact_file "" zxfer-destination-listing-err || exit 1
+			g_zxfer_destination_listing_error_file=$g_zxfer_runtime_artifact_path_result
+			files_before=$g_zxfer_profile_runtime_artifact_files_created
 			zxfer_run_destination_zfs_cmd() {
-				if [ "$1" = "list" ] && [ "$2" = "-t" ] && [ "$3" = "filesystem,volume" ] &&
-					[ "$4" = "-Hr" ] && [ "$5" = "-o" ] && [ "$6" = "name" ] &&
-					[ "$7" = "backup/dst" ]; then
-					printf '%s\n' "backup/dst"
-					printf '%s\n' "backup/dst/existing"
-					return 0
-				fi
-				return 1
+				printf '%s\n' "backup/dst" "backup/dst/existing"
+				return 0
 			}
-			zxfer_read_runtime_artifact_file() {
-				return 27
-			}
+			zxfer_collect_destination_dataset_inventory >/dev/null 2>"$stderr_file" || exit "$?"
+			files_after=$g_zxfer_profile_runtime_artifact_files_created
+			err_size=0
+			[ ! -s "$g_zxfer_destination_listing_error_file" ] || err_size=1
+			printf 'list=<%s> zfs=%s zlist=%s ssh=%s bucket=%s new_files=%s err_nonempty=%s cmd=<%s>\n' \
+				"$(printf '%s' "$g_recursive_dest_list" | tr '\n' ',')" \
+				"$g_zxfer_profile_destination_zfs_calls" \
+				"$g_zxfer_profile_zfs_list_calls" \
+				"$g_zxfer_profile_destination_ssh_shell_invocations" \
+				"$g_zxfer_profile_bucket_destination_inspection" \
+				"$((files_after - files_before))" "$err_size" \
+				"$g_zxfer_failure_last_command"
+		)
+	)
+	assertEquals "Streaming inventory must succeed." 0 "$?"
+	assertContains "Streaming inventory must publish datasets, preserve parent -V counters, and reuse the shared stderr file." \
+		"$output" "list=<backup/dst,backup/dst/existing> zfs=1 zlist=1 ssh=1 bucket=1 new_files=0 err_nonempty=0"
+	assertContains "Streaming inventory must record the remote ssh command in the parent shell." \
+		"$output" "cmd=<'$FAKE_SSH_BIN'"
+	assertContains "Streaming inventory under -V -T must still emit Running remote command on stderr." \
+		"$(cat "$stderr_file")" "Running remote command [target: target.example]:"
+
+	# Empty stdout on status 0 still fails closed with the contract diagnostic.
+	empty_status=0
+	empty_out=$(
+		(
+			zxfer_run_destination_zfs_cmd() { return 0; }
 			zxfer_throw_error() {
 				printf '%s\n' "$1"
 				exit "${2:-1}"
 			}
-			zxfer_get_zfs_list
+			zxfer_collect_destination_dataset_inventory
 		) 2>&1
-	)
-	status=$?
-
-	assertEquals "Destination inventory readback failures should preserve the staged read status." \
-		27 "$status"
-	assertContains "Destination inventory readback failures should report the staged destination inventory context." \
-		"$output" "Failed to read staged destination dataset inventory."
+	) || empty_status=$?
+	assertEquals "Empty streamed destination inventory must fail closed." 1 "$empty_status"
+	assertContains "Empty streamed destination inventory must preserve the contract diagnostic." \
+		"$empty_out" "Staged destination dataset inventory was empty."
 }
 
 test_get_zfs_list_reports_destination_inventory_stderr_readback_failures() {
@@ -1344,8 +1362,8 @@ test_get_zfs_list_tracks_stage_timings_when_very_verbose() {
 				: >"$g_zxfer_runtime_artifact_path_result"
 			}
 			# One reading per clock read, in this shell: source start,
-			# destination start and end, source end, diff start and end.
-			clock_readings="1000 1500 1900 2600 3000 3550"
+			# destination start and end, source end (reused as diff start), and diff end.
+			clock_readings="1000 1500 1900 2600 3150"
 			zxfer_profile_read_clock_ms() {
 				g_zxfer_profile_clock_ms=${clock_readings%% *}
 				clock_readings=${clock_readings#* }
@@ -1470,6 +1488,8 @@ test_fast_recursive_noop_owner_keeps_paths_pids_and_timers_across_helper_scratch
 			}
 			zxfer_profile_stop_timer() {
 				owner_timers=${owner_timers:+$owner_timers,}$1
+				owner_clock=$((owner_clock + 1))
+				g_zxfer_profile_clock_ms=$owner_clock
 				g_zxfer_profile_elapsed_ms=0
 				g_last_background_pid=clobbered
 			}
@@ -1510,7 +1530,7 @@ EOF
 		)
 	)
 	assertEquals "Fallback retains its raw and pre-sorted listings and releases reaped proof resources despite helper scratch changes." \
-		"status=1 timers=1,2,3
+		"status=1 timers=1,2,4
 raw retained
 sorted retained
 producer records=<>" "$output"
@@ -1631,16 +1651,15 @@ test_fast_noop_fallback_reuses_sorted_destination_only_when_unfiltered_and_clean
 			"proof=1 raw=1 sorted_global=<> sorted_exists=0" "$skip_output"
 	done
 
-	# Reset clears the pre-sorted handoff and delta provenance globals.
+	# Reset clears the pre-sorted handoff, delta count result, and deferred cleanup state.
 	g_zxfer_snapshot_discovery_destination_sorted_file="/tmp/stale.sorted"
-	g_zxfer_delta_missing_count=3
-	g_zxfer_delta_extra_count=4
-	g_zxfer_delta_count_missing_file="/tmp/stale.missing"
-	g_zxfer_delta_count_extra_file="/tmp/stale.extra"
+	g_zxfer_snapshot_delta_counts_result="3 4"
+	g_zxfer_snapshot_discovery_defer_delta_cleanup=1
+	g_zxfer_snapshot_discovery_deferred_paths="/tmp/stale.delta"
 	zxfer_reset_snapshot_discovery_state
-	assertEquals "Discovery reset should clear pre-sorted handoff and delta count provenance." \
-		"||||" \
-		"$g_zxfer_snapshot_discovery_destination_sorted_file|$g_zxfer_delta_missing_count|$g_zxfer_delta_extra_count|$g_zxfer_delta_count_missing_file|$g_zxfer_delta_count_extra_file"
+	assertEquals "Discovery reset should clear pre-sorted handoff, delta counts, and deferred cleanup state." \
+		"||0|" \
+		"$g_zxfer_snapshot_discovery_destination_sorted_file|$g_zxfer_snapshot_delta_counts_result|$g_zxfer_snapshot_discovery_defer_delta_cleanup|$g_zxfer_snapshot_discovery_deferred_paths"
 }
 
 # A destination/setup failure can reach release before source wait. Keep the
@@ -1825,14 +1844,18 @@ test_full_discovery_inventory_failure_never_publishes_record_caches() {
 }
 
 test_snapshot_dataset_lists_extract_sort_and_deduplicate_each_role() {
-	snapshot_records_file="$TEST_TMPDIR/recursive_snapshot_file.txt"
+	diff_file="$TEST_TMPDIR/recursive_snapshot_file.diff"
+	source_records_file="$TEST_TMPDIR/recursive_snapshot_file.txt"
+	missing_file="$TEST_TMPDIR/recursive_snapshot_file.missing"
+	extra_file="$TEST_TMPDIR/recursive_snapshot_file.extra"
+	rows_file="$TEST_TMPDIR/recursive_snapshot_file.scratch"
 	printf '%s\n' "tank/src/child@snap2" "tank/src/child@snap3" "tank/src/space name@snap4" "tank/src@snap1" \
-		>"$snapshot_records_file"
-	extra_records_file="$TEST_TMPDIR/extra_snapshot_file.txt"
-	printf '%s\n' "tank/src@snap5" "tank/src@snap6" "tank/srcmore@snap7" >"$extra_records_file"
+		>"$source_records_file"
+	printf '%s\n' "tank/src/child@snap2" "tank/src/child@snap3" "tank/src/space name@snap4" "tank/src@snap1" \
+		"	tank/src@snap5" "	tank/src@snap6" "	tank/srcmore@snap7" >"$diff_file"
 
-	zxfer_capture_snapshot_dataset_lists "$snapshot_records_file" "$extra_records_file" \
-		"$TEST_TMPDIR/recursive_snapshot_file.scratch" "$snapshot_records_file"
+	zxfer_collect_snapshot_delta_lists "$diff_file" "$missing_file" "$extra_file" \
+		"$rows_file" always "$source_records_file"
 
 	assertEquals "Capture should extract, sort and deduplicate the dataset names." \
 		"tank/src
@@ -1843,8 +1866,9 @@ tank/src/space name" "$g_recursive_source_list"
 	assertEquals "A dataset present on both sides stays in each independently sorted list." \
 		"tank/src
 tank/srcmore" "$g_recursive_destination_extra_dataset_list"
-	assertEquals "Only one row per adjacent dataset in each role is staged for the sort." \
-		8 "$(grep -c '^' "$TEST_TMPDIR/recursive_snapshot_file.scratch")"
+	# 1 counts row + 3 missing + 2 extra + 3 inventory = 9 deduplicated rows.
+	assertEquals "Only one row per unique dataset in each role plus the counts header is staged for the sort." \
+		9 "$(grep -c '^' "$rows_file")"
 }
 
 test_recursive_dataset_list_filter_keeps_existing_exclusion_semantics() {
@@ -1866,75 +1890,38 @@ test_recursive_dataset_list_filter_keeps_existing_exclusion_semantics() {
 EOF
 }
 
-test_capture_snapshot_dataset_lists_preserves_awk_and_sort_failures() {
-	set +e
-	snapshot_records_file="$TEST_TMPDIR/recursive_snapshot_file_failure.txt"
-	scratch_file="$TEST_TMPDIR/recursive_snapshot_file_failure.scratch"
-	failing_awk="$TEST_TMPDIR/recursive_snapshot_file_awk_fails"
-	printf '%s\n' "tank/src@snap1" >"$snapshot_records_file"
-	cat >"$failing_awk" <<'EOF'
-#!/bin/sh
-exit 23
-EOF
-	chmod +x "$failing_awk"
-
-	output=$(
-		(
-			g_recursive_source_list=stale
-			g_recursive_destination_extra_dataset_list=stale
-			g_recursive_source_dataset_list=stale
-			g_cmd_awk=$failing_awk
-			zxfer_capture_snapshot_dataset_lists "$snapshot_records_file" "$snapshot_records_file" "$scratch_file"
-			printf 'awk=%s missing=<%s> extra=<%s> inventory=<%s>\n' "$?" \
-				"$g_recursive_source_list" "$g_recursive_destination_extra_dataset_list" "$g_recursive_source_dataset_list"
-		)
-		(
-			g_recursive_source_list=stale
-			g_recursive_destination_extra_dataset_list=stale
-			g_recursive_source_dataset_list=stale
-			sort() {
-				printf '%s\n' "partial"
-				return 24
-			}
-			zxfer_capture_snapshot_dataset_lists "$snapshot_records_file" "$snapshot_records_file" "$scratch_file"
-			printf 'sort=%s missing=<%s> extra=<%s> inventory=<%s>\n' "$?" \
-				"$g_recursive_source_list" "$g_recursive_destination_extra_dataset_list" "$g_recursive_source_dataset_list"
-		)
-	)
-
-	assertContains "Dataset-list capture should preserve the awk failure and clear stale results." \
-		"$output" "awk=23 missing=<> extra=<> inventory=<>"
-	assertContains "Dataset-list capture should preserve the sort failure and publish nothing." \
-		"$output" "sort=24 missing=<> extra=<> inventory=<>"
-}
-
-test_capture_snapshot_dataset_lists_skips_empty_work_and_omits_unneeded_inventory() {
+test_collect_snapshot_delta_lists_skips_empty_work_and_omits_unneeded_inventory() {
 	empty_file="$TEST_TMPDIR/empty-dataset-work"
 	: >"$empty_file"
-	output=$(
-		g_recursive_source_list=stale
-		g_recursive_destination_extra_dataset_list=stale
-		g_recursive_source_dataset_list=stale
-		awk() {
-			printf 'unexpected awk\n'
-			return 27
-		}
-		g_cmd_awk='awk'
-		sort() {
-			printf 'unexpected sort\n'
-			return 28
-		}
-		status=0
-		zxfer_capture_snapshot_dataset_lists "$empty_file" "$empty_file" "$empty_file.scratch" || status=$?
-		printf 'status=%s missing=<%s> extra=<%s> inventory=<%s>\n' "$status" \
-			"$g_recursive_source_list" "$g_recursive_destination_extra_dataset_list" "$g_recursive_source_dataset_list"
-	)
-	assertEquals "A recursive no-op clears every list without spawning extraction tools." \
-		"status=0 missing=<> extra=<> inventory=<>" "$output"
+	for skip_mode in none if-missing; do
+		output=$(
+			g_recursive_source_list=stale
+			g_recursive_destination_extra_dataset_list=stale
+			g_recursive_source_dataset_list=stale
+			awk() {
+				printf 'unexpected awk\n'
+				return 27
+			}
+			g_cmd_awk='awk'
+			sort() {
+				printf 'unexpected sort\n'
+				return 28
+			}
+			status=0
+			zxfer_collect_snapshot_delta_lists "" "$empty_file" "$empty_file" \
+				"$empty_file.scratch" "$skip_mode" "$empty_file" || status=$?
+			printf 'status=%s counts=<%s> missing=<%s> extra=<%s> inventory=<%s>\n' "$status" \
+				"$g_zxfer_snapshot_delta_counts_result" \
+				"$g_recursive_source_list" "$g_recursive_destination_extra_dataset_list" "$g_recursive_source_dataset_list"
+		)
+		assertEquals "A recursive no-op [$skip_mode] clears every list without spawning extraction tools." \
+			"status=0 counts=<0 0> missing=<> extra=<> inventory=<>" "$output"
+	done
 	printf 'tank/src@snap1\n' >"$empty_file"
 	g_recursive_source_dataset_list=stale
-	zxfer_capture_snapshot_dataset_lists "$empty_file" "$empty_file" "$empty_file.scratch"
-	assertEquals "No optional source file means no retained source inventory." "" "$g_recursive_source_dataset_list"
+	zxfer_collect_snapshot_delta_lists "$empty_file" "$empty_file.missing" "$empty_file.extra" \
+		"$empty_file.scratch" none "$empty_file"
+	assertEquals "Inventory mode none retains no source inventory." "" "$g_recursive_source_dataset_list"
 }
 
 test_recursive_delta_workspace_allocates_filter_files_only_for_exclusions() {
@@ -2016,9 +2003,10 @@ test_set_g_recursive_source_list_reports_snapshot_compare_failures() {
 # discovery with its own status wherever it happens. zxfer_get_temp_file
 # throws on its own failures, so only a stub reaches these ladders.
 test_get_zfs_list_keeps_the_status_of_each_failed_temp_file_allocation() {
-	# call:status for all five workspace files, five delta files with -x, two inventory
-	# files and the source record cache. No failed sibling can be ignored.
-	for l_temp_case in 1:9 2:11 3:12 4:13 5:23 6:24 7:25 8:26 9:27 10:28 11:29 12:37 13:38; do
+	# call:status for all five workspace files, five delta files with -x, the
+	# delta rows scratch file, and the source record cache. No failed sibling
+	# can be ignored.
+	for l_temp_case in 1:9 2:11 3:12 4:13 5:23 6:24 7:25 8:26 9:27 10:28 11:29 12:38; do
 		(
 			g_option_x_exclude_datasets='excluded$'
 			FAIL_AT=${l_temp_case%:*}
@@ -2748,20 +2736,26 @@ test_write_destination_snapshot_list_to_files_reports_empty_stage_failures_when_
 }
 
 # A destination proof producer whose cleanup registration fails is stopped
-# and forgotten, and the start fails closed.
+# with explicit pid scope (never stale pgid/wrapper scope from the source
+# producer) via TERM -> KILL escalation and forgotten, failing closed.
 test_start_destination_snapshot_name_sorted_fifo_producer_stops_an_unregistered_producer() {
 	registration_output=$(
 		(
 			zxfer_get_temp_file >/dev/null || exit 1
 			test_output=$g_zxfer_runtime_artifact_path_result
+			g_zxfer_cleanup_pid_abort_grace_seconds=0
+			# Simulate stale scope left by the preceding source producer.
+			g_zxfer_background_shell_scope=pgid
 			zxfer_run_destination_zfs_cmd() {
 				printf '%s\n' "backup/dst/src@snapA"
 			}
 			zxfer_register_cleanup_pid() {
+				printf 'reg_scope=%s\n' "$3"
 				return 1
 			}
-			zxfer_abort_fast_noop_background_pid() {
-				kill "$1" 2>/dev/null || :
+			zxfer_signal_background_producer() {
+				printf 'sig=%s:%s\n' "$2" "$4"
+				[ "$2" = TERM ] || kill "$1" 2>/dev/null || :
 				return 0
 			}
 			zxfer_start_fast_noop_destination_producer \
@@ -2773,12 +2767,15 @@ test_start_destination_snapshot_name_sorted_fifo_producer_stops_an_unregistered_
 		)
 	)
 
-	assertEquals "Destination FIFO producer should fail closed and forget the producer when cleanup registration fails." \
-		"status=1 pid=<>" "$registration_output"
+	assertEquals "Destination proof producer must pass explicit pid scope, escalate TERM -> KILL, and clear g_last_background_pid." \
+		"reg_scope=pid
+sig=TERM:pid
+sig=KILL:pid
+status=1 pid=<>" "$registration_output"
 }
 
-test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
-	zxfer_abort_fast_noop_background_pid "" "invalid"
+test_signal_background_producer_covers_invalid_and_registered_first_paths() {
+	zxfer_signal_background_producer "" TERM "invalid"
 	invalid_status=$?
 	log="$TEST_TMPDIR/fast_noop_abort.log"
 	: >"$log"
@@ -2787,13 +2784,13 @@ test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
 		(exit 0) &
 		dead_pid=$!
 		wait "$dead_pid" 2>/dev/null || :
-		zxfer_abort_fast_noop_background_pid "$dead_pid" "finished proof helper"
+		zxfer_signal_background_producer "$dead_pid" TERM "finished proof helper"
 		printf 'dead_status=%s\n' "$?" >>"$log"
 	)
 	(
 		LOG_FILE="$log"
 		zxfer_abort_cleanup_pid() {
-			printf 'cleanup=%s\n' "$1" >>"$LOG_FILE"
+			printf 'cleanup=%s:%s\n' "$1" "$2" >>"$LOG_FILE"
 			return 1
 		}
 		zxfer_abort_direct_child_pid() {
@@ -2803,7 +2800,7 @@ test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
 		sleep 5 &
 		child_pid=$!
 		g_zxfer_cleanup_pid_records="$child_pid	registered proof helper"
-		zxfer_abort_fast_noop_background_pid "$child_pid" "test proof helper"
+		zxfer_signal_background_producer "$child_pid" TERM "test proof helper"
 		printf 'registered_status=%s\n' "$?" >>"$LOG_FILE"
 		command kill -s TERM "$child_pid" >/dev/null 2>&1 || :
 		wait "$child_pid" 2>/dev/null || :
@@ -2811,29 +2808,29 @@ test_abort_fast_noop_background_pid_covers_invalid_and_fallback_paths() {
 	(
 		LOG_FILE="$log"
 		zxfer_abort_direct_child_pid() {
-			printf 'direct=%s:%s\n' "$1" "$2" >>"$LOG_FILE"
+			printf 'direct=%s:%s:%s\n' "$1" "$2" "$4" >>"$LOG_FILE"
 			return 1
 		}
 		sleep 5 &
 		child_pid=$!
-		zxfer_abort_fast_noop_background_pid \
-			"$child_pid" "unregistered proof helper"
+		zxfer_signal_background_producer \
+			"$child_pid" KILL "unregistered proof helper" pgid
 		printf 'direct_status=%s\n' "$?" >>"$LOG_FILE"
 		command kill -s TERM "$child_pid" >/dev/null 2>&1 || :
 		wait "$child_pid" 2>/dev/null || :
 	)
 
-	assertEquals "Invalid fast no-op abort pids should be ignored." 0 "$invalid_status"
-	assertContains "Fast no-op abort should accept untracked helpers that already exited." \
+	assertEquals "Invalid background producer abort pids should be ignored." 0 "$invalid_status"
+	assertContains "Background producer signal should accept untracked helpers that already exited." \
 		"$(cat "$log")" "dead_status=0"
-	assertContains "Fast no-op abort should try the registered cleanup helper first." \
+	assertContains "Background producer signal should try the registered cleanup helper first." \
 		"$(cat "$log")" "cleanup="
 	assertContains "A failed identity-aware registered abort should remain a failure." \
 		"$(cat "$log")" "registered_status=1"
 	assertNotContains "A registered helper must not fall back to a weaker direct-child signal path." \
 		"$(cat "$log")" "registered_direct="
-	assertContains "Unregistered helpers should use only the identity-aware direct-child path." \
-		"$(cat "$log")" "direct="
+	assertContains "Unregistered helpers should use the direct-child path with explicit scope." \
+		"$(cat "$log")" ":KILL:pgid"
 	assertContains "A failed identity-aware direct-child abort should remain a failure." \
 		"$(cat "$log")" "direct_status=1"
 }
@@ -3102,6 +3099,154 @@ tank/src/child"
 		assertContains "Direct ksh93 parse must not alias-expand source in the delta side loop." \
 			"$l_ksh_out" "Recursive source snapshots absent from destination (name/GUID):"
 	fi
+}
+
+# Regression (R2-G1): ENVIRON[...] keeps backslash escapes like \. in -x
+# literal across all three ZXFER_SNAPSHOT_RECORD_AWK callers instead of awk -v
+# stripping the backslash so "." would match any character.
+test_snapshot_record_awk_preserves_regex_backslash_escapes_across_all_callers() {
+	input_file="$TEST_TMPDIR/record_awk_backslash.in"
+	output_file="$TEST_TMPDIR/record_awk_backslash.out"
+	err_file="$TEST_TMPDIR/record_awk_backslash.err"
+	pattern='^tank/data\.bob$'
+
+	# 1) zxfer_filter_snapshot_file_with_excludes
+	printf 'tank/data.bob@s1\t1\ntank/dataXbob@s1\t2\n' >"$input_file"
+	(
+		g_option_x_exclude_datasets=$pattern
+		zxfer_filter_snapshot_file_with_excludes "$input_file" "$output_file" 2>"$err_file"
+	)
+	assertEquals "Exclude filter must drop tank/data.bob and keep tank/dataXbob." \
+		"$(printf 'tank/dataXbob@s1\t2')" "$(cat "$output_file")"
+	assertEquals "Exclude filter must emit no awk escape warnings." "" "$(cat "$err_file")"
+
+	# 2) zxfer_normalize_destination_snapshot_list (quiet stderr + -V trace)
+	printf 'backup/dst/data.bob@s1\t1\nbackup/dst/dataXbob@s1\t2\n' >"$input_file"
+	(
+		g_option_V_very_verbose=0
+		g_initial_source="tank"
+		zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file" "$pattern" 2>"$err_file"
+	)
+	assertEquals "Destination normalizer must drop tank/data.bob and keep tank/dataXbob." \
+		"$(printf 'tank/dataXbob@s1\t2')" "$(cat "$output_file")"
+	assertEquals "Destination normalizer must emit no awk escape warnings." "" "$(cat "$err_file")"
+	trace_out=$(
+		(
+			g_option_V_very_verbose=1
+			g_initial_source="tank"
+			zxfer_normalize_destination_snapshot_list "backup/dst" "$input_file" "$output_file" "$pattern"
+		) 2>&1
+	)
+	assertContains "Destination normalizer -V trace must show ENVIRON variables without awk -v." \
+		"$trace_out" "ZXFER_AWK_EXCLUDE_PATTERN='^tank/data\\\\.bob$'"
+	assertNotContains "Destination normalizer -V trace must not pass awk -v." \
+		"$trace_out" "'-v'"
+
+	# 3) zxfer_start_source_snapshot_producer fast mode with -x
+	sorted_file="$TEST_TMPDIR/record_awk_backslash.sorted"
+	(
+		g_option_x_exclude_datasets=$pattern
+		zxfer_start_source_snapshot_producer fast \
+			"printf 'tank/data.bob@s1\t1\ntank/dataXbob@s1\t2\n'" \
+			"$sorted_file" "$err_file" || exit "$?"
+		wait "$g_last_background_pid"
+		status=$?
+		zxfer_unregister_cleanup_pid "$g_last_background_pid"
+		exit "$status"
+	)
+	assertEquals "Fast source producer with escaped dot in -x must succeed." 0 "$?"
+	assertEquals "Fast source producer must drop tank/data.bob and keep tank/dataXbob." \
+		"$(printf 'tank/dataXbob@s1\t2')" "$(cat "$sorted_file")"
+	assertEquals "Fast source producer must emit no awk escape warnings." "" "$(cat "$err_file")"
+}
+
+# Regression (R2-P2): clean -V remote destination snapshot listing emits
+# Running remote command to stderr without contaminating the captured error
+# file (preventing a spurious cat replay).
+test_write_destination_snapshot_list_keeps_remote_trace_out_of_captured_stderr() {
+	raw_file="$TEST_TMPDIR/remote_dest_list.raw"
+	sorted_file="$TEST_TMPDIR/remote_dest_list.sorted"
+	stderr_file="$TEST_TMPDIR/remote_dest_list.stderr"
+	output=$(
+		(
+			g_option_V_very_verbose=1
+			g_option_T_target_host="target.example"
+			g_target_cmd_zfs="/remote/zfs"
+			zxfer_run_destination_zfs_cmd() {
+				printf 'backup/dst/src@s1\t101\n'
+				return 0
+			}
+			zxfer_write_destination_snapshot_list_to_files "$raw_file" "$sorted_file" >/dev/null 2>"$stderr_file"
+			err_nonempty=0
+			[ ! -s "$g_zxfer_destination_listing_error_file" ] || err_nonempty=1
+			printf 'err_nonempty=%s\n' "$err_nonempty"
+		)
+	)
+	assertEquals "Clean -V remote destination listing must leave its error capture file empty." \
+		"err_nonempty=0" "$output"
+	assertContains "Clean -V remote destination listing must still emit Running remote command on stderr." \
+		"$(cat "$stderr_file")" "Running remote command [target: target.example]:"
+}
+
+# Regression (R2-P4 + R2-P6): full discovery batches discovery-delta cleanup
+# into its single end-of-discovery cleanup call (while standalone callers still
+# clean up immediately), and skips the destination timer when reusing .destination.
+test_full_discovery_batches_delta_cleanup_and_skips_reused_destination_timer() {
+	source_tmp="$TEST_TMPDIR/batched_cleanup_source.txt"
+	dest_tmp="$TEST_TMPDIR/batched_cleanup_dest.txt"
+	printf 'tank/src@s1\t1\n' >"$source_tmp"
+	printf 'tank/src@s1\t1\n' >"$dest_tmp"
+
+	standalone_cleanups=$(
+		clean_calls=0
+		zxfer_cleanup_runtime_artifact_path_list() {
+			clean_calls=$((clean_calls + 1))
+			rm -f "$@" 2>/dev/null || :
+		}
+		zxfer_set_g_recursive_source_list "$source_tmp" "$dest_tmp"
+		printf '%s\n' "$clean_calls"
+	)
+	assertEquals "Standalone zxfer_set_g_recursive_source_list must clean up its delta files immediately." \
+		1 "$standalone_cleanups"
+
+	batched_output=$(
+		(
+			g_option_R_recursive="-R"
+			g_option_V_very_verbose=1
+			g_option_x_exclude_datasets=""
+			reused_raw="$g_zxfer_run_tmp_root/reused.raw"
+			reused_sorted="$g_zxfer_run_tmp_root/reused.sorted"
+			printf 'backup/dst/src@s1\t1\n' >"$reused_raw"
+			printf 'tank/src@s1\t1\n' >"$reused_sorted"
+			g_zxfer_snapshot_discovery_destination_listing_file=$reused_raw
+			g_zxfer_snapshot_discovery_destination_sorted_file=$reused_sorted
+			clean_calls=0
+			start_calls=0
+			zxfer_profile_start_timer() {
+				start_calls=$((start_calls + 1))
+				g_zxfer_profile_clock_ms=$((start_calls * 1000))
+			}
+			zxfer_profile_stop_timer() {
+				g_zxfer_profile_clock_ms=$((g_zxfer_profile_clock_ms + 100))
+				g_zxfer_profile_elapsed_ms=100
+			}
+			zxfer_cleanup_runtime_artifact_path_list() {
+				clean_calls=$((clean_calls + 1))
+				command rm -f "$reused_raw" "$reused_sorted" 2>/dev/null || :
+			}
+			zxfer_write_source_snapshot_list_to_file() {
+				printf 'tank/src@s1\t1\n' >"$1"
+				: >"$2"
+				printf 'tank/src@s1\t1\n' >"$3"
+				g_source_snapshot_list_pid=""
+			}
+			zxfer_run_full_snapshot_discovery >/dev/null
+			printf 'clean_calls=%s start_calls=%s dest_ms=%s\n' \
+				"$clean_calls" "$start_calls" "$g_zxfer_profile_destination_snapshot_listing_ms"
+		)
+	)
+	assertEquals "Full discovery must batch discovery-delta cleanup into 1 call and skip the destination timer on reused sorted input." \
+		"clean_calls=1 start_calls=1 dest_ms=0" "$batched_output"
 }
 
 # shellcheck source=tests/shunit2/shunit2
