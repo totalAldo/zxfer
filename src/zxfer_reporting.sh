@@ -107,8 +107,8 @@ b' in
 esac
 
 # Purpose: Escape VALUE for a report, and optionally single-quote it, in one
-# LC_ALL=C scope on the in-shell fast path; restores LC_ALL before any awk
-# fallback so no external command runs with unexported LC_ALL=C.
+# exported LC_ALL=C scope on the in-shell fast path; restores LC_ALL before
+# any awk fallback so no external command inherits the temporary export.
 # Usage: zxfer_escape_or_quote_report_value VALUE QUOTE(0|1); publishes
 # g_zxfer_escaped_report_value_result (and g_zxfer_quoted_report_token_result
 # when QUOTE is 1).
@@ -122,7 +122,9 @@ zxfer_escape_or_quote_report_value() {
 	fi
 	l_report_escape_fast_ok=0
 	if [ "$g_zxfer_report_fast_path" = 1 ]; then
+		# Export LC_ALL so FreeBSD /bin/sh applies C even when LANG is exported.
 		LC_ALL=C
+		export LC_ALL
 		# Printable ASCII without backslashes needs no escaping; bounded
 		# values containing only printable ASCII plus \, TAB, CR, or LF are
 		# escaped in-shell. Checking under LC_ALL=C keeps multibyte locales
@@ -200,6 +202,7 @@ BEGIN {
 	g_zxfer_escaped_report_value_result=$l_report_escape_val
 	if [ "$2" -eq 1 ]; then
 		LC_ALL=C
+		export LC_ALL
 		zxfer_replace_all_into_result "$l_report_escape_val" "'" "'\"'\"'"
 		if [ "$l_report_escape_had_lc_all" -eq 1 ]; then
 			LC_ALL=$l_report_escape_saved_lc_all

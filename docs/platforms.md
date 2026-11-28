@@ -36,6 +36,13 @@ bash 3.2, macOS's `/bin/sh`, and ksh93 on macOS match a bracket range such
 as `[0-9]` in a `case` pattern by locale collation under UTF-8, whereas dash,
 bash 5 and zsh compare code points; both `src/` and `tests/` spell out explicit
 ASCII character lists (`[0123456789]`) instead.
+FreeBSD `/bin/sh` ignores an unexported `LC_ALL=C` assignment when `LANG` is
+exported in the environment, so in-shell byte-length and `[[:print:]]` scopes
+export `LC_ALL` for the builtin-only check and restore or unset it before any
+external command runs. FreeBSD `/bin/sh` also aborts a non-interactive shell on
+a failed redirection attached directly to a shell function, so file-backed
+stderr capture pre-opens the target path with the regular builtin `printf`
+before redirecting the role runner.
 Dynamic AWK inputs — including `-x` exclude patterns in
 `ZXFER_SNAPSHOT_RECORD_AWK` — travel through exported `ENVIRON[...]` entries
 rather than `awk -v` so regex backslash escapes (such as `\.`) stay literal

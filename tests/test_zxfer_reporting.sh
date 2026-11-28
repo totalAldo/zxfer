@@ -593,6 +593,21 @@ test_zxfer_report_quoting_renders_invalid_multibyte_bytes_under_utf8() {
 		zxfer_quote_token_for_report "$fast_token" 2>"$stderr_log"
 	)
 	fast_stderr=$(cat "$stderr_log")
+	mb_awk_log="$TEST_TMPDIR/report-quoting-utf8-mb-awk.log"
+	rm -f "$mb_awk_log"
+	mb_euro=$(printf '\342\202\254')
+	mb_lang_output=$(
+		unset LC_ALL
+		LANG=$utf8_locale
+		export LANG
+		g_cmd_awk=zxfer_test_logging_mb_awk
+		zxfer_test_logging_mb_awk() {
+			printf 'awk\n' >>"$mb_awk_log"
+			command awk "$@"
+		}
+		zxfer_escape_report_value_into_result "$mb_euro"
+		printf 'lc=%s val=<%s>\n' "${LC_ALL-unset}" "$g_zxfer_escaped_report_value_result"
+	)
 
 	assertEquals "An invalid UTF-8 byte should pass through while control bytes are escaped." \
 		"'a${byte_ff}\\x01'" "$quote_output"
@@ -603,6 +618,10 @@ test_zxfer_report_quoting_renders_invalid_multibyte_bytes_under_utf8() {
 	assertEquals "A printable-looking invalid UTF-8 token should render unchanged." \
 		"'${byte_ff}z'" "$fast_output"
 	assertEquals "Rendering a printable-looking invalid UTF-8 token should not warn." "" "$fast_stderr"
+	assertEquals "Printable UTF-8 multibyte text under exported LANG must still honor exported LC_ALL=C and leave LC_ALL unset." \
+		"lc=unset val=<$mb_euro>" "$mb_lang_output"
+	assertEquals "Bytes >= 0x80 under exported LANG must take the awk fallback under exported LC_ALL=C." \
+		"awk" "$(cat "$mb_awk_log" 2>/dev/null)"
 }
 
 test_verbose_printers_print_text_as_written_only_at_their_level() {

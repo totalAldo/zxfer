@@ -182,6 +182,7 @@ test_zfs_command_for_role_chunks_long_single_args_but_keeps_multi_arg_commands_p
 		# 15 short properties push the total command past 768 bytes, but every
 		# individual word stays well below 768 bytes and must remain plain.
 		LC_ALL=$l_utf8_locale
+		export LC_ALL
 		zxfer_render_zfs_command_for_role destination set \
 			"user:p01=$l_x32$l_x32" "user:p02=$l_x32$l_x32" "user:p03=$l_x32$l_x32" \
 			"user:p04=$l_x32$l_x32" "user:p05=$l_x32$l_x32" "user:p06=$l_x32$l_x32" \
@@ -199,6 +200,7 @@ test_zfs_command_for_role_chunks_long_single_args_but_keeps_multi_arg_commands_p
 		# arg whose escaped word exceeds 768 bytes must all route via sh -c.
 		unset LC_ALL
 		LANG=$l_utf8_locale
+		export LANG
 		for l_case_tag in ascii multibyte quotes; do
 			case $l_case_tag in
 			ascii) l_val=$l_x800 ;;
@@ -209,7 +211,7 @@ test_zfs_command_for_role_chunks_long_single_args_but_keeps_multi_arg_commands_p
 			l_remote_cmd=$(/bin/sh -c "set -- $g_zxfer_shell_command_result; shift \$(( \$# - 1 )); printf '%s' \"\$1\"")
 			l_max_word=$(printf '%s\n' "$l_remote_cmd" | zxfer_test_max_rendered_shell_word_bytes)
 			case $l_remote_cmd in
-			"'sh' '-c' "*) l_form=chunked ;;
+			"'sh' '-c' 'l_nl="*) l_form=chunked ;;
 			*) l_form=plain ;;
 			esac
 			printf '%s=%s|under1020=%s|lc=%s\n' "$l_case_tag" "$l_form" \
@@ -260,19 +262,32 @@ ${l_x128}xx
 }
 
 test_build_remote_sh_c_command_restores_lc_all_and_publishes_its_result() {
-	l_lc_all_output=$(
+	l_utf8_locale=$(zxfer_test_find_utf8_locale)
+	l_mb_char=$(printf '\342\202\254')
+	l_mb8=$l_mb_char$l_mb_char$l_mb_char$l_mb_char$l_mb_char$l_mb_char$l_mb_char$l_mb_char
+	l_mb64=$l_mb8$l_mb8$l_mb8$l_mb8$l_mb8$l_mb8$l_mb8$l_mb8
+	l_mb264=$l_mb64$l_mb64$l_mb64$l_mb64$l_mb8
+	l_lc_all_file="$TEST_TMPDIR/build_remote_sh_c_lc_all.out"
+	(
 		LC_ALL=POSIX
+		export LC_ALL
 		zxfer_build_remote_sh_c_command 'exit 7'
 		printf 'set=%s result=%s\n' "${LC_ALL-unset}" "$g_zxfer_shell_command_result"
 		unset LC_ALL
-		zxfer_build_remote_sh_c_command 'a
-b'
-		printf 'unset=%s\n' "${LC_ALL-unset}"
-	)
+		LANG=$l_utf8_locale
+		export LANG
+		zxfer_build_remote_sh_c_command "printf '%s' '$l_mb264'"
+		case $g_zxfer_shell_command_result in
+		"'sh' '-c' 'l_nl="*) l_mb_form=chunked ;;
+		*) l_mb_form=plain ;;
+		esac
+		printf 'unset=%s mb=%s\n' "${LC_ALL-unset}" "$l_mb_form"
+	) >"$l_lc_all_file"
+	l_lc_all_output=$(cat "$l_lc_all_file")
 
-	assertEquals "The renderer should restore a set LC_ALL, clear an unset one, and publish its result in the current shell." \
+	assertEquals "The renderer should restore a set LC_ALL, chunk multibyte >768B scripts under exported LANG while keeping LC_ALL unset, and publish its result in the current shell." \
 		"set=POSIX result='sh' '-c' 'exit 7'
-unset=unset" "$l_lc_all_output"
+unset=unset mb=chunked" "$l_lc_all_output"
 }
 
 test_build_remote_sh_c_command_retains_input_from_the_canonical_result() {
@@ -1008,12 +1023,14 @@ test_ssh_control_socket_path_length_check_counts_utf8_bytes_and_restores_lc_all(
 	l_utf8_locale=$(zxfer_test_find_utf8_locale)
 	l_out=$(
 		LC_ALL=$l_utf8_locale
+		export LC_ALL
 		zxfer_is_ssh_control_socket_path_short_enough "$l_mb_long"
 		l_long_set=$?
 		l_lc_after_set=${LC_ALL-unset}
 
 		unset LC_ALL
 		LANG=$l_utf8_locale
+		export LANG
 		zxfer_is_ssh_control_socket_path_short_enough "$l_mb_long"
 		l_long_unset=$?
 		zxfer_is_ssh_control_socket_path_short_enough "$l_mb_short"

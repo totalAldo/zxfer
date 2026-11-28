@@ -428,8 +428,11 @@ zxfer_build_remote_sh_c_command() {
 	l_shc_lc_all_set=${LC_ALL+1}
 	l_shc_lc_all=${LC_ALL-}
 	# In the C locale each `?` in ZXFER_SSH_SH_C_*_PATTERN matches exactly
-	# one byte, and every quote byte is escaped.
+	# one byte, and every quote byte is escaped. Export LC_ALL so FreeBSD
+	# /bin/sh applies C even when LANG is exported; no external command runs
+	# before LC_ALL is restored.
 	LC_ALL=C
+	export LC_ALL
 	l_shc_chunked=1
 
 	case $l_shc_script in
@@ -580,7 +583,9 @@ zxfer_zfs_command_for_role() {
 		# only inspect individual arguments when the full command exceeds 768 bytes.
 		l_zfs_dispatch_lc_all_set=${LC_ALL+1}
 		l_zfs_dispatch_lc_all=${LC_ALL-}
+		# Export LC_ALL so FreeBSD /bin/sh matches bytes even when LANG is exported.
 		LC_ALL=C
+		export LC_ALL
 		case $g_zxfer_shell_command_result in
 		$ZXFER_SSH_SH_C_PLAIN_PATTERN?*)
 			for l_zfs_dispatch_arg in "$l_zfs_dispatch_zfs" "$@"; do
@@ -694,7 +699,12 @@ zxfer_run_zfs_cmd_capturing_stderr() {
 		# shellcheck disable=SC2069 # Capture stderr on stdout and discard stdout.
 		"$l_capture_runner" "$@" 2>&1 >/dev/null
 		;;
-	*) "$l_capture_runner" "$@" 2>|"$l_capture_stderr" ;;
+	*)
+		# Pre-open via a regular builtin so a bad path returns 1 instead of
+		# aborting FreeBSD /bin/sh on a function redirection failure.
+		printf '' >|"$l_capture_stderr" || return 1
+		"$l_capture_runner" "$@" 2>|"$l_capture_stderr"
+		;;
 	esac
 }
 
@@ -736,7 +746,9 @@ zxfer_is_ssh_control_socket_path_short_enough() {
 	l_socket_path_lc_all_set=${LC_ALL+1}
 	l_socket_path_lc_all=${LC_ALL-}
 	# Measure bytes rather than locale characters against sun_path's 104-byte limit.
+	# Export LC_ALL so FreeBSD /bin/sh applies C even when LANG is exported.
 	LC_ALL=C
+	export LC_ALL
 	l_socket_path_status=0
 	[ "${#l_socket_temp_listener_path}" -lt "$ZXFER_SSH_CONTROL_SOCKET_PATH_MAX" ] ||
 		l_socket_path_status=1
