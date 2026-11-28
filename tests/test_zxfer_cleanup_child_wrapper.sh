@@ -401,7 +401,7 @@ EOF
 	chmod +x "$l_fake_awk"
 
 	capture_case() {
-		LC_ALL=fr_FR
+		LC_ALL=POSIX
 		export LC_ALL
 		g_cmd_awk=$l_fake_awk
 		ps() {

@@ -127,6 +127,14 @@ EOF
 	chmod +x "$l_zxfer_test_remote_sh_capture_path"
 }
 
+zxfer_test_find_utf8_locale() {
+	l_found_utf8_locale=$(locale -a 2>/dev/null | grep -i -E '^(C|en_US)\.utf-?8$' | head -n 1)
+	if [ -z "$l_found_utf8_locale" ]; then
+		l_found_utf8_locale=$(locale -a 2>/dev/null | grep -i -E '(^|\.)utf-?8$' | head -n 1)
+	fi
+	printf '%s\n' "${l_found_utf8_locale:-POSIX}"
+}
+
 test_run_destination_zfs_cmd_preserves_multiline_arguments_through_a_csh_login_shell() {
 	l_csh_shell=$(find_csh_shell_for_tests)
 	if [ "$l_csh_shell" = "" ]; then
@@ -164,6 +172,7 @@ test_zfs_command_for_role_chunks_long_single_args_but_keeps_multi_arg_commands_p
 	l_q256=$l_q64$l_q64$l_q64$l_q64
 
 	l_out_file="$TEST_TMPDIR/long_single_arg.out"
+	l_utf8_locale=$(zxfer_test_find_utf8_locale)
 	(
 		g_cmd_ssh=/usr/bin/ssh
 		g_target_cmd_zfs=/target/sbin/zfs
@@ -172,7 +181,7 @@ test_zfs_command_for_role_chunks_long_single_args_but_keeps_multi_arg_commands_p
 
 		# 15 short properties push the total command past 768 bytes, but every
 		# individual word stays well below 768 bytes and must remain plain.
-		LC_ALL=en_US.UTF-8
+		LC_ALL=$l_utf8_locale
 		zxfer_render_zfs_command_for_role destination set \
 			"user:p01=$l_x32$l_x32" "user:p02=$l_x32$l_x32" "user:p03=$l_x32$l_x32" \
 			"user:p04=$l_x32$l_x32" "user:p05=$l_x32$l_x32" "user:p06=$l_x32$l_x32" \
@@ -189,7 +198,7 @@ test_zfs_command_for_role_chunks_long_single_args_but_keeps_multi_arg_commands_p
 		# A >768-byte ASCII arg, a >768-byte multibyte arg, and a quote-heavy
 		# arg whose escaped word exceeds 768 bytes must all route via sh -c.
 		unset LC_ALL
-		LANG=en_US.UTF-8
+		LANG=$l_utf8_locale
 		for l_case_tag in ascii multibyte quotes; do
 			case $l_case_tag in
 			ascii) l_val=$l_x800 ;;
@@ -210,7 +219,7 @@ test_zfs_command_for_role_chunks_long_single_args_but_keeps_multi_arg_commands_p
 	l_out=$(cat "$l_out_file")
 
 	assertEquals "Normal multi-property commands stay plain; long single arguments route via chunked sh -c while restoring LC_ALL." \
-		"multi=plain|lc=en_US.UTF-8
+		"multi=plain|lc=$l_utf8_locale
 ascii=chunked|under1020=yes|lc=unset
 multibyte=chunked|under1020=yes|lc=unset
 quotes=chunked|under1020=yes|lc=unset" "$l_out"
@@ -996,14 +1005,15 @@ test_ssh_control_socket_path_length_check_counts_utf8_bytes_and_restores_lc_all(
 	# 20 UTF-8 3-byte chars = 60 bytes; total = 84 bytes (< 104).
 	l_mb_short="/tmp/$l_mb5$l_mb5$l_mb5$l_mb5/s"
 
+	l_utf8_locale=$(zxfer_test_find_utf8_locale)
 	l_out=$(
-		LC_ALL=en_US.UTF-8
+		LC_ALL=$l_utf8_locale
 		zxfer_is_ssh_control_socket_path_short_enough "$l_mb_long"
 		l_long_set=$?
 		l_lc_after_set=${LC_ALL-unset}
 
 		unset LC_ALL
-		LANG=en_US.UTF-8
+		LANG=$l_utf8_locale
 		zxfer_is_ssh_control_socket_path_short_enough "$l_mb_long"
 		l_long_unset=$?
 		zxfer_is_ssh_control_socket_path_short_enough "$l_mb_short"
@@ -1015,7 +1025,7 @@ test_ssh_control_socket_path_length_check_counts_utf8_bytes_and_restores_lc_all(
 	)
 
 	assertEquals "sun_path validation must bound multibyte paths by UTF-8 byte length and restore LC_ALL." \
-		"long_set=1|lc_set=en_US.UTF-8|long_unset=1|short_unset=0|lc_unset=unset" "$l_out"
+		"long_set=1|lc_set=$l_utf8_locale|long_unset=1|short_unset=0|lc_unset=unset" "$l_out"
 }
 
 test_zxfer_remove_ssh_control_socket_dir_removes_only_ssh_names_and_fails_closed() {

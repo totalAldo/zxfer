@@ -53,8 +53,8 @@ tank/src/child@s1	100
 tank/src@dest-only	333
 tank/src@same	999
 EOF
-	LC_ALL=C sort "$source_file" -o "$source_file"
-	LC_ALL=C sort "$dest_file" -o "$dest_file"
+	LC_ALL=C sort -o "$source_file" "$source_file"
+	LC_ALL=C sort -o "$dest_file" "$dest_file"
 	LC_ALL=C comm -3 "$source_file" "$dest_file" >"$diff_file"
 
 	zxfer_collect_snapshot_delta_lists "$diff_file" "$missing_file" "$extra_file" \

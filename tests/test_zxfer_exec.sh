@@ -317,7 +317,7 @@ EOF
 
 	l_out=$(
 		PATH="$l_ps_dir:$PATH"
-		LC_ALL=fr_FR
+		LC_ALL=POSIX
 		export LC_ALL
 		l_launcher_live=1
 		kill() {
@@ -342,7 +342,7 @@ status=0" "$l_out"
 
 test_spawn_background_shell_preserves_preexisting_monitor_mode() {
 	zxfer_test_send_job_fixture_setup
-	if ! (set -m 2>/dev/null); then
+	if ! (set -m 2>/dev/null && [ "${-#*m}" != "$-" ]); then
 		startSkipping
 		assertTrue "Shell does not allow set -m in a subshell; skipped." true
 		endSkipping

@@ -596,7 +596,7 @@ tank/src/B"
 			printf 'sort_lc=%s\n' "${LC_ALL-unset}" >>"$QUEUE_LOG"
 			LC_ALL=C command sort "$@"
 		}
-		LC_ALL=en_US.UTF-8
+		LC_ALL=POSIX
 		export LC_ALL
 		zxfer_copy_filesystems
 	)
